@@ -1,0 +1,25 @@
+# Dependencies (this project is zero-dep, but just in case)
+node_modules/
+
+# Git worktrees (see CONTRIBUTING.md)
+.trees/
+
+# Logs
+*.log
+logs/
+
+# Local env / secrets
+.env
+.env.*
+
+# Claude Code local settings (keep launch.json shared)
+.claude/settings.local.json
+
+# Editors
+.vscode/
+.idea/
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
