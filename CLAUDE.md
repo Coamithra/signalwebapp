@@ -2,6 +2,10 @@
 
 Guidance for Claude Code (and humans) working in this repo. Read before editing.
 
+> **Making a change?** Follow the card → worktree → PR workflow in
+> **[CONTRIBUTING.md](CONTRIBUTING.md)**. This file covers *architecture and conventions*;
+> CONTRIBUTING.md covers *how to pick up a card and ship it*.
+
 ## What this is
 
 A **local web UI for Signal**. It does *not* reimplement Signal's protocol — it bridges
