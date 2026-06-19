@@ -8,11 +8,24 @@
 
 import { EventEmitter } from 'node:events';
 
+// Per-host timeout for the /json probe. The DevTools HTTP endpoint is local and
+// answers in milliseconds; the cap just stops a hung/half-open host from
+// blocking the next candidate (and thus defeating the IPv4→IPv6 fallback).
+const PROBE_TIMEOUT_MS = 2500;
+
 export class CdpClient extends EventEmitter {
   /** @param {{ host?: string, port?: number }} [opts] */
   constructor(opts = {}) {
     super();
-    this.host = opts.host || 'localhost';
+    // Candidate CDP hosts to probe, in order. Chromium's --remote-debugging-port
+    // binds IPv4 loopback (127.0.0.1); the bare name 'localhost' can resolve
+    // IPv6-first (::1) and miss Signal entirely, or hit an unrelated debug target
+    // squatting on ::1:9222. So when no host is pinned we try IPv4 then IPv6 and
+    // only accept the one actually exposing Signal's background.html. An explicit
+    // host (SIGNAL_CDP_HOST) is used verbatim as the sole candidate — the escape
+    // hatch — so e.g. SIGNAL_CDP_HOST=localhost preserves the old behavior.
+    this._hostCandidates = opts.host ? [opts.host] : ['127.0.0.1', '::1'];
+    this.host = this._hostCandidates[0]; // updated to the host that resolves
     this.port = opts.port || 9222;
     /** @type {WebSocket|null} */
     this.ws = null;
@@ -31,7 +44,14 @@ export class CdpClient extends EventEmitter {
   }
 
   get httpBase() {
-    return `http://${this.host}:${this.port}`;
+    return this._baseFor(this.host);
+  }
+
+  /** HTTP base URL for a host, bracketing IPv6 literals (e.g. ::1 -> [::1]). */
+  _baseFor(host) {
+    const bare = host.replace(/^\[|\]$/g, ''); // tolerate a pre-bracketed literal
+    const h = bare.includes(':') ? `[${bare}]` : bare;
+    return `http://${h}:${this.port}`;
   }
 
   /** Begin connecting; auto-reconnects until close() is called. */
@@ -50,20 +70,41 @@ export class CdpClient extends EventEmitter {
     }
   }
 
-  /** Resolve the renderer page target (background.html) from CDP's HTTP API. */
+  /**
+   * Resolve the renderer page target (background.html) from CDP's HTTP API.
+   * Probes each candidate host (with a short per-host timeout so a hung host
+   * doesn't block the next) and accepts only one whose /json actually lists
+   * Signal's background.html — so an unrelated debug target on another loopback
+   * address (e.g. a separate Chrome on ::1) is skipped rather than connected to.
+   * The winning host is recorded on `this.host` so httpBase/diagnostics reflect
+   * it; the WebSocket leg follows page.webSocketDebuggerUrl, which Chromium keys
+   * to the same loopback we queried.
+   */
   async _findRendererTarget() {
-    const res = await fetch(`${this.httpBase}/json`);
-    if (!res.ok) throw new Error(`CDP /json returned ${res.status}`);
-    const targets = await res.json();
-    const page = targets.find(
-      (t) => t.type === 'page' && /background\.html/.test(t.url || ''),
-    );
-    if (!page) {
-      throw new Error(
-        'Signal renderer (background.html) not found among CDP targets. Is Signal running with --remote-debugging-port?',
-      );
+    const errors = [];
+    for (const host of this._hostCandidates) {
+      try {
+        const res = await fetch(`${this._baseFor(host)}/json`, {
+          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        });
+        if (!res.ok) throw new Error(`CDP /json returned ${res.status}`);
+        const targets = await res.json();
+        const page = targets.find(
+          (t) => t.type === 'page' && /background\.html/.test(t.url || ''),
+        );
+        if (page) {
+          this.host = host;
+          return page;
+        }
+        throw new Error(`no background.html among ${targets.length} target(s)`);
+      } catch (err) {
+        errors.push(`${host}: ${err.message}`);
+      }
     }
-    return page;
+    throw new Error(
+      `Signal renderer (background.html) not found on port ${this.port}. ` +
+        `Is Signal running with --remote-debugging-port? (${errors.join('; ')})`,
+    );
   }
 
   async _connect() {

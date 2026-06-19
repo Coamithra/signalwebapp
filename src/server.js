@@ -16,10 +16,12 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const PORT = Number(process.env.PORT || 7700);
 const HOST = '127.0.0.1';
 const CDP_PORT = Number(process.env.SIGNAL_CDP_PORT || 9222);
-// Chromium's remote-debugging endpoint binds IPv4 loopback. On hosts where
-// `localhost` resolves to IPv6 (::1) first, the default can miss Signal (or hit
-// an unrelated debug target on ::1). Override with SIGNAL_CDP_HOST=127.0.0.1.
-const CDP_HOST = process.env.SIGNAL_CDP_HOST || 'localhost';
+// Chromium's remote-debugging endpoint binds IPv4 loopback. When unset, the CDP
+// client auto-probes 127.0.0.1 then ::1 and accepts whichever actually exposes
+// Signal's background.html — so a `localhost` that resolves IPv6-first, or an
+// unrelated debug target on ::1, no longer misses Signal. SIGNAL_CDP_HOST pins a
+// single host as an escape hatch.
+const CDP_HOST = process.env.SIGNAL_CDP_HOST || undefined;
 
 const bridge = new SignalBridge({ host: CDP_HOST, port: CDP_PORT });
 

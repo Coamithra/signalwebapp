@@ -109,10 +109,11 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 
 ## Configuration
 
-| Env var            | Default | Purpose                          |
-|--------------------|---------|----------------------------------|
-| `PORT`             | `7700`  | Web server port                  |
-| `SIGNAL_CDP_PORT`  | `9222`  | Signal Desktop remote-debug port |
+| Env var            | Default       | Purpose                          |
+|--------------------|---------------|----------------------------------|
+| `PORT`             | `7700`        | Web server port                  |
+| `SIGNAL_CDP_PORT`  | `9222`        | Signal Desktop remote-debug port |
+| `SIGNAL_CDP_HOST`  | auto (probe)  | Pin the CDP host. Unset: probe `127.0.0.1` then `::1` and accept whichever exposes Signal. Set to one host (e.g. `127.0.0.1`) as an escape hatch. |
 
 ## Architecture
 
