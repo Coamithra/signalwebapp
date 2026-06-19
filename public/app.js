@@ -339,6 +339,7 @@ async function openConversation(id) {
   }
 
   const token = ++openToken;
+  pendingRefresh = false; // switching threads drops any refresh deferred for the old one
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(id)}/messages`);
     if (token !== openToken) return; // a newer open superseded this
@@ -352,12 +353,25 @@ async function openConversation(id) {
 }
 
 let refreshTimer = null;
+let pendingRefresh = false;
 function scheduleRefreshActive() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(refreshActiveMessages, 150);
 }
+// True when the user has an active (non-collapsed) text selection inside the
+// thread. A background refresh would replaceChildren() and wipe it mid-copy.
+function selectionInMessages() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+  const messages = $('#messages');
+  return !!messages && messages.contains(sel.getRangeAt(0).commonAncestorContainer);
+}
 async function refreshActiveMessages() {
   if (!state.activeId) return;
+  // Don't clobber a live selection — defer until it clears (see selectionchange
+  // handler in init()), otherwise the rebuild deselects text the user is copying.
+  if (selectionInMessages()) { pendingRefresh = true; return; }
+  pendingRefresh = false;
   const id = state.activeId;
   try {
     const data = await api(`/api/conversations/${encodeURIComponent(id)}/messages`);
@@ -491,6 +505,29 @@ function init() {
   $('#messages').addEventListener('scroll', () => {
     const m = $('#messages');
     state.nearBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 120;
+  });
+
+  // Double-click a bubble to select all its text (easy copy). Skip bubbles with
+  // no real text (media-only, placeholders, the blank-bubble filler) so the
+  // browser's native double-click behavior is left intact there.
+  $('#messages').addEventListener('dblclick', (e) => {
+    const bubble = e.target.closest('.bubble');
+    if (!bubble) return;
+    const hasText = [...bubble.childNodes].some(
+      (n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim(),
+    );
+    if (!hasText) return;
+    const sel = window.getSelection();
+    if (!sel) return;
+    const range = document.createRange();
+    range.selectNodeContents(bubble);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+
+  // Once a deferred-protected selection clears, run the refresh we held back.
+  document.addEventListener('selectionchange', () => {
+    if (pendingRefresh && !selectionInMessages()) refreshActiveMessages();
   });
 
   $('#loadOlder').addEventListener('click', async () => {
