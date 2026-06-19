@@ -209,8 +209,10 @@ export const INSTALL_SCRIPT = `(function () {
         } else {
           // loadNewestMessages() RESETS the loaded window to just the newest page,
           // which would discard any older messages the user expanded via "Load
-          // older". The background refresh (triggered by the same redux change
-          // loadOlder causes, and by every new message) hits this path, so calling
+          // older". This no-older path also serves the initial open (redux
+          // empty -> loadNewestMessages). The background refresh (triggered by
+          // the same redux change loadOlder causes, and by every new message)
+          // hits this path, so calling
           // it unconditionally makes "Load older" appear broken: the older messages
           // flash in, then the next refresh collapses them away. Only (re)load when
           // the newest message isn't already in the window — once it is, redux
