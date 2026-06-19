@@ -8,6 +8,11 @@
 
 import { EventEmitter } from 'node:events';
 
+// Per-host timeout for the /json probe. The DevTools HTTP endpoint is local and
+// answers in milliseconds; the cap just stops a hung/half-open host from
+// blocking the next candidate (and thus defeating the IPv4→IPv6 fallback).
+const PROBE_TIMEOUT_MS = 2500;
+
 export class CdpClient extends EventEmitter {
   /** @param {{ host?: string, port?: number }} [opts] */
   constructor(opts = {}) {
@@ -42,9 +47,10 @@ export class CdpClient extends EventEmitter {
     return this._baseFor(this.host);
   }
 
-  /** HTTP base URL for a host, bracketing bare IPv6 literals (e.g. ::1). */
+  /** HTTP base URL for a host, bracketing IPv6 literals (e.g. ::1 -> [::1]). */
   _baseFor(host) {
-    const h = host.includes(':') ? `[${host}]` : host;
+    const bare = host.replace(/^\[|\]$/g, ''); // tolerate a pre-bracketed literal
+    const h = bare.includes(':') ? `[${bare}]` : bare;
     return `http://${h}:${this.port}`;
   }
 
@@ -66,17 +72,21 @@ export class CdpClient extends EventEmitter {
 
   /**
    * Resolve the renderer page target (background.html) from CDP's HTTP API.
-   * Probes each candidate host and accepts only one whose /json actually lists
+   * Probes each candidate host (with a short per-host timeout so a hung host
+   * doesn't block the next) and accepts only one whose /json actually lists
    * Signal's background.html — so an unrelated debug target on another loopback
    * address (e.g. a separate Chrome on ::1) is skipped rather than connected to.
-   * Remembers the winning host on `this.host` (it's woven into the returned
-   * webSocketDebuggerUrl) so reconnects reuse it.
+   * The winning host is recorded on `this.host` so httpBase/diagnostics reflect
+   * it; the WebSocket leg follows page.webSocketDebuggerUrl, which Chromium keys
+   * to the same loopback we queried.
    */
   async _findRendererTarget() {
-    let lastErr;
+    const errors = [];
     for (const host of this._hostCandidates) {
       try {
-        const res = await fetch(`${this._baseFor(host)}/json`);
+        const res = await fetch(`${this._baseFor(host)}/json`, {
+          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        });
         if (!res.ok) throw new Error(`CDP /json returned ${res.status}`);
         const targets = await res.json();
         const page = targets.find(
@@ -86,16 +96,14 @@ export class CdpClient extends EventEmitter {
           this.host = host;
           return page;
         }
-        lastErr = new Error(
-          `no background.html among ${targets.length} target(s) on ${host}`,
-        );
+        throw new Error(`no background.html among ${targets.length} target(s)`);
       } catch (err) {
-        lastErr = err;
+        errors.push(`${host}: ${err.message}`);
       }
     }
     throw new Error(
-      `Signal renderer (background.html) not found on ${this._hostCandidates.join(', ')}:${this.port}. ` +
-        `Is Signal running with --remote-debugging-port? (last: ${lastErr?.message})`,
+      `Signal renderer (background.html) not found on port ${this.port}. ` +
+        `Is Signal running with --remote-debugging-port? (${errors.join('; ')})`,
     );
   }
 
