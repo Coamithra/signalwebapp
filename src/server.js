@@ -90,6 +90,30 @@ function readBody(req) {
 const ATTACH_CACHE = new Map(); // key -> { buf: Buffer, contentType: string }
 let attachCacheBytes = 0;
 const ATTACH_CACHE_MAX = 64 * 1024 * 1024;
+// In-flight fetches, keyed identically to the cache. A <video> fires several
+// Range requests at once; without this each would do its own CDP round-trip and
+// base64 decode of the whole file. Concurrent misses share one promise instead.
+const ATTACH_INFLIGHT = new Map(); // key -> Promise<{ entry } | { error }>
+
+// Resolve an attachment to a cache entry, deduping concurrent identical misses.
+function loadAttachment(key, messageId, index, thumb) {
+  const cached = attachCacheGet(key);
+  if (cached) return Promise.resolve({ entry: cached });
+  let pending = ATTACH_INFLIGHT.get(key);
+  if (!pending) {
+    pending = bridge.getAttachment(messageId, index, { thumbnail: thumb })
+      .then((r) => {
+        if (!r || !r.ok) return { error: (r && r.error) || 'attachment-error' };
+        const buf = Buffer.from(r.base64, 'base64');
+        const entry = { buf, contentType: r.contentType || 'application/octet-stream' };
+        attachCachePut(key, buf, entry.contentType);
+        return { entry };
+      })
+      .finally(() => ATTACH_INFLIGHT.delete(key));
+    ATTACH_INFLIGHT.set(key, pending);
+  }
+  return pending;
+}
 
 function attachCacheGet(key) {
   const v = ATTACH_CACHE.get(key);
@@ -99,6 +123,8 @@ function attachCacheGet(key) {
 
 function attachCachePut(key, buf, contentType) {
   if (buf.length > ATTACH_CACHE_MAX) return; // never cache larger than the whole budget
+  const old = ATTACH_CACHE.get(key);
+  if (old) attachCacheBytes -= old.buf.length; // overwriting: drop the stale size first
   ATTACH_CACHE.set(key, { buf, contentType });
   attachCacheBytes += buf.length;
   while (attachCacheBytes > ATTACH_CACHE_MAX && ATTACH_CACHE.size > 1) {
@@ -255,20 +281,14 @@ const server = http.createServer(async (req, res) => {
       const thumb = url.searchParams.get('thumb') === '1';
       const key = `${messageId}:${index}${thumb ? ':t' : ''}`;
 
-      let entry = attachCacheGet(key);
-      if (!entry) {
-        const r = await bridge.getAttachment(messageId, index, { thumbnail: thumb });
-        if (!r || !r.ok) {
-          const code = r && r.error === 'too-large' ? 413
-            : r && (r.error === 'pending' || r.error === 'no-path') ? 409
-            : 404;
-          return sendJson(res, code, { error: (r && r.error) || 'attachment-error' });
-        }
-        const buf = Buffer.from(r.base64, 'base64');
-        entry = { buf, contentType: r.contentType || 'application/octet-stream' };
-        attachCachePut(key, buf, entry.contentType);
+      const out = await loadAttachment(key, messageId, index, thumb);
+      if (out.error) {
+        const code = out.error === 'too-large' ? 413
+          : (out.error === 'pending' || out.error === 'no-path') ? 409
+          : 404;
+        return sendJson(res, code, { error: out.error });
       }
-      return serveBuffer(req, res, entry.buf, entry.contentType, key);
+      return serveBuffer(req, res, out.entry.buf, out.entry.contentType, key);
     }
 
     // /api/conversations/:id/send

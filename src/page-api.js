@@ -81,7 +81,8 @@ export const INSTALL_SCRIPT = `(function () {
   }
 
   // Largest attachment we will inline. Bigger files keep the chip — base64 over
-  // CDP for a huge video would be slow and memory-heavy. Mirrors the server.
+  // CDP for a huge video would be slow and memory-heavy. (Separate from the
+  // server's larger byte cache; this is just the per-fetch inline ceiling.)
   var MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
   // Build the renderer-only URL for an attachment. Signal registers an
@@ -248,10 +249,14 @@ export const INSTALL_SCRIPT = `(function () {
         }
         if (a.pending) return { ok: false, error: 'pending' };
         if (!a.path) return { ok: false, error: 'no-path' };
+        if ((a.version || 1) >= 2 && !a.localKey) return { ok: false, error: 'no-key' };
         if (a.size && a.size > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: a.size };
         var r = await fetch(attachmentUrl(a));
         if (!r.ok) return { ok: false, error: 'fetch-failed', status: r.status };
         var buf = await r.arrayBuffer();
+        // Re-check against actual bytes: some attachments carry no size field,
+        // which would otherwise bypass the inline cap above.
+        if (buf.byteLength > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: buf.byteLength };
         return {
           ok: true,
           contentType: a.contentType || 'application/octet-stream',
