@@ -111,6 +111,10 @@ export class SignalBridge extends EventEmitter {
     return this._call('getMessages', id, opts);
   }
 
+  getAttachment(messageId, index, opts = {}) {
+    return this._call('getAttachment', messageId, index, opts);
+  }
+
   sendText(id, body) {
     return this._call('sendText', id, body);
   }

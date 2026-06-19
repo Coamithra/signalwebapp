@@ -178,6 +178,69 @@ function renderThreadHeader(conv) {
   $('#threadSubtitle').textContent = sub;
 }
 
+// ---------- attachments ----------
+function attachmentChip(att, statusText, href) {
+  const icon = att.kind === 'image' ? '🖼️' : att.kind === 'video' ? '🎬'
+    : att.kind === 'voice' ? '🎤' : att.kind === 'audio' ? '🎵' : '📎';
+  const label = att.fileName || (att.kind === 'image' ? 'Photo' : att.kind === 'video' ? 'Video'
+    : att.kind === 'voice' ? 'Voice message' : att.kind === 'audio' ? 'Audio' : 'Attachment');
+  const children = [
+    el('span', { class: 'att-icon', text: icon }),
+    el('span', { class: 'att-label', text: statusText ? `${label} — ${statusText}` : label }),
+  ];
+  return href
+    ? el('a', { class: 'attachment-chip', href, download: att.fileName || '', target: '_blank', rel: 'noopener' }, children)
+    : el('div', { class: 'attachment-chip' }, children);
+}
+
+function openLightbox(src) {
+  const img = el('img', { class: 'lightbox-img', src });
+  const overlay = el('div', { class: 'lightbox' }, [img]);
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  overlay.addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+}
+
+function wrapMedia(node) {
+  return el('div', { class: 'att-media-wrap' }, [node]);
+}
+
+// Render one attachment by kind. Bytes come from /api/attachments/:id/:index,
+// which serves the renderer-decrypted file. Falls back to a chip for
+// pending/errored/unsupported attachments (or if the media fails to load).
+function attachmentEl(msg, att, i) {
+  if (att.pending) return attachmentChip(att, 'Downloading…');
+  if (att.error) return attachmentChip(att, 'Unavailable');
+
+  const src = `/api/attachments/${encodeURIComponent(msg.id)}/${i}`;
+
+  if (att.kind === 'image') {
+    const img = el('img', { class: 'att-media att-image', src, loading: 'lazy', alt: att.fileName || 'Image' });
+    if (att.width && att.height) img.style.aspectRatio = `${att.width} / ${att.height}`;
+    img.addEventListener('click', () => openLightbox(src));
+    img.addEventListener('error', () => img.replaceWith(attachmentChip(att, "Couldn't load")));
+    return wrapMedia(img);
+  }
+  if (att.kind === 'video') {
+    const v = el('video', { class: 'att-media att-video', src, controls: '', preload: 'metadata' });
+    if (att.hasThumbnail) v.setAttribute('poster', `${src}?thumb=1`);
+    v.addEventListener('error', () => v.replaceWith(attachmentChip(att, "Couldn't load")));
+    return wrapMedia(v);
+  }
+  if (att.kind === 'audio' || att.kind === 'voice') {
+    const a = el('audio', { class: 'att-audio', src, controls: '', preload: 'metadata' });
+    a.addEventListener('error', () => a.replaceWith(attachmentChip(att, "Couldn't load")));
+    return el('div', { class: 'att-audio-wrap' }, [
+      el('span', { class: 'att-icon', text: att.kind === 'voice' ? '🎤' : '🎵' }),
+      a,
+    ]);
+  }
+  // files / unknown types -> downloadable chip
+  return attachmentChip(att, null, src);
+}
+
 function messageRow(msg, prev, isGroup) {
   if (msg.direction === 'system') return null;
 
@@ -203,21 +266,13 @@ function messageRow(msg, prev, isGroup) {
 
   const bubble = el('div', { class: 'bubble' });
 
-  for (const att of msg.attachments) {
-    const icon = att.kind === 'image' ? '🖼️' : att.kind === 'video' ? '🎬'
-      : att.kind === 'voice' ? '🎤' : att.kind === 'audio' ? '🎵' : '📎';
-    const label = att.fileName || (att.kind === 'image' ? 'Photo' : att.kind === 'video' ? 'Video'
-      : att.kind === 'voice' ? 'Voice message' : att.kind === 'audio' ? 'Audio' : 'Attachment');
-    bubble.appendChild(el('div', { class: 'attachment-chip' }, [
-      el('span', { class: 'att-icon', text: icon }),
-      el('span', { text: label }),
-    ]));
-  }
-
   if (msg.isViewOnce) {
-    bubble.appendChild(el('div', { text: '👁 View-once media' }));
-  } else if (msg.text) {
-    bubble.appendChild(document.createTextNode(msg.text));
+    bubble.appendChild(el('div', { class: 'view-once', text: '👁 View-once media' }));
+  } else {
+    for (let i = 0; i < (msg.attachments || []).length; i++) {
+      bubble.appendChild(attachmentEl(msg, msg.attachments[i], i));
+    }
+    if (msg.text) bubble.appendChild(document.createTextNode(msg.text));
   }
   if (!bubble.childNodes.length) bubble.appendChild(document.createTextNode(' '));
   row.appendChild(bubble);

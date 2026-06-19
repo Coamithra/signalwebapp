@@ -83,6 +83,71 @@ function readBody(req) {
   });
 }
 
+// ---- attachment byte cache ----
+// Attachment bytes are immutable for a given (messageId, index), so we cache the
+// decoded Buffers and serve repeats (thumbnail -> lightbox, <video> seek/range)
+// without re-hitting the renderer over CDP. Bounded by total bytes; LRU-evicted.
+const ATTACH_CACHE = new Map(); // key -> { buf: Buffer, contentType: string }
+let attachCacheBytes = 0;
+const ATTACH_CACHE_MAX = 64 * 1024 * 1024;
+
+function attachCacheGet(key) {
+  const v = ATTACH_CACHE.get(key);
+  if (v) { ATTACH_CACHE.delete(key); ATTACH_CACHE.set(key, v); } // bump recency
+  return v;
+}
+
+function attachCachePut(key, buf, contentType) {
+  if (buf.length > ATTACH_CACHE_MAX) return; // never cache larger than the whole budget
+  ATTACH_CACHE.set(key, { buf, contentType });
+  attachCacheBytes += buf.length;
+  while (attachCacheBytes > ATTACH_CACHE_MAX && ATTACH_CACHE.size > 1) {
+    const oldest = ATTACH_CACHE.keys().next().value;
+    attachCacheBytes -= ATTACH_CACHE.get(oldest).buf.length;
+    ATTACH_CACHE.delete(oldest);
+  }
+}
+
+// Serve a Buffer with content-type, long immutable caching, and Range support
+// (so <video>/<audio> can seek). etagSeed identifies the immutable resource.
+function serveBuffer(req, res, buf, contentType, etagSeed) {
+  const etag = '"' + etagSeed.replace(/[^\w.:-]/g, '_') + '-' + buf.length + '"';
+  const headers = {
+    'content-type': contentType,
+    'cache-control': 'private, max-age=31536000, immutable',
+    etag,
+    'accept-ranges': 'bytes',
+  };
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, headers);
+    return res.end();
+  }
+  const mm = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+  if (mm) {
+    let start = mm[1] === '' ? null : Number(mm[1]);
+    let end = mm[2] === '' ? null : Number(mm[2]);
+    if (start === null) { // suffix range: last N bytes
+      start = Math.max(0, buf.length - (end || 0));
+      end = buf.length - 1;
+    } else if (end === null || end >= buf.length) {
+      end = buf.length - 1;
+    }
+    if (start > end || start >= buf.length) {
+      res.writeHead(416, { ...headers, 'content-range': `bytes */${buf.length}` });
+      return res.end();
+    }
+    const slice = buf.subarray(start, end + 1);
+    res.writeHead(206, {
+      ...headers,
+      'content-range': `bytes ${start}-${end}/${buf.length}`,
+      'content-length': slice.length,
+    });
+    return res.end(slice);
+  }
+  res.writeHead(200, { ...headers, 'content-length': buf.length });
+  res.end(buf);
+}
+
 async function serveStatic(req, res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
   rel = decodeURIComponent(rel.split('?')[0]);
@@ -180,6 +245,30 @@ const server = http.createServer(async (req, res) => {
       const older = url.searchParams.get('older') === '1';
       const data = await bridge.getMessages(id, { older });
       return sendJson(res, 200, data);
+    }
+
+    // /api/attachments/:messageId/:index   (?thumb=1 -> poster/thumbnail image)
+    m = pathname.match(/^\/api\/attachments\/([^/]+)\/(\d+)$/);
+    if (m && req.method === 'GET') {
+      const messageId = decodeURIComponent(m[1]);
+      const index = Number(m[2]);
+      const thumb = url.searchParams.get('thumb') === '1';
+      const key = `${messageId}:${index}${thumb ? ':t' : ''}`;
+
+      let entry = attachCacheGet(key);
+      if (!entry) {
+        const r = await bridge.getAttachment(messageId, index, { thumbnail: thumb });
+        if (!r || !r.ok) {
+          const code = r && r.error === 'too-large' ? 413
+            : r && (r.error === 'pending' || r.error === 'no-path') ? 409
+            : 404;
+          return sendJson(res, code, { error: (r && r.error) || 'attachment-error' });
+        }
+        const buf = Buffer.from(r.base64, 'base64');
+        entry = { buf, contentType: r.contentType || 'application/octet-stream' };
+        attachCachePut(key, buf, entry.contentType);
+      }
+      return serveBuffer(req, res, entry.buf, entry.contentType, key);
     }
 
     // /api/conversations/:id/send

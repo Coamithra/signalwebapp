@@ -39,7 +39,7 @@ evaluate must target the isolated context's id.
 | File | Role |
 |------|------|
 | [src/cdp.js](src/cdp.js) | Generic CDP client over the built-in `WebSocket`. Connects to the `background.html` page target, tracks the isolated context, auto-reconnects with backoff. |
-| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/sendText/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
+| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
@@ -56,6 +56,14 @@ evaluate must target the isolated context's id.
 - **Send text** — `conversation.enqueueMessageForSend({ body, attachments: [], preview: [], bodyRanges: [] }, { dontClearDraft: true })`.
   ⚠️ `attachments` **must be an array** — the function does `attachments.map(...)` and
   throws `undefined.map` if you pass only `{ body }`.
+- **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
+  Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
+  `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches
+  `attachment://v2/<path>?size=&key=<localKey>&contentType=` *inside* the isolated
+  context (the `key` param is `localKey`; `localKey=` 400s) and returns base64. The
+  server route `GET /api/attachments/:messageId/:index` (`?thumb=1` for video posters)
+  decodes it, serves with immutable caching + Range support, and keeps a small bounded
+  in-memory Buffer cache so re-views/seeks don't re-hit the renderer.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes
   `{type:'conversations'}` / `{type:'messages',conversationId}` into `__sbQueue`. The
   server drains every 200ms and forwards over SSE. ~instant, no polling of large state.

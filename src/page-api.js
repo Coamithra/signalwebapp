@@ -76,7 +76,38 @@ export const INSTALL_SCRIPT = `(function () {
       kind: kind, contentType: ct, fileName: a.fileName || null, size: a.size || null,
       width: a.width || null, height: a.height || null,
       pending: !!a.pending, error: !!a.error,
+      hasThumbnail: !!(a.thumbnail && a.thumbnail.path),
     };
+  }
+
+  // Largest attachment we will inline. Bigger files keep the chip — base64 over
+  // CDP for a huge video would be slow and memory-heavy. Mirrors the server.
+  var MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+  // Build the renderer-only URL for an attachment. Signal registers an
+  // 'attachment://' protocol that decrypts v2 (on-disk encrypted) attachments on
+  // the fly given the per-file localKey; we just have to ask for it by 'key'.
+  // (Confirmed by probing: 'attachment://v2/<path>?size=&key=&contentType='
+  // returns the decrypted bytes with the right content-type. 'localKey=' 400s.)
+  function attachmentUrl(a) {
+    var v = a.version || 1;
+    if (v >= 2) {
+      var qs = 'size=' + (a.size || 0) + '&key=' + encodeURIComponent(a.localKey || '');
+      if (a.contentType) qs += '&contentType=' + encodeURIComponent(a.contentType);
+      return 'attachment://v2/' + a.path + '?' + qs;
+    }
+    // v1: legacy unencrypted-on-disk attachments. Best-effort.
+    return 'attachment://v1/' + a.path + (a.contentType ? '?contentType=' + encodeURIComponent(a.contentType) : '');
+  }
+
+  function b64FromArrayBuffer(buf) {
+    var bytes = new Uint8Array(buf);
+    var binary = '';
+    var CHUNK = 0x8000; // chunk to avoid call-stack overflow on large buffers
+    for (var i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
   }
 
   // Aggregate per-recipient send state into a single status for outgoing msgs.
@@ -198,6 +229,38 @@ export const INSTALL_SCRIPT = `(function () {
         oldestLoaded: ids.length ? ids[0] : null,
         hasOlder: metrics ? (metrics.oldest && ids.length && metrics.oldest.id !== ids[0]) : false,
       };
+    },
+
+    // Fetch decrypted attachment bytes for a loaded message, base64-encoded.
+    // The message must already be in redux (it is whenever the UI shows it).
+    // opts.thumbnail -> return the small poster image instead of the full media.
+    getAttachment: async function (messageId, index, opts) {
+      opts = opts || {};
+      try {
+        var lookup = window.reduxStore.getState().conversations.messagesLookup || {};
+        var m = lookup[messageId];
+        if (!m || !Array.isArray(m.attachments)) return { ok: false, error: 'message-not-loaded' };
+        var a = m.attachments[index];
+        if (!a) return { ok: false, error: 'attachment-not-found' };
+        if (opts.thumbnail) {
+          if (!a.thumbnail || !a.thumbnail.path) return { ok: false, error: 'no-thumbnail' };
+          a = a.thumbnail;
+        }
+        if (a.pending) return { ok: false, error: 'pending' };
+        if (!a.path) return { ok: false, error: 'no-path' };
+        if (a.size && a.size > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: a.size };
+        var r = await fetch(attachmentUrl(a));
+        if (!r.ok) return { ok: false, error: 'fetch-failed', status: r.status };
+        var buf = await r.arrayBuffer();
+        return {
+          ok: true,
+          contentType: a.contentType || 'application/octet-stream',
+          size: buf.byteLength,
+          base64: b64FromArrayBuffer(buf),
+        };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
     },
 
     sendText: async function (id, body) {
