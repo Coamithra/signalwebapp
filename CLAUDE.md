@@ -68,7 +68,15 @@ evaluate must target the isolated context's id.
   (base64-in-JSON, zero-dep; raw-file cap 25 MB, ≤10 files, 48 MB total body). Empty
   `body` is allowed when there's at least one attachment. (The old
   `window.Signal.Migrations.processNewAttachment` namespace is gone in current Signal —
-  re-probe if this ever breaks.)
+  re-probe if this ever breaks.) The base64 rides *inside* the CDP evaluate
+  expression (`bridge._call` stringifies args), so the bytes cross the wire as
+  base64 — that's inherent to CDP's JSON-over-WebSocket transport (no binary arg
+  channel; a `data:` URL can't be `fetch()`ed to decode it natively because
+  Signal's CSP blocks `data:` in `connect-src` — probed). The server's caps above
+  bound it. `sendMedia` decodes each file with `base64ToBytes` in `page-api.js`:
+  native `Uint8Array.fromBase64` (Chrome 140+/current Signal, ~30x faster than a
+  per-byte loop, no intermediate binary string), falling back to a chunked `atob`
+  that yields to the event loop so a large decode never freezes Signal's UI.
 - **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
   Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
   `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches

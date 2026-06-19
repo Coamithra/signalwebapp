@@ -111,6 +111,37 @@ export const INSTALL_SCRIPT = `(function () {
     return btoa(binary);
   }
 
+  // Decode a standard (padded) base64 string to bytes WITHOUT janking Signal's
+  // UI thread. This runs in the renderer via CDP evaluate, so a slow synchronous
+  // decode freezes the user's real Signal window. Current Signal (Chrome 140+)
+  // has the native Uint8Array.fromBase64 — a single native call, ~30x faster than
+  // a per-byte JS loop and with no intermediate binary string (also halving peak
+  // transient memory for a big file). Older builds fall back to a chunked atob
+  // that yields to the event loop between slices so renders aren't blocked (a
+  // 25 MB attachment is ~33 MB of base64). We can't fetch() a data: URL to decode
+  // natively off-thread — Signal's CSP blocks data: in connect-src (probed).
+  // Input is the client's readAsDataURL output: standard alphabet, padded.
+  async function base64ToBytes(b64) {
+    if (typeof Uint8Array.fromBase64 === 'function') return Uint8Array.fromBase64(b64);
+    // Fallback for pre-Chrome-140 Signal. Input is standard padded base64 (length
+    // a multiple of 4); reject anything else so we fail like atob/native rather
+    // than silently under-allocating from fractional length math below.
+    if (b64.length % 4 !== 0) throw new Error('bad base64 length');
+    var pad = b64.charCodeAt(b64.length - 1) === 61
+      ? (b64.charCodeAt(b64.length - 2) === 61 ? 2 : 1) : 0; // 61 = '='
+    var out = new Uint8Array((b64.length / 4) * 3 - pad);
+    var SLICE = 0x10000 * 4; // 256K base64 chars (4-aligned) -> 192 KB of bytes
+    var o = 0;
+    for (var pos = 0; pos < b64.length; pos += SLICE) {
+      var bin = atob(b64.slice(pos, pos + SLICE));
+      for (var k = 0; k < bin.length; k++) out[o++] = bin.charCodeAt(k);
+      // Yield to the event loop between slices so the UI can paint; no need on
+      // the last/only slice.
+      if (pos + SLICE < b64.length) await new Promise(function (r) { setTimeout(r, 0); });
+    }
+    return out;
+  }
+
   // Aggregate per-recipient send state into a single status for outgoing msgs.
   function computeOutgoingStatus(m) {
     if (Array.isArray(m.errors) && m.errors.length) return 'error';
@@ -318,9 +349,7 @@ export const INSTALL_SCRIPT = `(function () {
         for (var i = 0; i < files.length; i++) {
           var f = files[i] || {};
           if (typeof f.base64 !== 'string' || !f.base64) return { ok: false, error: 'empty-file' };
-          var bin = atob(f.base64);
-          var data = new Uint8Array(bin.length);
-          for (var j = 0; j < bin.length; j++) data[j] = bin.charCodeAt(j);
+          var data = await base64ToBytes(f.base64);
           var att = {
             contentType: f.contentType || 'application/octet-stream',
             data: data,
