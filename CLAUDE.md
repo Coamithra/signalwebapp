@@ -39,7 +39,7 @@ evaluate must target the isolated context's id.
 | File | Role |
 |------|------|
 | [src/cdp.js](src/cdp.js) | Generic CDP client over the built-in `WebSocket`. Connects to the `background.html` page target, tracks the isolated context, auto-reconnects with backoff. |
-| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
+| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/sendMedia/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
@@ -56,6 +56,19 @@ evaluate must target the isolated context's id.
 - **Send text** — `conversation.enqueueMessageForSend({ body, attachments: [], preview: [], bodyRanges: [] }, { dontClearDraft: true })`.
   ⚠️ `attachments` **must be an array** — the function does `attachments.map(...)` and
   throws `undefined.map` if you pass only `{ body }`.
+- **Send media** — `window.__sb.sendMedia(id, body, files)` where
+  `files = [{ fileName, contentType, base64, width?, height? }]`. It hands Signal
+  *in-memory* attachment objects (`{ data: Uint8Array, contentType, size, fileName }`)
+  through the **same `enqueueMessageForSend`** as text — Signal's own send path then
+  writes+encrypts them to disk (v2/`localKey`), thumbnails, uploads to CDN, and delivers.
+  Deliberately *not* the redux composer (`processAttachments`/`sendMultiMediaMessage`):
+  that path only populates draft state for a conversation that is open/mounted in
+  Signal's own window, so it can't be driven headlessly without `showConversation`.
+  The route is `POST /api/conversations/:id/send` with body `{ text?, attachments? }`
+  (base64-in-JSON, zero-dep; raw-file cap 25 MB, ≤10 files, 48 MB total body). Empty
+  `body` is allowed when there's at least one attachment. (The old
+  `window.Signal.Migrations.processNewAttachment` namespace is gone in current Signal —
+  re-probe if this ever breaks.)
 - **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
   Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
   `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches

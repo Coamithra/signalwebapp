@@ -11,7 +11,13 @@ const state = {
   nearBottom: true,
   lastActiveTimestamp: 0,
   sending: false,
+  pendingAttachments: [], // staged files awaiting send: {id, fileName, contentType, base64, size, kind, width, height, previewUrl}
 };
+
+// Outbound media limits — kept in lockstep with the server (src/server.js).
+const MAX_PENDING_FILES = 10;
+const MAX_PENDING_FILE_BYTES = 25 * 1024 * 1024;
+let attachSeq = 0;
 
 // ---------- tiny DOM helper ----------
 function el(tag, attrs = {}, children = []) {
@@ -326,9 +332,11 @@ function renderMessages(data) {
 let openToken = 0;
 async function openConversation(id) {
   if (state.activeId !== id) {
+    clearPending(); // staged files belong to the conversation they were added in
     state.activeId = id;
     renderConversations(); // update active highlight
   }
+  updateSendEnabled();
   $('#emptyState').classList.add('hidden');
   $('#conversationView').classList.remove('hidden');
 
@@ -388,23 +396,164 @@ function scrollToBottom(force) {
   if (force || state.nearBottom) m.scrollTop = m.scrollHeight;
 }
 
-// ---------- composer ----------
+// ---------- composer: pending attachments ----------
+function kindForType(ct) {
+  if (/^image\//.test(ct)) return 'image';
+  if (/^video\//.test(ct)) return 'video';
+  if (/^audio\//.test(ct)) return 'audio';
+  return 'file';
+}
+function iconForKind(kind) {
+  return kind === 'image' ? '🖼️' : kind === 'video' ? '🎬' : kind === 'audio' ? '🎵' : '📎';
+}
+
+// FileReader -> base64 (without the "data:<ct>;base64," prefix the server/Signal
+// don't want).
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = String(reader.result);
+      resolve(res.slice(res.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error('read failed'));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Natural dimensions for an image File (best-effort; 0/0 on failure).
+function imageDims(file) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight, url });
+    img.onerror = () => { URL.revokeObjectURL(url); resolve({ width: 0, height: 0, url: null }); };
+    img.src = url;
+  });
+}
+
+function revokePreview(item) {
+  if (item && item.previewUrl) { URL.revokeObjectURL(item.previewUrl); item.previewUrl = null; }
+}
+
+async function addPendingFiles(fileList) {
+  if (!state.activeId) return;
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+
+  for (const file of files) {
+    // Check the cap per file (not up front) so that skipped oversize files
+    // don't burn a slot and everything that fits still gets a turn.
+    if (state.pendingAttachments.length >= MAX_PENDING_FILES) {
+      toast(`You can attach up to ${MAX_PENDING_FILES} files`, true);
+      break;
+    }
+    if (file.size > MAX_PENDING_FILE_BYTES) {
+      toast(`"${file.name}" is too large (max 25 MB)`, true);
+      continue;
+    }
+    try {
+      const base64 = await readFileAsBase64(file);
+      const contentType = file.type || 'application/octet-stream';
+      const kind = kindForType(contentType);
+      const item = {
+        id: ++attachSeq, fileName: file.name || 'attachment', contentType, base64,
+        size: file.size, kind, width: 0, height: 0, previewUrl: null,
+      };
+      if (kind === 'image') {
+        const d = await imageDims(file);
+        item.width = d.width; item.height = d.height; item.previewUrl = d.url;
+      }
+      state.pendingAttachments.push(item);
+      renderPending();
+    } catch {
+      toast(`Couldn't read "${file.name || 'file'}"`, true);
+    }
+  }
+  updateSendEnabled();
+}
+
+function removePending(id) {
+  const i = state.pendingAttachments.findIndex((a) => a.id === id);
+  if (i < 0) return;
+  revokePreview(state.pendingAttachments[i]);
+  state.pendingAttachments.splice(i, 1);
+  renderPending();
+  updateSendEnabled();
+}
+
+function clearPending() {
+  for (const item of state.pendingAttachments) revokePreview(item);
+  state.pendingAttachments = [];
+  renderPending();
+  updateSendEnabled();
+}
+
+function renderPending() {
+  const tray = $('#attachTray');
+  if (!state.pendingAttachments.length) { tray.replaceChildren(); tray.classList.add('hidden'); return; }
+  const frag = document.createDocumentFragment();
+  for (const item of state.pendingAttachments) {
+    const thumb = item.kind === 'image' && item.previewUrl
+      ? el('img', { class: 'attach-prev-img', src: item.previewUrl, alt: item.fileName })
+      : el('span', { class: 'attach-prev-icon', text: iconForKind(item.kind) });
+    frag.appendChild(el('div', { class: 'attach-prev' }, [
+      thumb,
+      el('span', { class: 'attach-prev-name', text: item.fileName }),
+      el('button', {
+        class: 'attach-prev-remove', title: 'Remove', 'aria-label': 'Remove', text: '×',
+        onclick: () => removePending(item.id),
+      }),
+    ]));
+  }
+  tray.replaceChildren(frag);
+  tray.classList.remove('hidden');
+}
+
+function updateSendEnabled() {
+  const hasText = $('#composerInput').value.trim().length > 0;
+  $('#sendBtn').disabled = !state.activeId || (!hasText && !state.pendingAttachments.length);
+}
+
+// Optimistic preview of a staged attachment (local data, not yet on the server).
+function pendingEchoEl(item) {
+  if (item.kind === 'image') {
+    const img = el('img', { class: 'att-media att-image', src: `data:${item.contentType};base64,${item.base64}`, alt: item.fileName });
+    if (item.width && item.height) img.style.aspectRatio = `${item.width} / ${item.height}`;
+    return wrapMedia(img);
+  }
+  return attachmentChip({ kind: item.kind, fileName: item.fileName }, null, null);
+}
+
+// ---------- composer: send ----------
 async function sendMessage() {
   const input = $('#composerInput');
   const text = input.value.trim();
-  if (!text || !state.activeId || state.sending) return;
+  const attachments = state.pendingAttachments.slice();
+  if ((!text && !attachments.length) || !state.activeId || state.sending) return;
   const id = state.activeId;
   state.sending = true;
   input.value = '';
   autoGrow();
+  // Clear the tray optimistically; restore it if the send fails (below).
+  state.pendingAttachments = [];
+  renderPending();
+  updateSendEnabled();
 
-  // optimistic echo
+  // optimistic echo (attachments rendered from local bytes; replaced by the
+  // real, server-backed render on the refresh that follows a successful send)
   const inner = $('#messagesInner');
   const optimistic = messageRow(
     { direction: 'outgoing', text, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
     null, false,
   );
   optimistic.classList.add('optimistic');
+  const bubble = optimistic.querySelector('.bubble');
+  if (bubble && attachments.length) {
+    if (!text) bubble.textContent = ''; // drop the empty-bubble placeholder
+    const ref = text ? bubble.firstChild : null;
+    for (const item of attachments) bubble.insertBefore(pendingEchoEl(item), ref);
+  }
   inner.appendChild(optimistic);
   scrollToBottom(true);
 
@@ -412,15 +561,28 @@ async function sendMessage() {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({
+        text,
+        attachments: attachments.map((a) => ({
+          fileName: a.fileName, contentType: a.contentType, base64: a.base64, width: a.width, height: a.height,
+        })),
+      }),
     });
     if (!r.ok) throw new Error(r.error || 'send failed');
+    for (const item of attachments) revokePreview(item); // sent — drop local previews
     scheduleRefreshActive();
   } catch (err) {
     toast('Failed to send: ' + err.message, true);
     optimistic.querySelector('.tick')?.replaceWith(
       Object.assign(document.createElement('span'), { className: 'tick error', textContent: '⚠' }),
     );
+    // Put the files back in the tray so the user doesn't lose them.
+    if (attachments.length) {
+      state.pendingAttachments = attachments.concat(state.pendingAttachments);
+      renderPending();
+    }
+    if (text) input.value = input.value || text;
+    updateSendEnabled();
   } finally {
     state.sending = false;
   }
@@ -496,11 +658,49 @@ function init() {
   $('#search').addEventListener('input', () => { applySearch(); renderConversations(); });
 
   const input = $('#composerInput');
-  input.addEventListener('input', autoGrow);
+  input.addEventListener('input', () => { autoGrow(); updateSendEnabled(); });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
   });
   $('#sendBtn').addEventListener('click', sendMessage);
+  updateSendEnabled();
+
+  // attach: file-picker button + hidden input
+  const fileInput = $('#fileInput');
+  $('#attachBtn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    addPendingFiles(fileInput.files);
+    fileInput.value = ''; // allow re-picking the same file
+  });
+
+  // paste files/images straight into the composer
+  input.addEventListener('paste', (e) => {
+    const files = e.clipboardData && e.clipboardData.files;
+    if (files && files.length) { e.preventDefault(); addPendingFiles(files); }
+  });
+
+  // drag-and-drop onto the conversation pane
+  const view = $('#conversationView');
+  const overlay = $('#dropOverlay');
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  let dragDepth = 0;
+  view.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e) || !state.activeId) return;
+    e.preventDefault(); dragDepth++; overlay.classList.remove('hidden');
+  });
+  view.addEventListener('dragover', (e) => {
+    if (!hasFiles(e) || !state.activeId) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'copy';
+  });
+  view.addEventListener('dragleave', (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth--; if (dragDepth <= 0) { dragDepth = 0; overlay.classList.add('hidden'); }
+  });
+  view.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; overlay.classList.add('hidden');
+    addPendingFiles(e.dataTransfer.files);
+  });
 
   $('#messages').addEventListener('scroll', () => {
     const m = $('#messages');

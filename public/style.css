@@ -128,7 +128,7 @@ body {
 .empty-state h2 { margin: 0; color: var(--text); font-weight: 500; }
 .empty-sub { font-size: 13px; color: var(--text-faint); }
 
-.conversation-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.conversation-view { display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; }
 
 .thread-header {
   display: flex; align-items: center; gap: 12px;
@@ -234,9 +234,51 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 
 /* ---------- Composer ---------- */
 .composer {
-  flex: none; display: flex; align-items: flex-end; gap: 10px;
+  flex: none; display: flex; flex-direction: column; gap: 8px;
   padding: 12px 16px; border-top: 1px solid var(--border); background: var(--bg-sidebar);
 }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.attach-btn {
+  flex: none; width: 38px; height: 38px; border-radius: 50%; border: none;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: background .15s, color .15s;
+}
+.attach-btn:hover { background: var(--bg-input); color: var(--text); }
+.attach-btn:active { transform: scale(.92); }
+
+/* pending-attachment tray (above the input row) */
+.attach-tray { display: flex; flex-wrap: wrap; gap: 8px; }
+.attach-prev {
+  display: flex; align-items: center; gap: 8px; max-width: 220px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px 8px 6px 6px; position: relative;
+}
+.attach-prev-img {
+  width: 40px; height: 40px; border-radius: 6px; object-fit: cover; flex: none; background: rgba(0,0,0,.2);
+}
+.attach-prev-icon { font-size: 22px; width: 40px; text-align: center; flex: none; }
+.attach-prev-name {
+  font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.attach-prev-remove {
+  flex: none; width: 18px; height: 18px; border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(0,0,0,.45); color: #fff; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.attach-prev-remove:hover { background: var(--danger); }
+
+/* drag-and-drop overlay */
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 20;
+  background: rgba(18,18,18,.82); backdrop-filter: blur(1px);
+  display: flex; align-items: center; justify-content: center;
+  border: 2px dashed var(--accent); border-radius: 6px; pointer-events: none;
+}
+.drop-inner {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  color: var(--accent); font-size: 16px; font-weight: 500;
+}
+
 .composer-input {
   flex: 1; resize: none; border: none; outline: none;
   background: var(--bg-input); color: var(--text);

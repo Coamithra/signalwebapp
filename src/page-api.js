@@ -297,6 +297,52 @@ export const INSTALL_SCRIPT = `(function () {
       }
     },
 
+    // Send a message with one or more attachments (optionally with a text body).
+    // files: [{ fileName, contentType, base64, width?, height? }].
+    //
+    // We pass *in-memory* attachment objects ({ data, contentType, size,
+    // fileName }) straight to enqueueMessageForSend — the SAME primitive
+    // sendText uses. Signal's own send path finalizes each one: it writes and
+    // encrypts the bytes to disk (v2 + per-file localKey), generates a
+    // thumbnail, uploads to the CDN, and delivers. This deliberately avoids the
+    // redux composer (processAttachments/sendMultiMediaMessage): that path is
+    // coupled to the conversation being open/mounted in Signal's own window, so
+    // driving it headlessly would be fragile and disruptive. (Confirmed by
+    // probing the running app — the old window.Signal.Migrations API is gone.)
+    sendMedia: async function (id, body, files) {
+      var conv = window.ConversationController.get(id);
+      if (!conv) return { ok: false, error: 'conversation-not-found' };
+      if (!Array.isArray(files) || !files.length) return { ok: false, error: 'no-files' };
+      try {
+        var attachments = [];
+        for (var i = 0; i < files.length; i++) {
+          var f = files[i] || {};
+          if (typeof f.base64 !== 'string' || !f.base64) return { ok: false, error: 'empty-file' };
+          var bin = atob(f.base64);
+          var data = new Uint8Array(bin.length);
+          for (var j = 0; j < bin.length; j++) data[j] = bin.charCodeAt(j);
+          var att = {
+            contentType: f.contentType || 'application/octet-stream',
+            data: data,
+            size: data.byteLength,
+            fileName: f.fileName || 'attachment',
+            pending: false,
+          };
+          // Dimensions help images render at the right aspect ratio; optional.
+          if (f.width) att.width = f.width;
+          if (f.height) att.height = f.height;
+          attachments.push(att);
+        }
+        await conv.enqueueMessageForSend(
+          { body: typeof body === 'string' ? body : '', attachments: attachments, preview: [], bodyRanges: [] },
+          { dontClearDraft: true },
+        );
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
+
     markRead: async function (id) {
       var conv = window.ConversationController.get(id);
       if (!conv) return { ok: false };

@@ -119,6 +119,13 @@ export class SignalBridge extends EventEmitter {
     return this._call('sendText', id, body);
   }
 
+  // files: [{ fileName, contentType, base64, width?, height? }]. The base64
+  // rides inside the evaluate expression (_call JSON-stringifies args), so the
+  // server caps total payload size before calling this.
+  sendMedia(id, body, files) {
+    return this._call('sendMedia', id, body, files);
+  }
+
   markRead(id) {
     return this._call('markRead', id);
   }

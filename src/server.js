@@ -16,8 +16,12 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const PORT = Number(process.env.PORT || 7700);
 const HOST = '127.0.0.1';
 const CDP_PORT = Number(process.env.SIGNAL_CDP_PORT || 9222);
+// Chromium's remote-debugging endpoint binds IPv4 loopback. On hosts where
+// `localhost` resolves to IPv6 (::1) first, the default can miss Signal (or hit
+// an unrelated debug target on ::1). Override with SIGNAL_CDP_HOST=127.0.0.1.
+const CDP_HOST = process.env.SIGNAL_CDP_HOST || 'localhost';
 
-const bridge = new SignalBridge({ port: CDP_PORT });
+const bridge = new SignalBridge({ host: CDP_HOST, port: CDP_PORT });
 
 // ---- SSE clients ----
 /** @type {Set<http.ServerResponse>} */
@@ -57,13 +61,13 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
-function readBody(req) {
+function readBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
       size += c.length;
-      if (size > 1024 * 1024) {
+      if (size > maxBytes) {
         reject(new Error('body too large'));
         req.destroy();
         return;
@@ -90,6 +94,14 @@ function readBody(req) {
 const ATTACH_CACHE = new Map(); // key -> { buf: Buffer, contentType: string }
 let attachCacheBytes = 0;
 const ATTACH_CACHE_MAX = 64 * 1024 * 1024;
+
+// Outbound (send) limits. base64-in-JSON keeps the server zero-dep (no multipart
+// parser); base64 inflates raw bytes by ~33%, so the request-body cap is larger
+// than the per-file raw ceiling. The whole body also rides inside a CDP evaluate
+// expression downstream, so these stay conservative for a first version.
+const SEND_BODY_MAX = 48 * 1024 * 1024; // total JSON request body for a send
+const SEND_FILE_MAX = 25 * 1024 * 1024; // per-file raw bytes (matches inline view cap)
+const SEND_MAX_FILES = 10;
 // In-flight fetches, keyed identically to the cache. A <video> fires several
 // Range requests at once; without this each would do its own CDP round-trip and
 // base64 decode of the whole file. Concurrent misses share one promise instead.
@@ -291,13 +303,46 @@ const server = http.createServer(async (req, res) => {
       return serveBuffer(req, res, out.entry.buf, out.entry.contentType, key);
     }
 
-    // /api/conversations/:id/send
+    // /api/conversations/:id/send   { text?, attachments?: [{fileName,contentType,base64,width?,height?}] }
     m = pathname.match(/^\/api\/conversations\/([^/]+)\/send$/);
     if (m && req.method === 'POST') {
       const id = decodeURIComponent(m[1]);
-      const body = await readBody(req);
+      let body;
+      try {
+        body = await readBody(req, SEND_BODY_MAX);
+      } catch (err) {
+        const tooBig = /too large/i.test(String(err?.message));
+        return sendJson(res, tooBig ? 413 : 400, { ok: false, error: tooBig ? 'too-large' : 'invalid-body' });
+      }
       const text = (body.text || '').toString();
-      if (!text.trim()) return sendJson(res, 400, { ok: false, error: 'empty' });
+      const rawAttachments = Array.isArray(body.attachments) ? body.attachments : [];
+      if (!text.trim() && !rawAttachments.length) return sendJson(res, 400, { ok: false, error: 'empty' });
+
+      if (rawAttachments.length) {
+        if (rawAttachments.length > SEND_MAX_FILES) {
+          return sendJson(res, 400, { ok: false, error: 'too-many-files' });
+        }
+        const files = [];
+        for (const a of rawAttachments) {
+          if (!a || typeof a.base64 !== 'string' || !a.base64) {
+            return sendJson(res, 400, { ok: false, error: 'bad-attachment' });
+          }
+          // 4 base64 chars -> 3 bytes; cheap decoded-size check before decoding.
+          if (Math.floor((a.base64.length * 3) / 4) > SEND_FILE_MAX) {
+            return sendJson(res, 413, { ok: false, error: 'file-too-large' });
+          }
+          files.push({
+            fileName: (a.fileName || a.name || 'attachment').toString().slice(0, 255),
+            contentType: (a.contentType || 'application/octet-stream').toString(),
+            base64: a.base64,
+            width: Number(a.width) || undefined,
+            height: Number(a.height) || undefined,
+          });
+        }
+        const result = await bridge.sendMedia(id, text, files);
+        return sendJson(res, result.ok ? 200 : 400, result);
+      }
+
       const result = await bridge.sendText(id, text);
       return sendJson(res, result.ok ? 200 : 400, result);
     }
