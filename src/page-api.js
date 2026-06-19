@@ -207,7 +207,21 @@ export const INSTALL_SCRIPT = `(function () {
           var oldestId = st0 && st0.messageIds && st0.messageIds.length ? st0.messageIds[0] : undefined;
           if (oldestId) await conv.loadOlderMessages(oldestId);
         } else {
-          await conv.loadNewestMessages(undefined, undefined);
+          // loadNewestMessages() RESETS the loaded window to just the newest page,
+          // which would discard any older messages the user expanded via "Load
+          // older". This no-older path also serves the initial open (redux
+          // empty -> loadNewestMessages). The background refresh (triggered by
+          // the same redux change loadOlder causes, and by every new message)
+          // hits this path, so calling
+          // it unconditionally makes "Load older" appear broken: the older messages
+          // flash in, then the next refresh collapses them away. Only (re)load when
+          // the newest message isn't already in the window — once it is, redux
+          // already tracks new arrivals and status changes, so we just read it.
+          var st1 = window.reduxStore.getState().conversations.messagesByConversation[id];
+          var ids1 = st1 && st1.messageIds ? st1.messageIds : null;
+          var newestLoaded = !!(st1 && st1.metrics && st1.metrics.newest && ids1 && ids1.length &&
+            st1.metrics.newest.id === ids1[ids1.length - 1]);
+          if (!newestLoaded) await conv.loadNewestMessages(undefined, undefined);
         }
       } catch (e) {
         return { error: 'load-failed', detail: String(e) };
