@@ -213,6 +213,18 @@ function wrapMedia(node) {
   return el('div', { class: 'att-media-wrap' }, [node]);
 }
 
+// Compute an attachment's on-screen pixel box from its stored dimensions,
+// clamped to the same limits as .att-media in CSS (max 330px / 60vw wide,
+// 340px tall). Setting an explicit width+height reserves the space *before* the
+// bytes load, so media that arrives later (over /api/attachments) doesn't reflow
+// the thread — which is what lets "load older" keep the viewport anchored.
+function mediaBox(att) {
+  if (!att.width || !att.height) return null;
+  const maxW = Math.min(330, Math.round(window.innerWidth * 0.6));
+  const scale = Math.min(maxW / att.width, 340 / att.height, 1);
+  return { w: Math.max(1, Math.round(att.width * scale)), h: Math.max(1, Math.round(att.height * scale)) };
+}
+
 // Render one attachment by kind. Bytes come from /api/attachments/:id/:index,
 // which serves the renderer-decrypted file. Falls back to a chip for
 // pending/errored/unsupported attachments (or if the media fails to load).
@@ -224,13 +236,16 @@ function attachmentEl(msg, att, i) {
 
   if (att.kind === 'image') {
     const img = el('img', { class: 'att-media att-image', src, loading: 'lazy', alt: att.fileName || 'Image' });
-    if (att.width && att.height) img.style.aspectRatio = `${att.width} / ${att.height}`;
+    const ibox = mediaBox(att);
+    if (ibox) { img.style.width = `${ibox.w}px`; img.style.height = `${ibox.h}px`; }
     img.addEventListener('click', () => openLightbox(src));
     img.addEventListener('error', () => img.replaceWith(attachmentChip(att, "Couldn't load")));
     return wrapMedia(img);
   }
   if (att.kind === 'video') {
     const v = el('video', { class: 'att-media att-video', src, controls: '', preload: 'metadata' });
+    const vbox = mediaBox(att);
+    if (vbox) { v.style.width = `${vbox.w}px`; v.style.height = `${vbox.h}px`; }
     if (att.hasThumbnail) v.setAttribute('poster', `${src}?thumb=1`);
     v.addEventListener('error', () => v.replaceWith(attachmentChip(att, "Couldn't load")));
     return wrapMedia(v);
@@ -257,6 +272,7 @@ function messageRow(msg, prev, isGroup) {
   const row = el('div', {
     class: `msg-row ${msg.direction} ${sameAuthorAsPrev ? 'tight' : 'loose'}`,
   });
+  if (msg.id) row.dataset.mid = msg.id; // stable handle for scroll anchoring on rebuild
 
   // group sender label on incoming
   if (isGroup && msg.direction === 'incoming' && !sameAuthorAsPrev && msg.authorTitle) {
@@ -329,10 +345,15 @@ function renderMessages(data) {
   $('#loadOlder').classList.toggle('hidden', !data.hasOlder);
 }
 
+// Stops an in-flight "load older" scroll-anchor settle (see the #loadOlder
+// handler). Held at module scope so a conversation switch can cancel it.
+let cancelOlderPin = null;
+
 let openToken = 0;
 async function openConversation(id) {
   if (state.activeId !== id) {
     clearPending(); // staged files belong to the conversation they were added in
+    if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     state.activeId = id;
     renderConversations(); // update active highlight
   }
@@ -734,10 +755,46 @@ function init() {
     if (!state.activeId) return;
     try {
       const m = $('#messages');
-      const prevH = m.scrollHeight;
+      const inner = $('#messagesInner');
+      // Anchor on the topmost rendered message: remember which one and exactly
+      // where it sits in the viewport. renderMessages() rebuilds every row, so we
+      // re-find it afterwards by its stable id (data-mid) and nudge the scroll so
+      // it lands back in the same spot. Pinning the element itself (rather than a
+      // height delta) survives reflow ABOVE *or* below it — late-loading media,
+      // author-label regrouping, the lot.
+      let anchorId = null, anchorTop = 0;
+      for (const row of inner.children) {
+        if (row.dataset && row.dataset.mid) { anchorId = row.dataset.mid; anchorTop = row.getBoundingClientRect().top; break; }
+      }
       const data = await api(`/api/conversations/${encodeURIComponent(state.activeId)}/messages?older=1`);
       renderMessages(data);
-      m.scrollTop = m.scrollHeight - prevH; // keep viewport anchored
+      if (cancelOlderPin) cancelOlderPin(); // supersede any prior in-flight settle
+      // Re-pin instantly (.messages is scroll-behavior:smooth, so scrollBy would
+      // otherwise animate). Keep correcting until sizes go quiet (media settled),
+      // the user starts scrolling, or a safety cap elapses.
+      const pin = () => {
+        if (!anchorId) return;
+        let el = null;
+        for (const row of inner.children) { if (row.dataset && row.dataset.mid === anchorId) { el = row; break; } }
+        if (!el) return;
+        const delta = el.getBoundingClientRect().top - anchorTop;
+        if (delta) m.scrollBy({ top: delta, behavior: 'instant' });
+      };
+      let idle, cap, ro;
+      const stop = () => {
+        if (ro) ro.disconnect();
+        clearTimeout(idle); clearTimeout(cap);
+        m.removeEventListener('wheel', stop);
+        m.removeEventListener('touchstart', stop);
+        cancelOlderPin = null;
+      };
+      cancelOlderPin = stop;
+      ro = new ResizeObserver(() => { pin(); clearTimeout(idle); idle = setTimeout(stop, 600); });
+      pin();
+      ro.observe(inner);
+      cap = setTimeout(stop, 8000);
+      m.addEventListener('wheel', stop, { passive: true });
+      m.addEventListener('touchstart', stop, { passive: true });
     } catch (err) { toast(err.message, true); }
   });
 
