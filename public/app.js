@@ -350,6 +350,20 @@ function renderMessages(data) {
 let cancelOlderPin = null;
 
 let openToken = 0;
+// Tell Signal the thread has been read so its unread badge clears. Fire-and-forget:
+// the redux 'conversations' change event reconciles the list over SSE, but we also
+// clear the count locally so the badge disappears instantly instead of ~300ms later.
+// This marks read in Signal proper, which sends read receipts per the user's Signal
+// settings (i.e. normal Signal Desktop behavior).
+function markConversationRead(conv) {
+  if (!conv || (!conv.unreadCount && !conv.markedUnread)) return;
+  conv.unreadCount = 0;
+  conv.markedUnread = false;
+  renderConversations();
+  api(`/api/conversations/${encodeURIComponent(conv.id)}/read`, { method: 'POST' })
+    .catch(() => {}); // best-effort; the SSE conversations event resyncs if it failed
+}
+
 async function openConversation(id) {
   if (state.activeId !== id) {
     clearPending(); // staged files belong to the conversation they were added in
@@ -365,6 +379,7 @@ async function openConversation(id) {
   if (conv) {
     renderThreadHeader(conv);
     state.lastActiveTimestamp = conv.timestamp;
+    markConversationRead(conv); // opening a thread clears its unread badge
   }
 
   const token = ++openToken;

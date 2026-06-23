@@ -100,8 +100,12 @@ evaluate must target the isolated context's id.
   (XSS). The `el()` helper's `html:` option is for trusted static markup only.
 - **Localhost only.** Never bind the server to a non-loopback interface; this exposes the
   user's Signal. CDP is localhost-only by nature.
-- **Reading does not send read receipts.** `loadNewestMessages` doesn't; `markRead` is a
-  separate, opt-in endpoint the UI does not auto-call.
+- **Loading history does not send read receipts; *opening* a thread does.**
+  `loadNewestMessages`/`loadOlderMessages` only populate redux. But `openConversation`
+  in [public/app.js](public/app.js) calls the `markRead` endpoint
+  (`POST /api/conversations/:id/read`) so the unread badge clears — that goes through
+  Signal's real `markRead`, which sends read receipts per the user's Signal settings
+  (normal Signal Desktop behavior).
 - Match the surrounding style; comment only where the *why* is non-obvious.
 
 ## Running

@@ -141,8 +141,10 @@ research notes and roadmap.
 - These are **undocumented internals**; a future Signal version can rename them.
   The injected API is small and centralized ([`src/page-api.js`](src/page-api.js)) so
   it's easy to repair if something moves.
-- Reading a chat does not send read receipts. There's a `markRead` endpoint, but the
-  UI does not call it automatically.
+- Opening a chat marks it read (clearing its unread badge), which sends read receipts
+  per your Signal settings — same as Signal Desktop. The `markRead` endpoint
+  (`POST /api/conversations/:id/read`) drives this; merely loading history without
+  opening the thread does not mark anything read.
 
 ## Contributing
 
