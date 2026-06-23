@@ -65,6 +65,27 @@ export const INSTALL_SCRIPT = `(function () {
     } catch (_) { return null; }
   }
 
+  // An @mention is stored as a placeholder char (U+FFFC) in the body, with the
+  // real target carried in m.bodyRanges as { start, length, mentionAci }. Read
+  // raw, that placeholder renders as a "[OBJ]"/tofu glyph. Mirror Signal's own
+  // renderer: slice the body at each range and swap the placeholder for
+  // "@Name". Walk ranges right-to-left so an earlier splice doesn't shift the
+  // offsets of later ones. (Formatting ranges — bold/italic/etc., which carry a
+  // style field and no mention id — reference existing text, left untouched.)
+  function applyMentions(body, ranges) {
+    if (!body || !Array.isArray(ranges) || !ranges.length) return body || '';
+    var mentions = ranges.filter(function (r) {
+      return r && typeof r.start === 'number' && (r.mentionAci || r.mentionUuid);
+    }).sort(function (a, b) { return b.start - a.start; });
+    for (var i = 0; i < mentions.length; i++) {
+      var r = mentions[i];
+      var name = resolveAuthorTitle(r.mentionAci || r.mentionUuid) || 'Unknown';
+      var len = typeof r.length === 'number' ? r.length : 1;
+      body = body.slice(0, r.start) + '@' + name + body.slice(r.start + len);
+    }
+    return body;
+  }
+
   function describeAttachment(a) {
     var ct = (a && a.contentType) || '';
     var kind = 'file';
@@ -178,7 +199,7 @@ export const INSTALL_SCRIPT = `(function () {
       id: m.id,
       direction: direction,
       type: m.type,
-      text: m.body || '',
+      text: applyMentions(m.body || '', m.bodyRanges),
       authorTitle: authorTitle,
       authorId: m.sourceServiceId || m.source || null,
       timestamp: m.sent_at || m.timestamp || m.received_at_ms || 0,
