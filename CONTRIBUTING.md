@@ -52,6 +52,14 @@ to a feature branch.
 
 ## Phase 1: Pick Up the Card
 
+> **Picking up the top card? Use the atomic `grab` command.** When you are told to "pick up the top card/ticket" (rather than a specific named card), claim it in one step:
+>
+> ```
+> trello --board 6a353dfe grab --from "To Do" --to "Doing"
+> ```
+>
+> This pops the top card of To Do, moves it to Doing, and prints the card it got you (it exits 1 when To Do is empty). It is safe to fire from several agents at once: each gets a distinct card, so no two collide on the same ticket. On the remote Trello backend `grab` settles ties with a brief (~10-30s) claim-comment handshake. For a specific card you were named, skip this and use step 3 below.
+
 1. **Pull latest main** — `git pull origin main` so you start from the newest code.
 2. **Read the card** — the description is the spec. Larger features may have a longer note
    in `plans/<file>.md`; the card is the pointer.
