@@ -61,6 +61,27 @@ function isTransientGeminiError(e) {
   return /^gemini (500|502|503|504)\b/.test(e.message) || /fetch failed/i.test(e.message);
 }
 
+// Map an internal error to a short, human reason string for the UI status bubble.
+// IMPORTANT: returns only fixed phrases derived from the status code / error name
+// -- it must never echo the raw message, which can contain the API key or the
+// timedtext URL with its params. Includes the numeric code where we have one so a
+// "Retrying (503 - service unavailable)" reads clearly.
+function friendlyReason(e) {
+  const msg = (e && e.message) || '';
+  const m = /^gemini (\d{3})\b/.exec(msg);
+  if (m) {
+    const code = m[1];
+    if (code === '429') return '429 - quota exceeded / rate-limited';
+    if (/^5/.test(code)) return code + ' - service unavailable';
+    if (code === '400' || code === '401' || code === '403') return 'configuration error';
+    return 'error ' + code;
+  }
+  if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) return 'timed out';
+  if (/^gemini-no-text:/.test(msg)) return 'no summary produced';
+  if (/fetch failed/i.test(msg)) return 'network error';
+  return 'summary failed';
+}
+
 // One Gemini call. Throws `gemini <status>: <detail>` on a non-OK response or
 // `gemini-no-text:<reason>` if the completion is empty (blocked / truncated).
 async function geminiOnce({ apiKey, model, prompt }) {
@@ -97,7 +118,7 @@ async function geminiOnce({ apiKey, model, prompt }) {
 // with backoff. Flash models 503/429 under load often enough that without this a
 // busy moment would just drop the summary. Throws (after retries) on a non-OK
 // response so the caller can log and skip.
-async function summarize({ apiKey, model, transcript, title }) {
+async function summarize({ apiKey, model, transcript, title, onRetry }) {
   const body = transcript.length > MAX_TRANSCRIPT_CHARS
     ? transcript.slice(0, MAX_TRANSCRIPT_CHARS) : transcript;
   const prompt =
@@ -114,6 +135,7 @@ async function summarize({ apiKey, model, transcript, title }) {
       if (attempt >= GEMINI_MAX_ATTEMPTS || !isTransientGeminiError(e)) throw e;
       const wait = GEMINI_BACKOFF_MS * 2 ** (attempt - 1); // 1.5s, 3s, 6s
       log(`gemini transient (${e.message}) — retry ${attempt + 1}/${GEMINI_MAX_ATTEMPTS} in ${wait}ms`);
+      if (onRetry) onRetry(e);
       await new Promise((r) => setTimeout(r, wait));
     }
   }
@@ -123,7 +145,7 @@ async function summarize({ apiKey, model, transcript, title }) {
 // flag, per-chat isEnabled/setEnabled (persisted), and start() to attach the
 // realtime watcher. Toggling works even without a key (the preference persists);
 // summaries only happen once GEMINI_API_KEY is set.
-export function createTldr({ bridge, settingsPath, apiKey, model, ytDlp = true }) {
+export function createTldr({ bridge, settingsPath, apiKey, model, ytDlp = true, onStage }) {
   const enabled = loadEnabled(settingsPath);
   // Per-conversation timestamp floor: we only summarize links in messages newer
   // than this, so server boot / enabling a chat never re-summarizes old history.
@@ -131,30 +153,54 @@ export function createTldr({ bridge, settingsPath, apiKey, model, ytDlp = true }
   const processed = new Set(); // `${convId}:${msgId}` we've already handled
   const bootTs = Date.now();
 
+  // Local-only stage feedback for the UI. A callback (wired in src/server.js to
+  // the SSE channel) receives {conversationId, state, url, reason?} as a link
+  // moves through fetching -> summarizing -> retrying -> done/failed. This never
+  // sends anything into the chat; it's purely so the browser can show a transient
+  // status bubble. `reason` is a pre-sanitized friendly string (never the raw
+  // error, which can carry the API key / timedtext URL).
+  const emit = (convId, state, url, reason) => {
+    if (typeof onStage !== 'function') return;
+    try { onStage({ conversationId: String(convId), state, url, reason }); }
+    catch (err) { log('stage emit error:', err.message); }
+  };
+
   function markProcessed(key) {
     processed.add(key);
     if (processed.size > PROCESSED_CAP) processed.delete(processed.values().next().value);
   }
 
   async function summarizeAndSend(convId, found) {
+    emit(convId, 'fetching', found.url);
     let transcript;
     try {
       transcript = await fetchTranscript(found.videoId, { ytDlp });
     } catch (e) {
       log(`no transcript for ${found.url}: ${e.message}`);
+      emit(convId, 'failed', found.url, 'no transcript available');
       return; // stay silent in the chat
     }
+    emit(convId, 'summarizing', found.url);
     let tldr;
     try {
-      tldr = await summarize({ apiKey, model, transcript: transcript.text, title: transcript.title });
+      tldr = await summarize({
+        apiKey, model, transcript: transcript.text, title: transcript.title,
+        onRetry: (e) => emit(convId, 'retrying', found.url, friendlyReason(e)),
+      });
     } catch (e) {
       log(`summary failed for ${found.url}: ${e.message}`);
+      emit(convId, 'failed', found.url, friendlyReason(e));
       return;
     }
     const summary = tldr.length > MAX_TLDR_CHARS ? tldr.slice(0, MAX_TLDR_CHARS).trimEnd() + '…' : tldr;
     const r = await bridge.sendText(convId, `🤖 TLDR: ${summary}`);
-    if (!r || !r.ok) log(`send failed for ${found.url}: ${r && r.error}`);
-    else log(`sent TLDR for ${found.url}`);
+    if (!r || !r.ok) {
+      log(`send failed for ${found.url}: ${r && r.error}`);
+      emit(convId, 'failed', found.url, 'could not send');
+    } else {
+      log(`sent TLDR for ${found.url}`);
+      emit(convId, 'done', found.url);
+    }
   }
 
   async function handleConversation(convId) {
@@ -192,6 +238,20 @@ export function createTldr({ bridge, settingsPath, apiKey, model, ytDlp = true }
       }
       saveEnabled(settingsPath, enabled);
       return enabled.has(id);
+    },
+
+    // Manual re-run of one link's summary, triggered by the UI's Retry button.
+    // Deliberately bypasses the `processed` dedup set and the per-chat `since`
+    // floor (it's an explicit user action on a known link), so it still works
+    // after the automatic Gemini retries are exhausted -- the whole point on a
+    // flaky-Gemini day. The outcome is reported through the same stage events as
+    // the automatic path; this just kicks it off and returns immediately.
+    retry(convId, url) {
+      if (!apiKey) return { ok: false, error: 'not-configured' };
+      const found = findYouTubeUrl(url);
+      if (!found) return { ok: false, error: 'bad-url' };
+      summarizeAndSend(String(convId), found).catch((e) => log('retry error:', e.message));
+      return { ok: true };
     },
 
     start() {

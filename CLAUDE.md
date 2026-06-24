@@ -153,6 +153,23 @@ evaluate must target the isolated context's id.
   chat.** This is entirely server-side (works with no browser tab open) and touches no
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
+- **Live UI feedback for auto-TLDR** - the pipeline emits per-stage events
+  (`fetching` -> `summarizing` -> `retrying` -> `done`/`failed`, keyed by
+  conversationId) through an `onStage` callback passed into `createTldr`.
+  [src/server.js](src/server.js) forwards them over the **existing** SSE channel as
+  `broadcast('signal', {type:'tldr', conversationId, state, url, reason?})`. The
+  frontend ([public/app.js](public/app.js)) renders a transient, **local-only**
+  status bubble pinned below the open thread (`#tldrStatus`, kept outside
+  `#messagesInner` so message refreshes don't wipe it) - a spinner + label while
+  working; on failure it stays put with the friendly `reason`, a **Retry** button,
+  and a dismiss "x". It is **never** a Signal message. Retry POSTs to
+  `/api/conversations/:id/tldr/retry {url}` -> `tldr.retry(id, url)`, which re-runs
+  the summary **bypassing the dedup/`since`-floor guards**, so it works even after
+  the automatic Gemini retries are spent (the point on a flaky-Gemini day). `reason`
+  is sanitized server-side (`friendlyReason` in [src/tldr.js](src/tldr.js)) so it
+  never leaks the API key or raw timedtext URLs. The bubble is gated to the open
+  conversation and cleared on switch (a cross-conversation indicator is out of
+  scope).
 
 ## Conventions
 

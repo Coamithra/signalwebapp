@@ -612,6 +612,7 @@ async function openConversation(id) {
     clearPending(); // staged files belong to the conversation they were added in
     cancelEdit();   // an in-progress edit belongs to the conversation it started in
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
+    clearTldrStatus(); // the auto-TLDR status bubble is per-chat too
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     state.activeId = id;
     renderConversations(); // update active highlight
@@ -1097,6 +1098,82 @@ async function setTldr(id, next) {
   }
 }
 
+// ---------- auto-TLDR status bubble (local-only, per-chat) ----------
+// A transient bubble pinned below the thread that mirrors what the server-side
+// auto-TLDR pipeline is doing for a YouTube link you posted (see src/tldr.js).
+// It is NEVER a real Signal message — purely local feedback. Driven by 'tldr'
+// SSE stage events; only shown for the open thread and cleared on switch, so
+// state never bleeds between chats. On failure it stays put with a Retry button
+// (which re-runs even after the server's automatic retries are spent) and a
+// dismiss "×". Lives in #tldrStatus, outside #messagesInner, so the message
+// refreshes that replaceChildren() the thread never wipe it.
+let tldrStatus = null; // { url } the visible bubble is tracking, or null when hidden
+
+function clearTldrStatus() {
+  const host = $('#tldrStatus');
+  if (host) { host.replaceChildren(); host.classList.add('hidden'); }
+  tldrStatus = null;
+}
+
+// Render/replace the bubble for a pipeline stage. `url` is the link in flight; it
+// rides into the Retry handler so a manual retry knows what to re-run.
+function renderTldrStatus(stage, reason, url) {
+  const host = $('#tldrStatus');
+  if (!host) return;
+  const failed = stage === 'failed';
+  const label =
+    stage === 'fetching' ? 'Fetching transcript…'
+    : stage === 'summarizing' ? 'Summarizing…'
+    : stage === 'retrying' ? `Retrying${reason ? ` (${reason})` : ''}…`
+    : failed ? `Auto-TLDR failed${reason ? `: ${reason}` : ''}`
+    : 'Working…';
+
+  const children = [
+    failed ? el('span', { class: 'tldr-icon', text: '⚠' }) : el('span', { class: 'tldr-spinner' }),
+    el('span', { class: 'tldr-text', text: label }),
+  ];
+  if (failed) {
+    children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
+    children.push(el('button', {
+      class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: clearTldrStatus,
+    }));
+  }
+  host.replaceChildren(el('div', { class: 'tldr-bubble' + (failed ? ' failed' : '') }, children));
+  host.classList.remove('hidden');
+  tldrStatus = { url };
+  scrollToBottom(); // follow it into view only if already near the bottom
+}
+
+// Handle a 'tldr' SSE stage event. Gated to the open thread (a cross-conversation
+// indicator is explicitly out of scope), mirroring the message-refresh gating.
+function handleTldrStage(e) {
+  if (!e || e.conversationId !== state.activeId) return;
+  if (e.state === 'done') {
+    // Clear only if this completion is for the link the bubble is showing, so a
+    // finishing link can't wipe a different one that's still in progress.
+    if (!tldrStatus || tldrStatus.url === e.url) clearTldrStatus();
+    return;
+  }
+  renderTldrStatus(e.state, e.reason, e.url);
+}
+
+// Manual retry: ask the server to re-run this link's summary. Flip the bubble back
+// to a working state optimistically; the real fetching/summarizing/done/failed
+// updates then stream back over SSE.
+async function retryTldr(url) {
+  const id = state.activeId;
+  if (!id || !url) return;
+  renderTldrStatus('summarizing', null, url);
+  try {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/retry`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }),
+    });
+    if (!r.ok) throw new Error(r.error || 'retry failed');
+  } catch (err) {
+    renderTldrStatus('failed', err.message, url);
+  }
+}
+
 // ---------- status + toast ----------
 function setStatus(status) {
   const dot = $('#statusDot');
@@ -1148,6 +1225,8 @@ function connectSSE() {
       convTimer = setTimeout(loadConversations, 300);
     } else if (e.type === 'messages' && e.conversationId === state.activeId) {
       scheduleRefreshActive();
+    } else if (e.type === 'tldr') {
+      handleTldrStage(e);
     }
   });
   es.onerror = () => setStatus('connecting');

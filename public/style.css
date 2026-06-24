@@ -453,4 +453,37 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 }
 .dlg-btn:hover { background: var(--bg-hover); }
 .dlg-btn.danger { background: var(--danger); color: #fff; }
+
+/* ---------- Auto-TLDR status bubble (local-only feedback) ---------- */
+/* A transient, centered status pill below the thread that reports what the
+   server-side auto-TLDR pipeline is doing for a link you posted. Centered, muted
+   and bordered so it reads as app status, distinct from a real .bubble message. */
+.tldr-status { display: flex; justify-content: center; padding: 4px 0 12px; }
+.tldr-status.hidden { display: none; }
+.tldr-bubble {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 80%;
+  background: var(--bg-input); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 14px;
+  padding: 7px 12px; font-size: 13px; line-height: 1.35;
+}
+.tldr-bubble.failed { color: var(--text); border-color: var(--danger); }
+.tldr-spinner {
+  flex: none; width: 13px; height: 13px; border-radius: 50%;
+  border: 2px solid var(--text-faint); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.tldr-icon { flex: none; color: var(--danger); font-size: 14px; }
+.tldr-text { overflow-wrap: anywhere; }
+.tldr-retry {
+  flex: none; border: none; cursor: pointer; border-radius: 8px;
+  background: var(--accent); color: #fff; font-size: 12.5px; padding: 4px 11px;
+}
+.tldr-retry:hover { background: var(--accent-hover); }
+.tldr-dismiss {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; border: none; cursor: pointer;
+  background: transparent; color: var(--text-dim); font-size: 16px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.tldr-dismiss:hover { background: var(--bg-hover); color: var(--text); }
 .dlg-btn.danger:hover { filter: brightness(1.08); }
