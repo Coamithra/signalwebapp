@@ -167,9 +167,12 @@ evaluate must target the isolated context's id.
   the summary **bypassing the dedup/`since`-floor guards**, so it works even after
   the automatic Gemini retries are spent (the point on a flaky-Gemini day). `reason`
   is sanitized server-side (`friendlyReason` in [src/tldr.js](src/tldr.js)) so it
-  never leaks the API key or raw timedtext URLs. The bubble is gated to the open
-  conversation and cleared on switch (a cross-conversation indicator is out of
-  scope).
+  never leaks the API key or raw timedtext URLs. The bubble shows the open
+  conversation's status, but app.js keeps status **per conversation** in an
+  in-memory `Map` (`tldrByConv`) so it survives switching chats and re-hydrates
+  when you reopen a chat mid-run; it's cleared on a page reload / server restart
+  (no persisted log). A sidebar / cross-conversation indicator is still out of
+  scope.
 
 ## Conventions
 

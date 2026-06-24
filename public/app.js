@@ -612,10 +612,10 @@ async function openConversation(id) {
     clearPending(); // staged files belong to the conversation they were added in
     cancelEdit();   // an in-progress edit belongs to the conversation it started in
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
-    clearTldrStatus(); // the auto-TLDR status bubble is per-chat too
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     state.activeId = id;
     renderConversations(); // update active highlight
+    renderActiveTldr(); // re-hydrate the auto-TLDR bubble for the chat we just opened
   }
   updateSendEnabled();
   $('#emptyState').classList.add('hidden');
@@ -1102,23 +1102,26 @@ async function setTldr(id, next) {
 // A transient bubble pinned below the thread that mirrors what the server-side
 // auto-TLDR pipeline is doing for a YouTube link you posted (see src/tldr.js).
 // It is NEVER a real Signal message — purely local feedback. Driven by 'tldr'
-// SSE stage events; only shown for the open thread and cleared on switch, so
-// state never bleeds between chats. On failure it stays put with a Retry button
+// SSE stage events; the bubble shows the open thread's status, but state is kept
+// per conversation (below) so it survives switching. On failure it stays put with a Retry button
 // (which re-runs even after the server's automatic retries are spent) and a
 // dismiss "×". Lives in #tldrStatus, outside #messagesInner, so the message
 // refreshes that replaceChildren() the thread never wipe it.
 //
-// One bubble per conversation: with several links in flight it tracks the most
-// recent stage event (older links' progress isn't shown separately), and it is
-// not re-hydrated when you switch away and back mid-pipeline -- the next stage
-// event simply repaints it. Both are fine for a transient indicator (a
-// cross-conversation indicator is explicitly out of scope).
-let tldrStatus = null; // { url } the visible bubble is tracking, or null when hidden
+// Status is kept PER CONVERSATION and in-memory, so switching chats doesn't lose
+// it: a summary still running (or a failure left) in another thread is restored
+// when you come back, and a chat you open mid-pipeline is re-hydrated. Ephemeral
+// by design -- a page reload or server restart clears it (we don't persist a
+// log). With several links in flight in one chat it tracks the most recent stage
+// event. A sidebar/cross-conversation indicator is out of scope.
+const tldrByConv = new Map(); // conversationId -> { stage, reason, url }
 
-function clearTldrStatus() {
-  const host = $('#tldrStatus');
-  if (host) { host.replaceChildren(); host.classList.add('hidden'); }
-  tldrStatus = null;
+// Drop a conversation's stored status (on 'done', or when the user dismisses a
+// failed bubble) and repaint if that chat is the one on screen.
+function clearTldrFor(convId) {
+  if (convId == null) return;
+  tldrByConv.delete(String(convId));
+  if (convId === state.activeId) renderActiveTldr();
 }
 
 // Render/replace the bubble for a pipeline stage. `url` is the link in flight; it
@@ -1141,26 +1144,42 @@ function renderTldrStatus(stage, reason, url) {
   if (failed) {
     children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
     children.push(el('button', {
-      class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: clearTldrStatus,
+      class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: () => clearTldrFor(state.activeId),
     }));
   }
   host.replaceChildren(el('div', { class: 'tldr-bubble' + (failed ? ' failed' : '') }, children));
   host.classList.remove('hidden');
-  tldrStatus = { url };
   scrollToBottom(); // follow it into view only if already near the bottom
 }
 
-// Handle a 'tldr' SSE stage event. Gated to the open thread (a cross-conversation
-// indicator is explicitly out of scope), mirroring the message-refresh gating.
+// Handle a 'tldr' SSE stage event for ANY conversation: store the status per chat
+// (so it survives switching) and paint the bubble only when it's the open thread.
 function handleTldrStage(e) {
-  if (!e || e.conversationId !== state.activeId) return;
+  if (!e || !e.conversationId) return;
+  const convId = String(e.conversationId);
   if (e.state === 'done') {
-    // Clear only if this completion is for the link the bubble is showing, so a
+    // Drop the status only if this completion matches the tracked link, so a
     // finishing link can't wipe a different one that's still in progress.
-    if (!tldrStatus || tldrStatus.url === e.url) clearTldrStatus();
+    const cur = tldrByConv.get(convId);
+    if (cur && cur.url !== e.url) return;
+    clearTldrFor(convId);
     return;
   }
-  renderTldrStatus(e.state, e.reason, e.url);
+  tldrByConv.set(convId, { stage: e.state, reason: e.reason, url: e.url });
+  if (convId === state.activeId) renderActiveTldr();
+}
+
+// Paint the open conversation's stored status into #tldrStatus, or clear the host
+// when there's nothing for it. Called on every update and on conversation switch,
+// so the bubble follows you between chats.
+function renderActiveTldr() {
+  const st = state.activeId ? tldrByConv.get(state.activeId) : null;
+  if (!st) {
+    const host = $('#tldrStatus');
+    if (host) { host.replaceChildren(); host.classList.add('hidden'); }
+    return;
+  }
+  renderTldrStatus(st.stage, st.reason, st.url);
 }
 
 // Friendly text for the error tokens the retry endpoint can return, so the bubble
@@ -1171,20 +1190,27 @@ function retryErrorReason(msg) {
   return msg || 'retry failed';
 }
 
-// Manual retry: ask the server to re-run this link's summary. Optimistically show
-// the first real stage ('fetching', which is what the server emits first) so the
-// label doesn't visibly run backwards; the rest stream back over SSE.
+// Manual retry: ask the server to re-run this link's summary. Optimistically store
+// the first real stage ('fetching', what the server emits first) so the label
+// doesn't visibly run backwards; the rest stream back over SSE.
 async function retryTldr(url) {
   const id = state.activeId;
   if (!id || !url) return;
-  renderTldrStatus('fetching', null, url);
+  const key = String(id);
+  tldrByConv.set(key, { stage: 'fetching', reason: null, url });
+  renderActiveTldr();
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/retry`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }),
     });
     if (!r.ok) throw new Error(r.error || 'retry failed');
   } catch (err) {
-    renderTldrStatus('failed', retryErrorReason(err.message), url);
+    // Only show the failure if we're still tracking this same link for that chat.
+    const cur = tldrByConv.get(key);
+    if (cur && cur.url === url) {
+      tldrByConv.set(key, { stage: 'failed', reason: retryErrorReason(err.message), url });
+      renderActiveTldr();
+    }
   }
 }
 
