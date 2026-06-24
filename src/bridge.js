@@ -133,4 +133,13 @@ export class SignalBridge extends EventEmitter {
   sendTyping(id, isTyping) {
     return this._call('sendTyping', id, isTyping);
   }
+
+  editMessage(conversationId, targetMessageId, body) {
+    return this._call('editMessage', conversationId, targetMessageId, body);
+  }
+
+  // forEveryone=true is Signal's "unsend" (can fail); false deletes locally only.
+  deleteMessage(conversationId, messageId, forEveryone) {
+    return this._call('deleteMessage', conversationId, messageId, !!forEveryone);
+  }
 }

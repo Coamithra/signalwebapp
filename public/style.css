@@ -364,3 +364,67 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
   flex: none; padding: 6px 14px 10px; color: var(--text-faint);
   font-size: 11px; letter-spacing: .4px; text-align: right;
 }
+
+/* ---------- Message actions (hover "…" menu) ---------- */
+/* The bubble + its hover menu button sit in one horizontal row; the button is
+   placed on the outer side (left of an outgoing bubble, right of an incoming
+   one) and only fades in while the row is hovered. */
+.bubble-wrap { display: flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; }
+.msg-menu-btn {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; border: none; cursor: pointer;
+  background: transparent; color: var(--text-dim); font-size: 17px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity .12s, background .12s, color .12s;
+}
+.msg-row:hover .msg-menu-btn { opacity: .65; }
+.msg-menu-btn:hover { background: var(--bg-hover); color: var(--text); opacity: 1; }
+
+.msg-menu {
+  position: fixed; z-index: 1100; min-width: 172px;
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.45); padding: 5px;
+}
+.msg-menu-item {
+  display: block; width: 100%; text-align: left; border: none; background: transparent;
+  color: var(--text); font-size: 14px; padding: 9px 12px; border-radius: 7px; cursor: pointer;
+}
+.msg-menu-item:hover { background: var(--bg-hover); }
+.msg-menu-item.danger { color: var(--danger); }
+
+.edited-label { font-style: italic; opacity: .85; }
+
+/* ---------- Composer edit banner ---------- */
+.edit-banner {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: var(--bg-input); border-left: 3px solid var(--accent); border-radius: 8px;
+  font-size: 13.5px;
+}
+.edit-banner-icon { flex: none; color: var(--accent); display: flex; }
+.edit-banner-text { flex: 1; color: var(--text); }
+.edit-banner-cancel {
+  flex: none; width: 24px; height: 24px; border-radius: 50%; border: none; cursor: pointer;
+  background: transparent; color: var(--text-dim); font-size: 18px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.edit-banner-cancel:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ---------- Confirm dialog (delete) ---------- */
+.dlg-overlay {
+  position: fixed; inset: 0; z-index: 1200; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.dlg-panel {
+  width: 340px; max-width: 92vw; background: var(--bg-header);
+  border: 1px solid var(--border); border-radius: 14px; padding: 20px;
+  box-shadow: 0 16px 50px rgba(0,0,0,.5);
+}
+.dlg-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+.dlg-body { font-size: 14px; color: var(--text-dim); line-height: 1.45; margin-bottom: 18px; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.dlg-btn {
+  border: none; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer;
+  background: var(--bg-input); color: var(--text);
+}
+.dlg-btn:hover { background: var(--bg-hover); }
+.dlg-btn.danger { background: var(--danger); color: #fff; }
+.dlg-btn.danger:hover { filter: brightness(1.08); }

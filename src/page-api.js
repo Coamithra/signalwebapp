@@ -212,6 +212,9 @@ export const INSTALL_SCRIPT = `(function () {
       isErased: !!m.isErased,
       hasError: Array.isArray(m.errors) && m.errors.length > 0,
       expireTimer: m.expireTimer || null,
+      // Set once a message has been edited (Signal records an edit revision +
+      // timestamp). Lets the UI show an "Edited" marker like Signal's own.
+      edited: !!(m.editMessageTimestamp || (Array.isArray(m.editHistory) && m.editHistory.length > 1)),
     };
   }
 
@@ -407,6 +410,66 @@ export const INSTALL_SCRIPT = `(function () {
       if (!conv || !conv.notifyTyping) return { ok: false };
       try { conv.notifyTyping({ isTyping: !!isTyping, fromMe: true }); return { ok: true }; }
       catch (e) { return { ok: false, error: String(e) }; }
+    },
+
+    // Edit the text of a message you already sent. Routes through Signal's own
+    // composer action (the same one its UI fires) — it replaces the body, keeps
+    // the message id, records an edit revision, and re-sends per Signal's edit
+    // protocol so recipients see the update. Verified to work without the
+    // conversation being open. There is NO conversation-model method for this in
+    // current Signal (no enqueueEditMessageForSend); the composer thunk is the
+    // path. Text-only: any attachments on the message are left untouched.
+    editMessage: async function (conversationId, targetMessageId, body) {
+      var conv = window.ConversationController.get(conversationId);
+      if (!conv) return { ok: false, error: 'conversation-not-found' };
+      if (typeof body !== 'string' || !body.length) return { ok: false, error: 'empty-body' };
+      try {
+        var r = window.reduxActions.composer.sendEditedMessage(conversationId, {
+          targetMessageId: targetMessageId, message: body, bodyRanges: [],
+        });
+        if (r && typeof r.then === 'function') await r; // thunk returns a promise
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
+
+    // Delete a message. forEveryone=false deletes it locally only (always works).
+    // forEveryone=true is Signal's "unsend": it can fail (outside the time
+    // window, send not delivered, or — like Note to Self — no other recipient to
+    // retract from). The redux action does NOT throw on failure; instead, on
+    // success the message's deletedForEveryone flag flips, and on failure Signal
+    // raises a 'DeleteForEveryoneFailed' toast. So for the forEveryone path we
+    // briefly watch both signals to return a real ok/fail to the caller (snapshot
+    // the prior toast first so a stale one doesn't read as this call's failure).
+    deleteMessage: async function (conversationId, messageId, forEveryone) {
+      var conv = window.ConversationController.get(conversationId);
+      if (!conv) return { ok: false, error: 'conversation-not-found' };
+      try {
+        if (!forEveryone) {
+          var r = window.reduxActions.conversations.deleteMessages({
+            conversationId: conversationId, messageIds: [messageId],
+          });
+          if (r && typeof r.then === 'function') await r;
+          return { ok: true };
+        }
+        var prevToast = (window.reduxStore.getState().toast || {}).toast || null;
+        var r2 = window.reduxActions.conversations.deleteMessagesForEveryone([messageId]);
+        if (r2 && typeof r2.then === 'function') await r2;
+        for (var i = 0; i < 30; i++) { // up to ~3s
+          var st = window.reduxStore.getState();
+          var m = st.conversations.messagesLookup[messageId];
+          if (m && m.deletedForEveryone) return { ok: true };
+          var t = (st.toast || {}).toast || null;
+          if (t && t !== prevToast && t.toastType === 'DeleteForEveryoneFailed') {
+            return { ok: false, error: 'delete-for-everyone-failed' };
+          }
+          await new Promise(function (res) { setTimeout(res, 100); });
+        }
+        return { ok: true, pending: true }; // SSE refresh reconciles the final state
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
     },
   };
 

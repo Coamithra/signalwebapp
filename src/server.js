@@ -413,6 +413,32 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 
+    // /api/conversations/:id/messages/:messageId/edit   { text }
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/edit$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      const messageId = decodeURIComponent(m[2]);
+      let body;
+      try { body = await readBody(req); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const text = (body.text || '').toString();
+      if (!text.trim()) return sendJson(res, 400, { ok: false, error: 'empty' });
+      const result = await bridge.editMessage(id, messageId, text);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    // /api/conversations/:id/messages/:messageId/delete   { forEveryone? }
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/delete$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      const messageId = decodeURIComponent(m[2]);
+      let body;
+      try { body = await readBody(req, 64 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const result = await bridge.deleteMessage(id, messageId, !!body.forEveryone);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
     // /api/conversations/:id/read
     m = pathname.match(/^\/api\/conversations\/([^/]+)\/read$/);
     if (m && req.method === 'POST') {
