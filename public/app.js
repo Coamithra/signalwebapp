@@ -1103,8 +1103,9 @@ async function setTldr(id, next) {
 // auto-TLDR pipeline is doing for a YouTube link you posted (see src/tldr.js).
 // It is NEVER a real Signal message — purely local feedback. Driven by 'tldr'
 // SSE stage events; the bubble shows the open thread's status, but state is kept
-// per conversation (below) so it survives switching. On failure it stays put with a Retry button
-// (which re-runs even after the server's automatic retries are spent) and a
+// per conversation (below) so it survives switching. On failure it stays put
+// with a Retry button (which re-runs even after the server's automatic retries
+// are spent) and a
 // dismiss "×". Lives in #tldrStatus, outside #messagesInner, so the message
 // refreshes that replaceChildren() the thread never wipe it.
 //
@@ -1116,12 +1117,30 @@ async function setTldr(id, next) {
 // event. A sidebar/cross-conversation indicator is out of scope.
 const tldrByConv = new Map(); // conversationId -> { stage, reason, url }
 
+// Store a conversation's status, bounding the Map. Entries normally clear on
+// 'done'/dismiss, but a 'failed' left in a background chat lingers until it's
+// reopened and dismissed, so cap defensively: FIFO-evict the oldest entry that
+// isn't the chat currently on screen.
+const TLDR_CONV_CAP = 50;
+function setTldrFor(convId, status) {
+  const key = String(convId);
+  tldrByConv.set(key, status);
+  if (tldrByConv.size > TLDR_CONV_CAP) {
+    for (const oldest of tldrByConv.keys()) {
+      if (oldest === state.activeId) continue;
+      tldrByConv.delete(oldest);
+      break;
+    }
+  }
+}
+
 // Drop a conversation's stored status (on 'done', or when the user dismisses a
 // failed bubble) and repaint if that chat is the one on screen.
 function clearTldrFor(convId) {
   if (convId == null) return;
-  tldrByConv.delete(String(convId));
-  if (convId === state.activeId) renderActiveTldr();
+  const key = String(convId);
+  tldrByConv.delete(key);
+  if (key === state.activeId) renderActiveTldr();
 }
 
 // Render/replace the bubble for a pipeline stage. `url` is the link in flight; it
@@ -1165,7 +1184,7 @@ function handleTldrStage(e) {
     clearTldrFor(convId);
     return;
   }
-  tldrByConv.set(convId, { stage: e.state, reason: e.reason, url: e.url });
+  setTldrFor(convId, { stage: e.state, reason: e.reason, url: e.url });
   if (convId === state.activeId) renderActiveTldr();
 }
 
@@ -1197,7 +1216,7 @@ async function retryTldr(url) {
   const id = state.activeId;
   if (!id || !url) return;
   const key = String(id);
-  tldrByConv.set(key, { stage: 'fetching', reason: null, url });
+  setTldrFor(key, { stage: 'fetching', reason: null, url });
   renderActiveTldr();
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/retry`, {
@@ -1208,7 +1227,7 @@ async function retryTldr(url) {
     // Only show the failure if we're still tracking this same link for that chat.
     const cur = tldrByConv.get(key);
     if (cur && cur.url === url) {
-      tldrByConv.set(key, { stage: 'failed', reason: retryErrorReason(err.message), url });
+      setTldrFor(key, { stage: 'failed', reason: retryErrorReason(err.message), url });
       renderActiveTldr();
     }
   }
