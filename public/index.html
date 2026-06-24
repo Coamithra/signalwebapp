@@ -53,6 +53,9 @@
           <div class="messages" id="messages">
             <button class="load-older hidden" id="loadOlder">Load older messages</button>
             <div id="messagesInner"></div>
+            <!-- Transient, local-only auto-TLDR status bubble (filled by app.js).
+                 Sits outside #messagesInner so message refreshes never wipe it. -->
+            <div id="tldrStatus" class="tldr-status hidden"></div>
           </div>
 
           <footer class="composer">

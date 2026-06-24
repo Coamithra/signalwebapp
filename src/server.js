@@ -70,6 +70,11 @@ const tldr = createTldr({
   apiKey: GEMINI_API_KEY,
   model: GEMINI_MODEL,
   ytDlp: TLDR_YTDLP,
+  // Forward each pipeline stage to the browser over the existing SSE channel as a
+  // 'tldr' event. The frontend renders a transient, local-only status bubble in
+  // the open thread (fetching -> summarizing -> retrying -> done/failed); nothing
+  // here is ever sent into the Signal chat. Harmless no-op when no tab is open.
+  onStage: (e) => broadcast('signal', { type: 'tldr', ...e }),
 });
 tldr.start();
 
@@ -491,6 +496,20 @@ const server = http.createServer(async (req, res) => {
         tldr.setEnabled(id, !!body.enabled);
       }
       return sendJson(res, 200, { enabled: tldr.isEnabled(id), configured: tldr.configured() });
+    }
+
+    // /api/conversations/:id/tldr/retry   POST { url } -> re-run that link's summary
+    // Drives the UI Retry button on a failed/abandoned auto-TLDR. Fire-and-forget:
+    // the real outcome arrives over SSE as 'tldr' stage events, so this just
+    // reports whether the re-run was accepted (valid link + key configured).
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/tldr\/retry$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      let body;
+      try { body = await readBody(req, 4 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const result = tldr.retry(id, String(body.url || ''));
+      return sendJson(res, result.ok ? 200 : 400, result);
     }
 
     // GET /api/gif/search?q=&limit=   (empty q -> trending)
