@@ -49,12 +49,16 @@ function saveEnabled(file, set) {
   }
 }
 
-// A transient failure worth retrying: an overload/rate-limit/5xx from Gemini, or
-// a network drop / our own 30s timeout. (A 4xx like a bad key, or an empty
-// completion, is not — retrying those just wastes calls.)
+// A transient failure worth retrying: a 5xx overload from Gemini, or a network
+// drop / our own 30s timeout — things that clear within seconds. NOT 429: that's
+// a rate-limit/quota whose window is tens of seconds (the free tier is per
+// minute), so our short backoff can never clear it, and each extra attempt just
+// burns more quota and pushes the lockout further out. On 429 we give up after
+// one call and let the user resend once the window resets. (A 4xx like a bad
+// key, or an empty completion, isn't retried either.)
 function isTransientGeminiError(e) {
   if (e.name === 'TimeoutError' || e.name === 'AbortError') return true;
-  return /^gemini (429|500|502|503|504)\b/.test(e.message) || /fetch failed/i.test(e.message);
+  return /^gemini (500|502|503|504)\b/.test(e.message) || /fetch failed/i.test(e.message);
 }
 
 // One Gemini call. Throws `gemini <status>: <detail>` on a non-OK response or
