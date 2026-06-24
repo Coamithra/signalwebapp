@@ -398,17 +398,18 @@ export const INSTALL_SCRIPT = `(function () {
 
     markRead: async function (id) {
       var conv = window.ConversationController.get(id);
-      if (!conv) return { ok: false };
+      if (!conv) return { ok: false, error: 'conversation-not-found' };
       try {
         // Signal's markRead takes the newest message as { received_at, sent_at }
         // (received_at drives which messages get marked read; sent_at is only
         // logged), NOT a bare timestamp. Passing Date.now() throws a SQL bind error
-        // deep inside markConversationRead, so the read state silently never
-        // persisted -- the unread badge reappeared on reload. lastMessageReceivedAt
-        // and timestamp on the conversation ARE the newest message's received_at and
-        // sent_at, so we needn't load any messages. (Signal's own redux
-        // markConversationRead action is unusable here: it bails when the Signal
-        // window isn't the active window, which it never is while we drive it headlessly.)
+        // inside markConversationRead's getUnreadByConversationAndMarkRead, so the
+        // read state silently never persisted -- the unread badge reappeared on
+        // reload. lastMessageReceivedAt and timestamp on the conversation are
+        // (observed to be) the newest message's received_at and sent_at, so we
+        // needn't load any messages. (Signal's own redux markConversationRead action
+        // is unusable here: it bails when the Signal window isn't the active window,
+        // which it never is while we drive it headlessly.)
         var receivedAt = conv.get('lastMessageReceivedAt');
         if (receivedAt != null && conv.markRead) {
           await conv.markRead(
@@ -421,6 +422,11 @@ export const INSTALL_SCRIPT = `(function () {
           if (conv.throttledUpdateUnread && conv.throttledUpdateUnread.flush) {
             conv.throttledUpdateUnread.flush();
           }
+        } else if (conv.get('unreadCount')) {
+          // Unread messages exist but there's no received_at to mark from. Surface it
+          // rather than reporting a false success -- a bare { ok: true } here would
+          // re-create exactly the swallowed-failure that made the badge come back.
+          return { ok: false, error: 'no-lastMessageReceivedAt' };
         }
         // A manual "mark as unread" flag isn't cleared by markRead -- clear it too, or
         // it (like the count) reappears on reload.
