@@ -107,6 +107,12 @@ server is ready, the status dot goes amber→green and the chat list fills in au
   the top roadmap item (see [`PLAN.md`](PLAN.md))
 - Live updates via SSE; auto-reconnect if Signal restarts or reloads
 - Sending GIFs via a built-in picker (`/gif` command or the **GIF** button), powered by Giphy
+- **Auto-TLDR for YouTube links** — toggle it per chat (thread header → ⋮ options menu). When
+  on, a YouTube link *you* post in that chat gets a short auto-summary, generated from the
+  video's transcript by Google Gemini. Needs `GEMINI_API_KEY` (see Configuration). The
+  transcript is fetched directly (zero-dep); if YouTube bot-gates that, it falls back to
+  [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) **when it's installed** — optional, set
+  `TLDR_YTDLP=0` to never spawn it.
 
 ## Configuration
 
@@ -117,6 +123,9 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `SIGNAL_CDP_HOST`  | auto (probe)  | Pin the CDP host. Unset: probe `127.0.0.1` then `::1` and accept whichever exposes Signal. Set to one host (e.g. `127.0.0.1`) as an escape hatch. |
 | `GIPHY_API_KEY`    | (unset)       | Enables the `/gif` picker. Free key from [developers.giphy.com](https://developers.giphy.com); until it's set, the picker shows a hint. |
 | `GIPHY_RATING`     | `g`           | Max content rating for GIF results (`g`, `pg`, `pg-13`, `r`). |
+| `GEMINI_API_KEY`   | (unset)       | Enables per-chat **Auto-TLDR** of YouTube links you post. Key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey); until set, the toggle shows a hint. |
+| `GEMINI_MODEL`     | `gemini-2.5-flash` | Gemini model used for the summary. |
+| `TLDR_YTDLP`       | `1` (on)      | If [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is on `PATH`, it's used as a transcript fallback when YouTube blocks the direct fetch. Set to `0` to never spawn it (direct fetch only). |
 
 ## Architecture
 
@@ -126,6 +135,8 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | [`src/page-api.js`](src/page-api.js) | The JS injected **into Signal's context**. Defines `window.__sb` (list/read/send/typing) and a redux subscriber that queues realtime change events. |
 | [`src/bridge.js`](src/bridge.js) | Composes CDP + injected API into clean async methods; drains the in-page event queue and emits realtime events. |
 | [`src/server.js`](src/server.js) | HTTP server: REST API, SSE stream, static UI. Binds to localhost only. |
+| [`src/youtube.js`](src/youtube.js) | Detects YouTube links in a message and fetches a video's transcript (zero-dep). Re-probe here if YouTube changes and auto-TLDR stops working. |
+| [`src/tldr.js`](src/tldr.js) | Auto-TLDR: per-chat settings, the Gemini call, and the watcher that turns a posted YouTube link into a summary. Reuses the bridge's `getMessages`/`sendText`. |
 | [`public/`](public/) | The UI — `index.html`, `style.css`, `app.js`. |
 
 ### Why this approach

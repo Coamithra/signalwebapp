@@ -13,6 +13,9 @@ logs/
 .env.*
 !.env.example
 
+# Per-chat auto-TLDR settings (local app state)
+.tldr-settings.json
+
 # Claude Code local settings (keep launch.json shared)
 .claude/settings.local.json
 

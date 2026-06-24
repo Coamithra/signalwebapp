@@ -42,6 +42,8 @@ evaluate must target the isolated context's id.
 | [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/sendMedia/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
+| [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
+| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing). |
 
@@ -121,6 +123,23 @@ evaluate must target the isolated context's id.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes
   `{type:'conversations'}` / `{type:'messages',conversationId}` into `__sbQueue`. The
   server drains every 200ms and forwards over SSE. ~instant, no polling of large state.
+- **Auto-TLDR YouTube links** — opt-in per chat (thread header → ⋮ menu →
+  `GET`/`POST /api/conversations/:id/tldr`; the set of enabled ids persists in the
+  gitignored `.tldr-settings.json`). [src/tldr.js](src/tldr.js) subscribes to the bridge's
+  own `'event'` stream (same `{type:'messages',conversationId}` events the SSE layer uses)
+  and, for an **enabled** conversation, loads the newest messages and looks for a *new,
+  outgoing* message containing a YouTube link. Only the user's own links trigger it
+  (`msg.direction === 'outgoing'`), and only messages newer than a per-chat timestamp floor
+  (server boot / enable time) so history is never re-summarized; a bounded `processed` set
+  dedupes. It fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
+  `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks Gemini
+  (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-2.5-flash`) for a ~2-sentence summary
+  (clamped to `MAX_TLDR_CHARS` before sending, since it auto-posts to real contacts),
+  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The TLDR has no link, so
+  it can't trigger itself. **Failures are logged and swallowed — never posted into the
+  chat.** This is entirely server-side (works with no browser tab open) and touches no
+  Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
+  *YouTube* change will, and the fix is localized to `src/youtube.js`.
 
 ## Conventions
 

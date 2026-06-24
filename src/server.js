@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SignalBridge } from './bridge.js';
+import { createTldr } from './tldr.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -50,6 +51,25 @@ function broadcast(event, data) {
 
 bridge.on('event', (e) => broadcast('signal', e));
 bridge.on('status', (s) => broadcast('status', { status: s }));
+
+// ---- Auto-TLDR for YouTube links (per-chat, server-side) ----
+// Watches the realtime event stream; when the user posts a YouTube link in a
+// chat they've enabled, it fetches the transcript and posts a Gemini-generated
+// TLDR back into that chat (see src/tldr.js). Per-chat on/off persists in a
+// gitignored JSON file at the repo root. Without GEMINI_API_KEY it stays idle
+// but the toggle still works. TLDR_YTDLP=0 disables the (optional) yt-dlp
+// transcript fallback, leaving only the zero-dep HTTP fetch.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const TLDR_YTDLP = !/^(0|false|no)$/i.test(process.env.TLDR_YTDLP || '');
+const tldr = createTldr({
+  bridge,
+  settingsPath: path.join(__dirname, '..', '.tldr-settings.json'),
+  apiKey: GEMINI_API_KEY,
+  model: GEMINI_MODEL,
+  ytDlp: TLDR_YTDLP,
+});
+tldr.start();
 
 // ---- helpers ----
 const CONTENT_TYPES = {
@@ -454,6 +474,21 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const result = await bridge.sendTyping(id, !!body.isTyping);
       return sendJson(res, 200, result);
+    }
+
+    // /api/conversations/:id/tldr   GET -> {enabled, configured}; POST {enabled} -> set
+    // Pure server state (no bridge call), so the per-chat toggle works even when
+    // Signal is unreachable.
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/tldr$/);
+    if (m && (req.method === 'GET' || req.method === 'POST')) {
+      const id = decodeURIComponent(m[1]);
+      if (req.method === 'POST') {
+        let body;
+        try { body = await readBody(req, 4 * 1024); }
+        catch { return sendJson(res, 400, { error: 'invalid-body' }); }
+        tldr.setEnabled(id, !!body.enabled);
+      }
+      return sendJson(res, 200, { enabled: tldr.isEnabled(id), configured: tldr.configured() });
     }
 
     // GET /api/gif/search?q=&limit=   (empty q -> trending)
