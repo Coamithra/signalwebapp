@@ -152,6 +152,7 @@ async function loadConversations() {
   try {
     const { conversations } = await api('/api/conversations');
     state.conversations = conversations;
+    maybeMarkActiveRead(); // a new message in the open thread shouldn't leave a badge
     applySearch();
     renderConversations();
     if (state.activeId) {
@@ -362,6 +363,17 @@ function markConversationRead(conv) {
   renderConversations();
   api(`/api/conversations/${encodeURIComponent(conv.id)}/read`, { method: 'POST' })
     .catch(() => {}); // best-effort; the SSE conversations event resyncs if it failed
+}
+
+// Keep the *open* thread read as content arrives. Native Signal marks a focused,
+// open conversation read automatically; without this, a message arriving in (or a
+// reply you send to) the thread you're already looking at leaves a stale unread
+// badge that only a re-click clears. Gated on tab visibility so we never send read
+// receipts for messages you couldn't have seen (tab hidden/backgrounded).
+function maybeMarkActiveRead() {
+  if (!state.activeId || document.visibilityState !== 'visible') return;
+  const conv = state.conversations.find((c) => c.id === state.activeId);
+  if (conv && (conv.unreadCount > 0 || conv.markedUnread)) markConversationRead(conv);
 }
 
 async function openConversation(id) {
@@ -607,6 +619,7 @@ async function sendMessage() {
     if (!r.ok) throw new Error(r.error || 'send failed');
     for (const item of attachments) revokePreview(item); // sent — drop local previews
     scheduleRefreshActive();
+    maybeMarkActiveRead(); // replying to an unread thread clears its badge now, not on the next resync
   } catch (err) {
     toast('Failed to send: ' + err.message, true);
     optimistic.querySelector('.tick')?.replaceWith(
@@ -765,6 +778,10 @@ function init() {
   document.addEventListener('selectionchange', () => {
     if (pendingRefresh && !selectionInMessages()) refreshActiveMessages();
   });
+
+  // Coming back to the tab with the open thread still showing an unread badge
+  // (a message arrived while it was hidden) marks it read now that you can see it.
+  document.addEventListener('visibilitychange', maybeMarkActiveRead);
 
   $('#loadOlder').addEventListener('click', async () => {
     if (!state.activeId) return;
