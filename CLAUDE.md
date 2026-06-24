@@ -112,6 +112,19 @@ evaluate must target the isolated context's id.
   frontend adds a hover "…" menu (Edit / Delete for everyone / Delete for me), a composer
   edit mode (banner + Escape to cancel), and **↑ on an empty composer** to quick-edit your
   last message.
+- **Mark a thread read** — `window.__sb.markRead(id)` →
+  `conv.markRead({ received_at, sent_at }, { sendReadReceipts: true })`. ⚠️ Current Signal's
+  `markRead` takes the **newest message as `{ received_at, sent_at }`, not a bare timestamp**
+  (`received_at` — the monotonic counter, *not* `received_at_ms` — drives which messages get
+  marked read; `sent_at` is only logged). `conv.markRead(Date.now())` silently threw a SQL
+  bind error inside `getUnreadByConversationAndMarkRead`, so the read state never persisted
+  and the unread badge came back on reload. We read those two values straight off the
+  conversation (`lastMessageReceivedAt` / `timestamp`) so no message load is needed, then
+  `throttledUpdateUnread.flush()` so the recomputed `unreadCount` reaches redux/SSE promptly,
+  and also clear the manual `markedUnread` flag (which `markRead` leaves alone). **Do not**
+  reach for Signal's redux `conversations.markConversationRead` action: it no-ops unless the
+  Signal window `isActive()`, which it isn't while we drive it headlessly. Route:
+  `POST /api/conversations/:id/read`.
 - **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
   Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
   `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches
