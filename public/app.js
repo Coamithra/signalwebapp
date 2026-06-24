@@ -441,7 +441,10 @@ async function refreshActiveMessages() {
 
 function scrollToBottom(force) {
   const m = $('#messages');
-  if (force || state.nearBottom) m.scrollTop = m.scrollHeight;
+  // behavior:'instant' overrides .messages' scroll-behavior:smooth — assigning
+  // scrollTop would otherwise animate (and visibly "catch up" as late content
+  // reflows), so opening a thread jumps straight to the newest message instead.
+  if (force || state.nearBottom) m.scrollTo({ top: m.scrollHeight, behavior: 'instant' });
 }
 
 // ---------- composer: pending attachments ----------
