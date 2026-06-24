@@ -104,7 +104,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 - Message history with day dividers, group sender names, delivery/read ticks, reactions
 - Sending text messages (Enter to send, Shift+Enter for newline)
 - Attachments shown as labelled chips (📷 / 🎬 / 🎤 / 📎) — inline image/media rendering is
-  the first card on the [board](https://trello.com/b/xPTe6ZZx)
+  the top roadmap item (see [`PLAN.md`](PLAN.md))
 - Live updates via SSE; auto-reconnect if Signal restarts or reloads
 - Sending GIFs via a built-in picker (`/gif` command or the **GIF** button), powered by Giphy
 
@@ -151,14 +151,14 @@ research notes and roadmap.
 
 ## Contributing
 
-Work is tracked on the [Signal Web App Trello board](https://trello.com/b/xPTe6ZZx).
+Work is tracked on a local Trello board (see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow).
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the card → worktree → PR workflow, and
 [CLAUDE.md](CLAUDE.md) for the architecture and conventions (especially the CDP
 isolated-context gotcha — read it before touching the bridge).
 
 ## Roadmap
 
-Tracked on the [board](https://trello.com/b/xPTe6ZZx); see also [`PLAN.md`](PLAN.md) for the
+Tracked on a local board (see [CONTRIBUTING.md](CONTRIBUTING.md)); see also [`PLAN.md`](PLAN.md) for the
 original research notes. Near-term: inline attachment/media rendering, group info & member
 lists, message search, and disappearing-message UI.
 
