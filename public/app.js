@@ -89,7 +89,7 @@ async function api(path, opts) {
   const res = await fetch(path, opts);
   if (!res.ok) {
     let msg = res.statusText;
-    try { msg = (await res.json()).message || msg; } catch {}
+    try { const j = await res.json(); msg = j.message || j.error || msg; } catch {}
     throw new Error(msg);
   }
   return res.json();
@@ -575,6 +575,7 @@ function pendingEchoEl(item) {
 
 // ---------- composer: send ----------
 async function sendMessage() {
+  if (tryGifCommand()) return; // "/gif …" opens the picker instead of sending
   const input = $('#composerInput');
   const text = input.value.trim();
   const attachments = state.pendingAttachments.slice();
@@ -641,6 +642,159 @@ function autoGrow() {
   const input = $('#composerInput');
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+}
+
+// ---------- GIF picker ----------
+// "/gif [query]" in the composer opens the picker instead of sending. Invoked
+// from the top of sendMessage(), so it covers both Enter and the Send button.
+function tryGifCommand() {
+  if (!state.activeId) return false;
+  const input = $('#composerInput');
+  const m = /^\s*\/gif\b[ \t]*(.*)$/i.exec(input.value);
+  if (!m) return false;
+  input.value = '';
+  autoGrow();
+  updateSendEnabled();
+  openGifPicker(m[1].trim());
+  return true;
+}
+
+// Modal GIF picker: search box + a masonry grid of animated previews served
+// straight from Giphy's CDN. Picking one sends it (with any caption still in the
+// composer) through /send-gif. Mirrors the openLightbox() overlay/Escape pattern.
+function openGifPicker(initialQuery = '') {
+  if (!state.activeId) return;
+
+  const searchInput = el('input', {
+    class: 'gif-search', type: 'text', placeholder: 'Search GIFs', value: initialQuery, autocomplete: 'off',
+  });
+  const grid = el('div', { class: 'gif-grid' });
+  const status = el('div', { class: 'gif-status' });
+  const panel = el('div', { class: 'gif-panel' }, [
+    el('div', { class: 'gif-head' }, [
+      searchInput,
+      el('button', { class: 'gif-close', text: '×', title: 'Close', 'aria-label': 'Close', onclick: () => close() }),
+    ]),
+    status,
+    grid,
+    el('div', { class: 'gif-attribution', text: 'Powered by GIPHY' }),
+  ]);
+  const overlay = el('div', { class: 'gif-overlay' }, [panel]);
+
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  function close() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(overlay);
+  searchInput.focus();
+
+  function showStatus(node) {
+    status.replaceChildren(typeof node === 'string' ? document.createTextNode(node) : node);
+    status.classList.remove('hidden');
+  }
+  function noKeyMessage() {
+    return el('div', {}, [
+      el('div', { text: 'GIF search needs a free Giphy API key.' }),
+      el('div', { class: 'gif-hint' }, [
+        'Set ',
+        el('code', { text: 'GIPHY_API_KEY' }),
+        ' in the server environment (get one at ',
+        el('a', { href: 'https://developers.giphy.com', target: '_blank', rel: 'noopener', text: 'developers.giphy.com' }),
+        '), then restart the server.',
+      ]),
+    ]);
+  }
+
+  let token = 0;
+  async function search(q) {
+    const mine = ++token;
+    grid.replaceChildren();
+    showStatus('Loading…');
+    try {
+      const data = await api(`/api/gif/search?q=${encodeURIComponent(q)}`);
+      if (mine !== token) return; // a newer search superseded this one
+      if (data.error === 'no-key') { showStatus(noKeyMessage()); return; }
+      if (!data.results || !data.results.length) { showStatus(q ? 'No GIFs found' : 'No trending GIFs right now'); return; }
+      status.classList.add('hidden');
+      renderResults(data.results);
+    } catch {
+      if (mine === token) showStatus("Couldn't reach GIPHY — check your connection.");
+    }
+  }
+
+  function renderResults(results) {
+    const frag = document.createDocumentFragment();
+    for (const g of results) {
+      const img = el('img', { class: 'gif-thumb', src: g.preview.url, alt: g.title || 'GIF', loading: 'lazy' });
+      const cell = el('button', { class: 'gif-cell', title: g.title || 'GIF', onclick: () => { close(); sendGif(g); } }, [img]);
+      if (g.preview.w && g.preview.h) cell.style.aspectRatio = `${g.preview.w} / ${g.preview.h}`;
+      frag.appendChild(cell);
+    }
+    grid.replaceChildren(frag);
+  }
+
+  let debounce;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(() => search(searchInput.value.trim()), 300);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(debounce); search(searchInput.value.trim()); }
+  });
+
+  search(initialQuery.trim());
+}
+
+// Send a chosen GIF. The server fetches the bytes by id and routes them through
+// the normal media-send path; here we echo it optimistically with the Giphy
+// preview URL (animated, off the CDN) and reuse the same caption/refresh flow as
+// sendMessage().
+async function sendGif(g) {
+  const id = state.activeId;
+  if (!id || state.sending) return;
+  const input = $('#composerInput');
+  const text = input.value.trim();
+  state.sending = true;
+  input.value = '';
+  autoGrow();
+  updateSendEnabled();
+
+  const inner = $('#messagesInner');
+  const optimistic = messageRow(
+    { direction: 'outgoing', text, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
+    null, false,
+  );
+  optimistic.classList.add('optimistic');
+  const bubble = optimistic.querySelector('.bubble');
+  if (bubble) {
+    if (!text) bubble.textContent = '';
+    const ref = text ? bubble.firstChild : null;
+    const img = el('img', { class: 'att-media att-image', src: g.preview.url, alt: g.title || 'GIF' });
+    if (g.preview.w && g.preview.h) img.style.aspectRatio = `${g.preview.w} / ${g.preview.h}`;
+    bubble.insertBefore(wrapMedia(img), ref);
+  }
+  inner.appendChild(optimistic);
+  scrollToBottom(true);
+
+  try {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/send-gif`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: g.id, text }),
+    });
+    if (!r.ok) throw new Error(r.error || 'send failed');
+    scheduleRefreshActive();
+    maybeMarkActiveRead();
+  } catch (err) {
+    toast('Failed to send GIF: ' + err.message, true);
+    optimistic.querySelector('.tick')?.replaceWith(
+      Object.assign(document.createElement('span'), { className: 'tick error', textContent: '⚠' }),
+    );
+    if (text) input.value = input.value || text; // give the caption back
+    updateSendEnabled();
+  } finally {
+    state.sending = false;
+  }
 }
 
 // ---------- status + toast ----------
@@ -713,6 +867,9 @@ function init() {
   });
   $('#sendBtn').addEventListener('click', sendMessage);
   updateSendEnabled();
+
+  // gif: opens the picker (same as typing "/gif")
+  $('#gifBtn').addEventListener('click', () => { if (state.activeId) openGifPicker(''); });
 
   // attach: file-picker button + hidden input
   const fileInput = $('#fileInput');

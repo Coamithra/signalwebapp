@@ -188,6 +188,62 @@ function serveBuffer(req, res, buf, contentType, etagSeed) {
   res.end(buf);
 }
 
+// ---- GIF picker (Giphy) ----
+// Server-side proxy so the API key never reaches the browser and we sidestep
+// CORS. The browser only ever sends a Giphy gif *id*; the only URLs this server
+// fetches are the fixed Giphy API host and the media URLs Giphy's own API hands
+// back for that id — a client can't coax it into fetching arbitrary hosts (no
+// SSRF surface). With no key set, the picker shows a "set GIPHY_API_KEY" hint
+// rather than failing. Get a free key at https://developers.giphy.com.
+const GIPHY_API_KEY = process.env.GIPHY_API_KEY || '';
+const GIPHY_RATING = process.env.GIPHY_RATING || 'g'; // content-rating ceiling
+const GIF_BYTES_MAX = 12 * 1024 * 1024;               // cap on a fetched gif (< SEND_FILE_MAX)
+const GIPHY_API = 'https://api.giphy.com/v1/gifs/';
+
+// Call a Giphy gifs endpoint ("search?…", "trending?…", "<id>?…") -> parsed
+// JSON. Times out so a slow Giphy can never wedge a request.
+async function giphyFetch(endpoint) {
+  const res = await fetch(GIPHY_API + endpoint, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`giphy ${res.status}`);
+  return res.json();
+}
+
+// Trim a Giphy gif object to what the picker grid needs: id + one animated
+// preview rendition (used directly as an <img src> and as the optimistic echo).
+function gifPreview(g) {
+  if (!g || !g.id || !g.images) return null;
+  const im = g.images;
+  const p = im.fixed_width || im.fixed_height || im.downsized || im.preview_gif;
+  if (!p || !p.url) return null;
+  return {
+    id: String(g.id),
+    title: String(g.title || '').slice(0, 140),
+    preview: { url: p.url, w: Number(p.width) || 0, h: Number(p.height) || 0 },
+  };
+}
+
+// Pick a sendable gif rendition: best quality that still fits the byte cap.
+// Giphy's per-rendition `url` is the animated .gif (mp4/webp live under other
+// keys), so we also guard on the extension. If Giphy ever renames renditions,
+// this chain is the one place to repair.
+function gifSendable(g) {
+  if (!g || !g.images) return null;
+  for (const name of ['original', 'downsized_medium', 'downsized', 'fixed_height', 'fixed_width']) {
+    const r = g.images[name];
+    if (!r || !r.url || !/\.gif(\?|$)/i.test(r.url)) continue;
+    if (Number(r.size) > GIF_BYTES_MAX) continue; // too big here; fall through to a smaller one
+    return { url: r.url, w: Number(r.width) || 0, h: Number(r.height) || 0 };
+  }
+  return null;
+}
+
+// A friendly download filename derived from the gif's title.
+function gifFileName(title) {
+  const slug = String(title || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return (slug || 'giphy') + '.gif';
+}
+
 async function serveStatic(req, res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
   rel = decodeURIComponent(rel.split('?')[0]);
@@ -364,6 +420,70 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const result = await bridge.sendTyping(id, !!body.isTyping);
       return sendJson(res, 200, result);
+    }
+
+    // GET /api/gif/search?q=&limit=   (empty q -> trending)
+    if (pathname === '/api/gif/search' && req.method === 'GET') {
+      if (!GIPHY_API_KEY) return sendJson(res, 200, { ok: false, error: 'no-key', results: [] });
+      const q = (url.searchParams.get('q') || '').trim();
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 24, 1), 50);
+      const common = `api_key=${encodeURIComponent(GIPHY_API_KEY)}&limit=${limit}&rating=${encodeURIComponent(GIPHY_RATING)}`;
+      const endpoint = q ? `search?${common}&q=${encodeURIComponent(q)}` : `trending?${common}`;
+      try {
+        const data = await giphyFetch(endpoint);
+        const results = (data.data || []).map(gifPreview).filter(Boolean);
+        return sendJson(res, 200, { ok: true, results, poweredBy: 'GIPHY' });
+      } catch {
+        return sendJson(res, 502, { ok: false, error: 'giphy-unreachable', results: [] });
+      }
+    }
+
+    // POST /api/conversations/:id/send-gif   { id, text? }
+    // The browser passes only a Giphy gif id; the server resolves it to a media
+    // URL via Giphy's API, fetches the bytes, and sends through the same
+    // sendMedia path as any other attachment (so it lands as a real image/gif).
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/send-gif$/);
+    if (m && req.method === 'POST') {
+      if (!GIPHY_API_KEY) return sendJson(res, 503, { ok: false, error: 'no-key' });
+      const convId = decodeURIComponent(m[1]);
+      let body;
+      try { body = await readBody(req, 64 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const gifId = String(body.id || '');
+      const text = String(body.text || '');
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(gifId)) return sendJson(res, 400, { ok: false, error: 'bad-id' });
+
+      let pick, meta;
+      try {
+        meta = await giphyFetch(`${gifId}?api_key=${encodeURIComponent(GIPHY_API_KEY)}`);
+        pick = gifSendable(meta.data);
+      } catch {
+        return sendJson(res, 502, { ok: false, error: 'giphy-unreachable' });
+      }
+      if (!pick) return sendJson(res, 502, { ok: false, error: 'no-rendition' });
+
+      let bytes;
+      try {
+        const r = await fetch(pick.url, { signal: AbortSignal.timeout(15000) });
+        if (!r.ok) return sendJson(res, 502, { ok: false, error: 'gif-fetch-failed' });
+        if (Number(r.headers.get('content-length')) > GIF_BYTES_MAX) {
+          return sendJson(res, 413, { ok: false, error: 'gif-too-large' });
+        }
+        bytes = Buffer.from(await r.arrayBuffer());
+      } catch {
+        return sendJson(res, 502, { ok: false, error: 'gif-fetch-failed' });
+      }
+      if (bytes.length > GIF_BYTES_MAX) return sendJson(res, 413, { ok: false, error: 'gif-too-large' });
+
+      const file = {
+        fileName: gifFileName(meta.data && meta.data.title),
+        contentType: 'image/gif',
+        base64: bytes.toString('base64'),
+        width: pick.w || undefined,
+        height: pick.h || undefined,
+      };
+      const result = await bridge.sendMedia(convId, text, [file]);
+      return sendJson(res, result.ok ? 200 : 400, result);
     }
 
     if (pathname.startsWith('/api/')) {

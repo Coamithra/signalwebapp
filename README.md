@@ -106,6 +106,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 - Attachments shown as labelled chips (📷 / 🎬 / 🎤 / 📎) — inline image/media rendering is
   the first card on the [board](https://trello.com/b/xPTe6ZZx)
 - Live updates via SSE; auto-reconnect if Signal restarts or reloads
+- Sending GIFs via a built-in picker (`/gif` command or the **GIF** button), powered by Giphy
 
 ## Configuration
 
@@ -114,6 +115,8 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `PORT`             | `7700`        | Web server port                  |
 | `SIGNAL_CDP_PORT`  | `9222`        | Signal Desktop remote-debug port |
 | `SIGNAL_CDP_HOST`  | auto (probe)  | Pin the CDP host. Unset: probe `127.0.0.1` then `::1` and accept whichever exposes Signal. Set to one host (e.g. `127.0.0.1`) as an escape hatch. |
+| `GIPHY_API_KEY`    | (unset)       | Enables the `/gif` picker. Free key from [developers.giphy.com](https://developers.giphy.com); until it's set, the picker shows a hint. |
+| `GIPHY_RATING`     | `g`           | Max content rating for GIF results (`g`, `pg`, `pg-13`, `r`). |
 
 ## Architecture
 
