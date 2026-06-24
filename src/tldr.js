@@ -20,10 +20,14 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 // against runaway input, not normal long videos.
 const MAX_TRANSCRIPT_CHARS = 600_000;
 const PROCESSED_CAP = 2000; // bound the dedup set
-// Hard cap on the summary we actually post. The prompt asks for ~2 sentences,
+// Hard cap on the summary we actually post. The prompt asks for ~4 sentences,
 // but this auto-sends to real contacts, so clamp defensively in case the model
-// ignores that and rambles.
-const MAX_TLDR_CHARS = 600;
+// ignores that and rambles. Sized with headroom over the ~100-word target.
+const MAX_TLDR_CHARS = 1200;
+// Retry transient Gemini failures (overload/5xx/timeout) with exponential
+// backoff: waits 1.5s, 3s, 6s between 4 total attempts.
+const GEMINI_MAX_ATTEMPTS = 4;
+const GEMINI_BACKOFF_MS = 1500;
 
 function log(...args) { console.log('  [tldr]', ...args); }
 
@@ -45,18 +49,17 @@ function saveEnabled(file, set) {
   }
 }
 
-// Ask Gemini for a very short TLDR of the transcript. Throws on a non-OK
-// response (surfacing the API's error message) so the caller can log and skip.
-async function summarize({ apiKey, model, transcript, title }) {
-  const body = transcript.length > MAX_TRANSCRIPT_CHARS
-    ? transcript.slice(0, MAX_TRANSCRIPT_CHARS) : transcript;
-  const prompt =
-    'Summarize this YouTube video for a friend who is not going to watch it. ' +
-    'Reply with a VERY SHORT TLDR: at most two sentences (~50 words), plain text, ' +
-    'no preamble, no markdown, and do not start with "TLDR".\n\n' +
-    (title ? `Title: ${title}\n\n` : '') +
-    `Transcript:\n${body}`;
+// A transient failure worth retrying: an overload/rate-limit/5xx from Gemini, or
+// a network drop / our own 30s timeout. (A 4xx like a bad key, or an empty
+// completion, is not — retrying those just wastes calls.)
+function isTransientGeminiError(e) {
+  if (e.name === 'TimeoutError' || e.name === 'AbortError') return true;
+  return /^gemini (429|500|502|503|504)\b/.test(e.message) || /fetch failed/i.test(e.message);
+}
 
+// One Gemini call. Throws `gemini <status>: <detail>` on a non-OK response or
+// `gemini-no-text:<reason>` if the completion is empty (blocked / truncated).
+async function geminiOnce({ apiKey, model, prompt }) {
   const generationConfig = { temperature: 0.3, maxOutputTokens: 2048 };
   // gemini-2.5-flash "thinks" by default, and thinking tokens count against the
   // output budget — disable it so the budget goes to the answer and the call
@@ -84,6 +87,32 @@ async function summarize({ apiKey, model, transcript, title }) {
     throw new Error(`gemini-no-text:${reason}`);
   }
   return text;
+}
+
+// Ask Gemini for a short TLDR of the transcript, retrying transient failures
+// with backoff. Flash models 503/429 under load often enough that without this a
+// busy moment would just drop the summary. Throws (after retries) on a non-OK
+// response so the caller can log and skip.
+async function summarize({ apiKey, model, transcript, title }) {
+  const body = transcript.length > MAX_TRANSCRIPT_CHARS
+    ? transcript.slice(0, MAX_TRANSCRIPT_CHARS) : transcript;
+  const prompt =
+    'Summarize this YouTube video for a friend who is not going to watch it. ' +
+    'Reply with a SHORT TLDR: at most four sentences (~100 words), plain text, ' +
+    'no preamble, no markdown, and do not start with "TLDR".\n\n' +
+    (title ? `Title: ${title}\n\n` : '') +
+    `Transcript:\n${body}`;
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await geminiOnce({ apiKey, model, prompt });
+    } catch (e) {
+      if (attempt >= GEMINI_MAX_ATTEMPTS || !isTransientGeminiError(e)) throw e;
+      const wait = GEMINI_BACKOFF_MS * 2 ** (attempt - 1); // 1.5s, 3s, 6s
+      log(`gemini transient (${e.message}) — retry ${attempt + 1}/${GEMINI_MAX_ATTEMPTS} in ${wait}ms`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
 }
 
 // Wire up the feature. Returns the small surface the server needs: a configured()
