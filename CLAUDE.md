@@ -39,7 +39,7 @@ evaluate must target the isolated context's id.
 | File | Role |
 |------|------|
 | [src/cdp.js](src/cdp.js) | Generic CDP client over the built-in `WebSocket`. Probes `127.0.0.1` then `::1` (override with `SIGNAL_CDP_HOST`) for the host actually exposing `background.html`, connects to that page target, tracks the isolated context, auto-reconnects with backoff. |
-| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/sendMedia/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
+| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/sendMedia/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
@@ -89,6 +89,29 @@ evaluate must target the isolated context's id.
   `sendMedia` path** as any attachment, so there's no `page-api.js`/`bridge.js`
   change. The browser only ever passes a Giphy id, so the proxy can't be aimed at
   arbitrary hosts. Optional `GIPHY_RATING` (default `g`) caps the content rating.
+- **Edit a message** — `window.__sb.editMessage(conversationId, targetMessageId, body)` →
+  `window.reduxActions.composer.sendEditedMessage(conversationId, { targetMessageId, message, bodyRanges: [] })`.
+  This is Signal's own edit path (the composer thunk); it replaces the body, **keeps
+  the same message id**, records an edit revision, and re-sends per Signal's edit
+  protocol. Verified it works **without the conversation being open**. There is **no**
+  `enqueueEditMessageForSend` model method in current Signal — the composer action is the
+  path. Text-only (attachments on the message are left untouched). `formatMessage` exposes
+  an `edited` flag (from `editMessageTimestamp`/`editHistory`) so the UI shows an "Edited"
+  marker. Route: `POST /api/conversations/:id/messages/:messageId/edit` with `{ text }`.
+- **Delete a message** — `window.__sb.deleteMessage(conversationId, messageId, forEveryone)`.
+  `forEveryone:false` → `reduxActions.conversations.deleteMessages({ conversationId, messageIds:[id] })`
+  (local-only delete; **always works**, removes the message). `forEveryone:true` →
+  `reduxActions.conversations.deleteMessagesForEveryone([id])` — Signal's **unsend**, which
+  can fail (outside the time window, undelivered, or in **Note to Self**, which has no other
+  recipient to retract from → it raises a `DeleteForEveryoneFailed` toast). The redux action
+  does **not** throw on failure, so for the forEveryone path `deleteMessage` briefly watches
+  both the message's `deletedForEveryone` flag (success) and that toast (failure) to return a
+  real `{ok}`. ⚠️ **Delete-for-everyone cannot be verified against Note to Self** — test it
+  against a real recent message. Route:
+  `POST /api/conversations/:id/messages/:messageId/delete` with `{ forEveryone? }`. The
+  frontend adds a hover "…" menu (Edit / Delete for everyone / Delete for me), a composer
+  edit mode (banner + Escape to cancel), and **↑ on an empty composer** to quick-edit your
+  last message.
 - **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
   Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
   `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches

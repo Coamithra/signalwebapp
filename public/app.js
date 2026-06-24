@@ -12,6 +12,8 @@ const state = {
   lastActiveTimestamp: 0,
   sending: false,
   pendingAttachments: [], // staged files awaiting send: {id, fileName, contentType, base64, size, kind, width, height, previewUrl}
+  messages: [],           // messages of the open thread (for up-arrow quick-edit lookup)
+  editing: null,          // { messageId, original } while editing an already-sent message
 };
 
 // Outbound media limits — kept in lockstep with the server (src/server.js).
@@ -283,7 +285,7 @@ function messageRow(msg, prev, isGroup) {
   }
 
   if (msg.deletedForEveryone) {
-    row.appendChild(el('div', { class: 'bubble deleted', text: 'This message was deleted' }));
+    appendBubble(row, msg, el('div', { class: 'bubble deleted', text: 'This message was deleted' }));
     return row;
   }
 
@@ -298,7 +300,7 @@ function messageRow(msg, prev, isGroup) {
     if (msg.text) bubble.appendChild(document.createTextNode(msg.text));
   }
   if (!bubble.childNodes.length) bubble.appendChild(document.createTextNode(' '));
-  row.appendChild(bubble);
+  appendBubble(row, msg, bubble);
 
   if (msg.reactions && msg.reactions.length) {
     const counts = {};
@@ -310,7 +312,9 @@ function messageRow(msg, prev, isGroup) {
     row.appendChild(rx);
   }
 
-  const meta = el('div', { class: 'msg-meta' }, [fmtMsgTime(msg.timestamp)]);
+  const meta = el('div', { class: 'msg-meta' });
+  if (msg.edited) meta.appendChild(el('span', { class: 'edited-label', text: 'Edited' }));
+  meta.appendChild(document.createTextNode(fmtMsgTime(msg.timestamp)));
   if (msg.direction === 'outgoing') {
     const tick = el('span', { class: 'tick' });
     if (msg.status === 'read') { tick.className = 'tick read'; tick.textContent = '✓✓'; }
@@ -324,7 +328,234 @@ function messageRow(msg, prev, isGroup) {
   return row;
 }
 
+// ---------- message actions: hover "…" menu, edit, delete ----------
+// Which actions apply to a given message. Edit only makes sense for your own
+// text messages; "Delete for everyone" only for your own (Signal's unsend);
+// "Delete for me" (local) is always available. Tombstones/incoming get just the
+// local delete.
+function menuItemsFor(msg) {
+  const items = [];
+  const isOut = msg.direction === 'outgoing';
+  const hasText = !!(msg.text && msg.text.trim());
+  if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) {
+    items.push({ label: 'Edit', onClick: () => startEdit(msg) });
+  }
+  if (isOut && !msg.deletedForEveryone) {
+    items.push({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) });
+  }
+  items.push({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) });
+  return items;
+}
+
+// The kebab button shown on hover. Null for messages with no id (optimistic
+// echoes, not yet sent) or with no applicable actions.
+function buildMenuButton(msg) {
+  if (!msg.id || msg.direction === 'system') return null;
+  if (!menuItemsFor(msg).length) return null;
+  const btn = el('button', {
+    class: 'msg-menu-btn', title: 'Message actions', 'aria-label': 'Message actions', text: '⋯',
+  });
+  btn.addEventListener('click', (e) => { e.stopPropagation(); openMessageMenu(msg, btn); });
+  return btn;
+}
+
+// Lay the bubble out with its hover menu button on the outer edge (or bare if
+// there's no menu). Used by both the normal and deleted-tombstone render paths.
+function appendBubble(row, msg, bubble) {
+  const btn = buildMenuButton(msg);
+  if (!btn) { row.appendChild(bubble); return; }
+  row.appendChild(el('div', { class: 'bubble-wrap' },
+    msg.direction === 'outgoing' ? [btn, bubble] : [bubble, btn]));
+}
+
+let closeMessageMenu = () => {};
+function openMessageMenu(msg, anchorBtn) {
+  closeMessageMenu();
+  const items = menuItemsFor(msg);
+  if (!items.length) return;
+  const menu = el('div', { class: 'msg-menu' });
+  for (const it of items) {
+    menu.appendChild(el('button', {
+      class: 'msg-menu-item' + (it.danger ? ' danger' : ''), text: it.label,
+      onclick: () => { closeMessageMenu(); it.onClick(); },
+    }));
+  }
+  document.body.appendChild(menu);
+
+  // Anchor under the button, right-aligned; flip above if it would overflow.
+  const r = anchorBtn.getBoundingClientRect();
+  let left = Math.max(6, r.right - menu.offsetWidth);
+  let top = r.bottom + 4;
+  if (top + menu.offsetHeight > window.innerHeight - 6) top = r.top - menu.offsetHeight - 4;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(Math.max(6, top))}px`;
+
+  const onDocClick = (e) => { if (!menu.contains(e.target)) closeMessageMenu(); };
+  const onKey = (e) => { if (e.key === 'Escape') closeMessageMenu(); };
+  const onScroll = () => closeMessageMenu();
+  // Defer the doc-click listener so the click that opened the menu doesn't close it.
+  setTimeout(() => document.addEventListener('click', onDocClick), 0);
+  document.addEventListener('keydown', onKey);
+  $('#messages').addEventListener('scroll', onScroll, { passive: true });
+  closeMessageMenu = () => {
+    menu.remove();
+    document.removeEventListener('click', onDocClick);
+    document.removeEventListener('keydown', onKey);
+    $('#messages').removeEventListener('scroll', onScroll);
+    closeMessageMenu = () => {};
+  };
+}
+
+// Find a rendered message row by its stable id (set as data-mid).
+function rowByMid(mid) {
+  for (const row of $('#messagesInner').children) {
+    if (row.dataset && row.dataset.mid === mid) return row;
+  }
+  return null;
+}
+
+// The newest of your own editable text messages — used by the ↑ quick-edit.
+// Reads state.messages (the loaded/rendered window), so a message you *just* sent
+// isn't selectable until the next refresh gives it a real id — until then ↑ edits
+// the previous one. That brief window matches how the optimistic echo works.
+function lastEditableOutgoing() {
+  const msgs = state.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.direction === 'outgoing' && m.text && m.text.trim() && !m.deletedForEveryone && !m.isViewOnce) return m;
+  }
+  return null;
+}
+
+// ----- edit mode (composer) -----
+function startEdit(msg) {
+  if (!msg || !msg.id) return;
+  state.editing = { messageId: msg.id, original: msg.text || '' };
+  const input = $('#composerInput');
+  input.value = msg.text || '';
+  $('#editBanner').classList.remove('hidden');
+  autoGrow();
+  updateSendEnabled();
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function cancelEdit() {
+  if (!state.editing) return;
+  state.editing = null;
+  $('#editBanner').classList.add('hidden');
+  const input = $('#composerInput');
+  input.value = '';
+  autoGrow();
+  updateSendEnabled();
+}
+
+// Last text node inside a bubble (where messageRow puts the body, after any media).
+function bubbleTextNode(bubble) {
+  return [...bubble.childNodes].reverse().find((n) => n.nodeType === Node.TEXT_NODE) || null;
+}
+
+async function submitEdit() {
+  const input = $('#composerInput');
+  const editing = state.editing;
+  const text = input.value.trim();
+  if (!editing || !state.activeId || state.sending) return;
+  if (!text) { toast('Message is empty — delete it instead', true); return; }
+  if (text === (editing.original || '').trim()) { cancelEdit(); return; } // no change
+  const id = state.activeId;
+  const messageId = editing.messageId;
+  state.sending = true;
+  updateSendEnabled();
+
+  // Optimistic: update the bubble text in place. Keep edit mode active until the
+  // server confirms, so a failure leaves the user's text right where they can retry.
+  const row = rowByMid(messageId);
+  const bubble = row ? row.querySelector('.bubble') : null;
+  if (bubble) { const tn = bubbleTextNode(bubble); if (tn) tn.nodeValue = text; }
+
+  try {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
+    });
+    if (!r.ok) throw new Error(r.error || 'edit failed');
+    cancelEdit();           // success -> leave edit mode and clear the composer
+    scheduleRefreshActive();
+  } catch (err) {
+    // Repaint from server truth rather than reverting the bubble node by hand: a
+    // background refresh may have already replaced it, so the saved reference
+    // could be detached. The edit failed, so the server still has the old text.
+    scheduleRefreshActive();
+    toast('Failed to edit: ' + err.message, true); // stay in edit mode for a retry
+  } finally {
+    state.sending = false;
+    updateSendEnabled();
+  }
+}
+
+// ----- delete -----
+async function confirmDelete(msg, forEveryone) {
+  const ok = await confirmDialog({
+    title: forEveryone ? 'Delete for everyone?' : 'Delete for me?',
+    body: forEveryone
+      ? 'This message will be deleted for everyone in the chat. This may fail if too much time has passed.'
+      : 'This message will be deleted from this device only.',
+    confirmLabel: 'Delete',
+  });
+  if (ok) doDelete(msg, forEveryone);
+}
+
+async function doDelete(msg, forEveryone) {
+  const id = state.activeId;
+  if (!id || !msg.id) return;
+  // If we're editing the very message being deleted, drop out of edit mode.
+  if (state.editing && state.editing.messageId === msg.id) cancelEdit();
+
+  // Optimistic only for "delete for me" (always succeeds). "Delete for everyone"
+  // can fail (time window / undelivered), so leave it until the server confirms.
+  if (!forEveryone) { const row = rowByMid(msg.id); if (row) row.remove(); }
+
+  try {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(msg.id)}/delete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ forEveryone }),
+    });
+    if (!r.ok) throw new Error(r.error || 'delete failed');
+    scheduleRefreshActive();
+  } catch (err) {
+    // Repaint from server truth rather than re-inserting the saved node: a
+    // background refresh may have rebuilt the thread, so insertBefore could throw
+    // on a stale sibling. The delete failed, so the message is still there.
+    scheduleRefreshActive();
+    toast(err.message === 'delete-for-everyone-failed'
+      ? 'Could not delete for everyone (message too old or not delivered).'
+      : 'Failed to delete: ' + err.message, true);
+  }
+}
+
+// Small promise-based confirm modal (mirrors the lightbox/gif overlay pattern).
+function confirmDialog({ title, body, confirmLabel }) {
+  return new Promise((resolve) => {
+    const finish = (val) => { close(); resolve(val); };
+    const okBtn = el('button', { class: 'dlg-btn danger', text: confirmLabel || 'OK', onclick: () => finish(true) });
+    const panel = el('div', { class: 'dlg-panel' }, [
+      el('div', { class: 'dlg-title', text: title }),
+      body ? el('div', { class: 'dlg-body', text: body }) : null,
+      el('div', { class: 'dlg-actions' }, [
+        el('button', { class: 'dlg-btn', text: 'Cancel', onclick: () => finish(false) }),
+        okBtn,
+      ]),
+    ]);
+    const overlay = el('div', { class: 'dlg-overlay' }, [panel]);
+    const onKey = (e) => { if (e.key === 'Escape') finish(false); };
+    function close() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false); });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    okBtn.focus();
+  });
+}
+
 function renderMessages(data) {
+  state.messages = data.messages || [];
   const inner = $('#messagesInner');
   const isGroup = data.conversation?.isGroup;
   const frag = document.createDocumentFragment();
@@ -379,6 +610,7 @@ function maybeMarkActiveRead() {
 async function openConversation(id) {
   if (state.activeId !== id) {
     clearPending(); // staged files belong to the conversation they were added in
+    cancelEdit();   // an in-progress edit belongs to the conversation it started in
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     state.activeId = id;
@@ -579,6 +811,7 @@ function pendingEchoEl(item) {
 
 // ---------- composer: send ----------
 async function sendMessage() {
+  if (state.editing) return submitEdit(); // composer is in edit mode -> save the edit
   if (tryGifCommand()) return; // "/gif …" opens the picker instead of sending
   const input = $('#composerInput');
   const text = input.value.trim();
@@ -930,9 +1163,16 @@ function init() {
   const input = $('#composerInput');
   input.addEventListener('input', () => { autoGrow(); updateSendEnabled(); });
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); return; }
+    if (e.key === 'Escape' && state.editing) { e.preventDefault(); cancelEdit(); return; }
+    // ↑ on an empty composer pulls your last editable message in for a quick edit.
+    if (e.key === 'ArrowUp' && !state.editing && input.value === '') {
+      const last = lastEditableOutgoing();
+      if (last) { e.preventDefault(); startEdit(last); }
+    }
   });
   $('#sendBtn').addEventListener('click', sendMessage);
+  $('#editCancel').addEventListener('click', cancelEdit);
   updateSendEnabled();
 
   // gif: opens the picker (same as typing "/gif")
