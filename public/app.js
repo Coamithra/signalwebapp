@@ -379,6 +379,7 @@ function maybeMarkActiveRead() {
 async function openConversation(id) {
   if (state.activeId !== id) {
     clearPending(); // staged files belong to the conversation they were added in
+    closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     state.activeId = id;
     renderConversations(); // update active highlight
@@ -797,6 +798,69 @@ async function sendGif(g) {
   }
 }
 
+// ---------- thread options menu (per-chat) ----------
+// A small dropdown in the thread header. For now it holds the Auto-TLDR toggle:
+// when on, YouTube links you post in this chat get an auto-summary, generated
+// server-side (see src/tldr.js). State is fetched lazily when the menu opens.
+let threadMenuOpen = false;
+
+function closeThreadMenu() {
+  if (!threadMenuOpen) return;
+  $('#threadMenu').classList.add('hidden');
+  $('#threadMenuBtn').setAttribute('aria-expanded', 'false');
+  threadMenuOpen = false;
+}
+
+async function openThreadMenu() {
+  if (!state.activeId) return;
+  const pop = $('#threadMenu');
+  pop.replaceChildren(el('div', { class: 'menu-note', text: 'Loading…' }));
+  pop.classList.remove('hidden');
+  $('#threadMenuBtn').setAttribute('aria-expanded', 'true');
+  threadMenuOpen = true;
+  const id = state.activeId;
+  let data;
+  try { data = await api(`/api/conversations/${encodeURIComponent(id)}/tldr`); }
+  catch { data = { enabled: false, configured: false }; }
+  if (state.activeId !== id || !threadMenuOpen) return; // switched/closed while loading
+  buildThreadMenu(id, data);
+}
+
+function buildThreadMenu(id, data) {
+  const toggle = el('button', {
+    class: 'menu-item' + (data.enabled ? ' on' : ''),
+    role: 'menuitemcheckbox',
+    'aria-checked': data.enabled ? 'true' : 'false',
+    onclick: () => setTldr(id, !data.enabled),
+  }, [
+    el('span', { class: 'menu-check', text: data.enabled ? '✓' : '' }),
+    el('span', { class: 'menu-label', text: 'Auto-TLDR YouTube links' }),
+  ]);
+  const children = [toggle];
+  if (!data.configured) {
+    children.push(el('div', { class: 'menu-hint' }, [
+      'Needs ', el('code', { text: 'GEMINI_API_KEY' }), ' in the server .env.',
+    ]));
+  } else {
+    children.push(el('div', { class: 'menu-note', text: 'YouTube links you post here get a short auto-summary.' }));
+  }
+  $('#threadMenu').replaceChildren(...children);
+}
+
+async function setTldr(id, next) {
+  try {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    });
+    if (state.activeId === id && threadMenuOpen) buildThreadMenu(id, r);
+    toast(r.enabled ? 'Auto-TLDR on for this chat' : 'Auto-TLDR off for this chat');
+  } catch (err) {
+    toast('Could not update: ' + err.message, true);
+  }
+}
+
 // ---------- status + toast ----------
 function setStatus(status) {
   const dot = $('#statusDot');
@@ -870,6 +934,16 @@ function init() {
 
   // gif: opens the picker (same as typing "/gif")
   $('#gifBtn').addEventListener('click', () => { if (state.activeId) openGifPicker(''); });
+
+  // thread options menu (per-chat): toggle on the button, dismiss on outside-click/Escape
+  $('#threadMenuBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (threadMenuOpen) closeThreadMenu(); else openThreadMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (threadMenuOpen && !e.target.closest('.thread-menu')) closeThreadMenu();
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThreadMenu(); });
 
   // attach: file-picker button + hidden input
   const fileInput = $('#fileInput');
