@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (and humans) working in this repo. Read before editing.
 
-> **Making a change?** Follow the card → worktree → PR workflow in
+> **Picking up a Trello ticket, or making any change?** Always work it through the card → worktree → PR workflow in
 > **[CONTRIBUTING.md](CONTRIBUTING.md)**. This file covers *architecture and conventions*;
 > CONTRIBUTING.md covers *how to pick up a card and ship it*.
 
@@ -77,6 +77,16 @@ evaluate must target the isolated context's id.
   native `Uint8Array.fromBase64` (Chrome 140+/current Signal, ~30x faster than a
   per-byte loop, no intermediate binary string), falling back to a chunked `atob`
   that yields to the event loop so a large decode never freezes Signal's UI.
+- **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
+  Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
+  Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
+  "set your key" hint), returning only `{id, title, preview}` per result, so
+  thumbnails load straight from Giphy's CDN. Picking one POSTs `{id, text?}` to
+  `POST /api/conversations/:id/send-gif`; the server resolves that id to a media
+  URL via Giphy, fetches the bytes (cap 12 MB), and sends them down the **same
+  `sendMedia` path** as any attachment, so there's no `page-api.js`/`bridge.js`
+  change. The browser only ever passes a Giphy id, so the proxy can't be aimed at
+  arbitrary hosts. Optional `GIPHY_RATING` (default `g`) caps the content rating.
 - **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
   Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
   `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches

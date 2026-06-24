@@ -246,6 +246,16 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 .attach-btn:hover { background: var(--bg-input); color: var(--text); }
 .attach-btn:active { transform: scale(.92); }
 
+.gif-btn {
+  flex: none; height: 38px; padding: 0 11px; border-radius: 19px; border: none;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+  font-weight: 700; font-size: 12px; letter-spacing: .6px;
+  display: flex; align-items: center; justify-content: center;
+  transition: background .15s, color .15s;
+}
+.gif-btn:hover { background: var(--bg-input); color: var(--text); }
+.gif-btn:active { transform: scale(.92); }
+
 /* pending-attachment tray (above the input row) */
 .attach-tray { display: flex; flex-wrap: wrap; gap: 8px; }
 .attach-prev {
@@ -308,3 +318,49 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(-2px); }
 .toast.error { border-color: var(--danger); }
+
+/* ---------- GIF picker ---------- */
+.gif-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.gif-panel {
+  width: 460px; max-width: 96vw; max-height: 80vh;
+  display: flex; flex-direction: column;
+  background: var(--bg-header); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: 0 16px 50px rgba(0,0,0,.5); overflow: hidden;
+}
+.gif-head { display: flex; align-items: center; gap: 8px; padding: 12px 12px 10px; }
+.gif-search {
+  flex: 1; border: none; outline: none;
+  background: var(--bg-input); color: var(--text);
+  border-radius: 18px; padding: 9px 16px; font-size: 14px;
+}
+.gif-search::placeholder { color: var(--text-faint); }
+.gif-close {
+  flex: none; width: 32px; height: 32px; border-radius: 50%; border: none; cursor: pointer;
+  background: transparent; color: var(--text-dim); font-size: 22px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.gif-close:hover { background: var(--bg-input); color: var(--text); }
+.gif-grid {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 2px 12px 12px;
+  columns: 3; column-gap: 6px;
+}
+@media (max-width: 430px) { .gif-grid { columns: 2; } }
+.gif-cell {
+  display: block; width: 100%; margin: 0 0 6px; padding: 0; border: none; cursor: pointer;
+  background: var(--bg-input); border-radius: 8px; overflow: hidden;
+  break-inside: avoid; line-height: 0;
+}
+.gif-cell:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gif-thumb { width: 100%; height: auto; display: block; }
+.gif-status { padding: 16px; color: var(--text-dim); font-size: 13.5px; text-align: center; line-height: 1.5; }
+.gif-status a { color: var(--accent); }
+.gif-hint { margin-top: 6px; font-size: 12.5px; color: var(--text-faint); }
+.gif-hint code { background: var(--bg-input); border-radius: 4px; padding: 1px 5px; font-size: 12px; }
+.gif-attribution {
+  flex: none; padding: 6px 14px 10px; color: var(--text-faint);
+  font-size: 11px; letter-spacing: .4px; text-align: right;
+}
