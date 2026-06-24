@@ -1107,6 +1107,12 @@ async function setTldr(id, next) {
 // (which re-runs even after the server's automatic retries are spent) and a
 // dismiss "×". Lives in #tldrStatus, outside #messagesInner, so the message
 // refreshes that replaceChildren() the thread never wipe it.
+//
+// One bubble per conversation: with several links in flight it tracks the most
+// recent stage event (older links' progress isn't shown separately), and it is
+// not re-hydrated when you switch away and back mid-pipeline -- the next stage
+// event simply repaints it. Both are fine for a transient indicator (a
+// cross-conversation indicator is explicitly out of scope).
 let tldrStatus = null; // { url } the visible bubble is tracking, or null when hidden
 
 function clearTldrStatus() {
@@ -1157,20 +1163,28 @@ function handleTldrStage(e) {
   renderTldrStatus(e.state, e.reason, e.url);
 }
 
-// Manual retry: ask the server to re-run this link's summary. Flip the bubble back
-// to a working state optimistically; the real fetching/summarizing/done/failed
-// updates then stream back over SSE.
+// Friendly text for the error tokens the retry endpoint can return, so the bubble
+// never shows a raw enum like "not-configured".
+function retryErrorReason(msg) {
+  if (msg === 'not-configured') return 'auto-TLDR is not configured';
+  if (msg === 'bad-url') return 'not a recognized YouTube link';
+  return msg || 'retry failed';
+}
+
+// Manual retry: ask the server to re-run this link's summary. Optimistically show
+// the first real stage ('fetching', which is what the server emits first) so the
+// label doesn't visibly run backwards; the rest stream back over SSE.
 async function retryTldr(url) {
   const id = state.activeId;
   if (!id || !url) return;
-  renderTldrStatus('summarizing', null, url);
+  renderTldrStatus('fetching', null, url);
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/retry`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }),
     });
     if (!r.ok) throw new Error(r.error || 'retry failed');
   } catch (err) {
-    renderTldrStatus('failed', err.message, url);
+    renderTldrStatus('failed', retryErrorReason(err.message), url);
   }
 }
 
