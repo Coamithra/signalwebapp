@@ -415,6 +415,9 @@ function rowByMid(mid) {
 }
 
 // The newest of your own editable text messages — used by the ↑ quick-edit.
+// Reads state.messages (the loaded/rendered window), so a message you *just* sent
+// isn't selectable until the next refresh gives it a real id — until then ↑ edits
+// the previous one. That brief window matches how the optimistic echo works.
 function lastEditableOutgoing() {
   const msgs = state.messages || [];
   for (let i = msgs.length - 1; i >= 0; i--) {
@@ -468,8 +471,7 @@ async function submitEdit() {
   // server confirms, so a failure leaves the user's text right where they can retry.
   const row = rowByMid(messageId);
   const bubble = row ? row.querySelector('.bubble') : null;
-  let prevText = null;
-  if (bubble) { const tn = bubbleTextNode(bubble); if (tn) { prevText = tn.nodeValue; tn.nodeValue = text; } }
+  if (bubble) { const tn = bubbleTextNode(bubble); if (tn) tn.nodeValue = text; }
 
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`, {
@@ -479,7 +481,10 @@ async function submitEdit() {
     cancelEdit();           // success -> leave edit mode and clear the composer
     scheduleRefreshActive();
   } catch (err) {
-    if (bubble && prevText !== null) { const tn = bubbleTextNode(bubble); if (tn) tn.nodeValue = prevText; }
+    // Repaint from server truth rather than reverting the bubble node by hand: a
+    // background refresh may have already replaced it, so the saved reference
+    // could be detached. The edit failed, so the server still has the old text.
+    scheduleRefreshActive();
     toast('Failed to edit: ' + err.message, true); // stay in edit mode for a retry
   } finally {
     state.sending = false;
@@ -507,11 +512,7 @@ async function doDelete(msg, forEveryone) {
 
   // Optimistic only for "delete for me" (always succeeds). "Delete for everyone"
   // can fail (time window / undelivered), so leave it until the server confirms.
-  let removed = null, parent = null, nextSibling = null;
-  if (!forEveryone) {
-    removed = rowByMid(msg.id);
-    if (removed) { parent = removed.parentNode; nextSibling = removed.nextSibling; removed.remove(); }
-  }
+  if (!forEveryone) { const row = rowByMid(msg.id); if (row) row.remove(); }
 
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(msg.id)}/delete`, {
@@ -520,7 +521,10 @@ async function doDelete(msg, forEveryone) {
     if (!r.ok) throw new Error(r.error || 'delete failed');
     scheduleRefreshActive();
   } catch (err) {
-    if (removed && parent) parent.insertBefore(removed, nextSibling); // restore
+    // Repaint from server truth rather than re-inserting the saved node: a
+    // background refresh may have rebuilt the thread, so insertBefore could throw
+    // on a stale sibling. The delete failed, so the message is still there.
+    scheduleRefreshActive();
     toast(err.message === 'delete-for-everyone-failed'
       ? 'Could not delete for everyone (message too old or not delivered).'
       : 'Failed to delete: ' + err.message, true);

@@ -442,6 +442,9 @@ export const INSTALL_SCRIPT = `(function () {
     // raises a 'DeleteForEveryoneFailed' toast. So for the forEveryone path we
     // briefly watch both signals to return a real ok/fail to the caller (snapshot
     // the prior toast first so a stale one doesn't read as this call's failure).
+    // Best-effort: toasts aren't keyed by message, so two unsends racing inside
+    // the same window could cross signals, and a failure toast arriving after the
+    // poll window reports as pending. The SSE refresh reconciles the true state.
     deleteMessage: async function (conversationId, messageId, forEveryone) {
       var conv = window.ConversationController.get(conversationId);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
