@@ -13,6 +13,14 @@ import { SignalBridge } from './bridge.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
+// Load a gitignored .env at the repo root (if present) before reading any config
+// below, so secrets like GIPHY_API_KEY can live in a file instead of the shell
+// environment. Absolute path so it works regardless of the launch cwd; a missing
+// .env is a no-op. Uses Node's built-in parser (>=20.12 / 21.7) -- no dependency.
+try {
+  process.loadEnvFile(path.join(__dirname, '..', '.env'));
+} catch { /* no .env present (or unreadable) -- fall back to the real environment */ }
+
 const PORT = Number(process.env.PORT || 7700);
 const HOST = '127.0.0.1';
 const CDP_PORT = Number(process.env.SIGNAL_CDP_PORT || 9222);
