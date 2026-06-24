@@ -123,7 +123,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `SIGNAL_CDP_HOST`  | auto (probe)  | Pin the CDP host. Unset: probe `127.0.0.1` then `::1` and accept whichever exposes Signal. Set to one host (e.g. `127.0.0.1`) as an escape hatch. |
 | `GIPHY_API_KEY`    | (unset)       | Enables the `/gif` picker. Free key from [developers.giphy.com](https://developers.giphy.com); until it's set, the picker shows a hint. |
 | `GIPHY_RATING`     | `g`           | Max content rating for GIF results (`g`, `pg`, `pg-13`, `r`). |
-| `GEMINI_API_KEY`   | (unset)       | Enables per-chat **Auto-TLDR** of YouTube links you post. Key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey); until set, the toggle shows a hint. |
+| `GEMINI_API_KEY`   | (unset)       | Enables per-chat **Auto-TLDR** of YouTube links you post. Key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey); until set, the toggle shows a hint. `GOOGLE_API_KEY` is accepted as an alias. |
 | `GEMINI_MODEL`     | `gemini-2.5-flash` | Gemini model used for the summary. |
 | `TLDR_YTDLP`       | `1` (on)      | If [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is on `PATH`, it's used as a transcript fallback when YouTube blocks the direct fetch. Set to `0` to never spawn it (direct fetch only). |
 

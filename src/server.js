@@ -56,10 +56,12 @@ bridge.on('status', (s) => broadcast('status', { status: s }));
 // Watches the realtime event stream; when the user posts a YouTube link in a
 // chat they've enabled, it fetches the transcript and posts a Gemini-generated
 // TLDR back into that chat (see src/tldr.js). Per-chat on/off persists in a
-// gitignored JSON file at the repo root. Without GEMINI_API_KEY it stays idle
-// but the toggle still works. TLDR_YTDLP=0 disables the (optional) yt-dlp
-// transcript fallback, leaving only the zero-dep HTTP fetch.
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+// gitignored JSON file at the repo root. Without a key it stays idle but the
+// toggle still works. TLDR_YTDLP=0 disables the (optional) yt-dlp transcript
+// fallback, leaving only the zero-dep HTTP fetch.
+// GEMINI_API_KEY is the documented name; GOOGLE_API_KEY is also accepted since
+// that's the name Google's own GenAI SDK/tooling uses, so an existing .env works.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const TLDR_YTDLP = !/^(0|false|no)$/i.test(process.env.TLDR_YTDLP || '');
 const tldr = createTldr({
