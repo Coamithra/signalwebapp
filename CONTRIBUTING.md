@@ -1,7 +1,8 @@
 # Contributing: Tackling a Trello Card
 
 Step-by-step workflow for picking up and completing any card from the
-[Signal Web App Trello board](https://trello.com/b/xPTe6ZZx) (board id `6a353dfe`).
+**Signal Web App** board (id `6a353dfe`). The board now lives in the **local Trello
+backend** (already configured), so every `trello` command below uses `--backend local`.
 Lists are **To Do → Doing → Done**.
 
 ---
@@ -55,15 +56,15 @@ to a feature branch.
 > **Picking up the top card? Use the atomic `grab` command.** When you are told to "pick up the top card/ticket" (rather than a specific named card), claim it in one step:
 >
 > ```
-> trello --board 6a353dfe grab --from "To Do" --to "Doing"
+> trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"
 > ```
 >
-> This pops the top card of To Do, moves it to Doing, and prints the card it got you (it exits 1 when To Do is empty). It is safe to fire from several agents at once: each gets a distinct card, so no two collide on the same ticket. On the remote Trello backend `grab` settles ties with a brief (~10-30s) claim-comment handshake. For a specific card you were named, skip this and use step 3 below.
+> This pops the top card of To Do, moves it to Doing, and prints the card it got you (it exits 1 when To Do is empty). It is safe to fire from several agents at once: each gets a distinct card, so no two collide on the same ticket. On the local backend `grab` is truly atomic (it takes a store lock), so there's no claim-comment wait. For a specific card you were named, skip this and use step 3 below.
 
 1. **Pull latest main** — `git pull origin main` so you start from the newest code.
 2. **Read the card** — the description is the spec. Larger features may have a longer note
    in `plans/<file>.md`; the card is the pointer.
-3. **Move card to Doing** — `trello --board 6a353dfe card move <card_id> Doing`.
+3. **Move card to Doing** — `trello --backend local --board 6a353dfe card move <card_id> Doing`.
 4. **Create worktree and branch** — branch off `main` with a descriptive prefix:
     - Bugs: `fix/<short-name>` (e.g. `fix/context-swap-race`)
     - Features: `feat/<short-name>` (e.g. `feat/inline-images`)
@@ -178,8 +179,8 @@ fixes, layer your change on top.
     ```
 28. **Delete the plan file** if the card had a `plans/<file>.md` — the plans directory is for
     *open* work only.
-29. **Move card to Done** — `trello --board 6a353dfe card move <card_id> Done`.
-30. **Comment on the card** — `trello --board 6a353dfe comment add <card_id> "<summary>"`:
+29. **Move card to Done** — `trello --backend local --board 6a353dfe card move <card_id> Done`.
+30. **Comment on the card** — `trello --backend local --board 6a353dfe comment add <card_id> "<summary>"`:
     what changed, which files, commit hash(es), and what needs manual testing.
 31. **Create follow-up cards** for anything out of scope that surfaced (pre-existing bugs,
     deferred edge cases). Don't let follow-up work disappear into commit messages.

@@ -16,7 +16,7 @@ and calls Signal's own internal functions. You open it as a browser tab.
 Browser tab (vanilla JS)  <—REST + SSE—>  Node server  <—CDP (ws)—>  Signal Desktop renderer (:9222)
 ```
 
-- **Trello board:** https://trello.com/b/xPTe6ZZx (id `6a353dfe`) — workflow in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Trello board:** local file backend, board id `6a353dfe` (use `trello --backend local`) — workflow in [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Zero runtime dependencies.** Node built-ins only (`http`, global `fetch`/`WebSocket`),
   vanilla JS frontend. No build step, no `npm install`, no framework.
 
