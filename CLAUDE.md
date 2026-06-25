@@ -3,8 +3,9 @@
 Guidance for Claude Code (and humans) working in this repo. Read before editing.
 
 > **Picking up a Trello ticket, or making any change?** Always work it through the card → worktree → PR workflow in
-> **[CONTRIBUTING.md](CONTRIBUTING.md)**. This file covers *architecture and conventions*;
-> CONTRIBUTING.md covers *how to pick up a card and ship it*.
+> the global runbook **`~/.claude/CONTRIBUTING.md`** (Signal Web App specifics are in the
+> **Contributing workflow** section below). This file covers *architecture and conventions*;
+> the runbook covers *how to pick up a card and ship it*.
 
 ## What this is
 
@@ -16,9 +17,18 @@ and calls Signal's own internal functions. You open it as a browser tab.
 Browser tab (vanilla JS)  <—REST + SSE—>  Node server  <—CDP (ws)—>  Signal Desktop renderer (:9222)
 ```
 
-- **Trello board:** local file backend, board id `6a353dfe` (use `trello --backend local`) — workflow in [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Trello board:** local file backend, board id `6a353dfe` (use `trello --backend local`) — workflow in `~/.claude/CONTRIBUTING.md` (see the **Contributing workflow** section).
 - **Zero runtime dependencies.** Node built-ins only (`http`, global `fetch`/`WebSocket`),
   vanilla JS frontend. No build step, no `npm install`, no framework.
+
+## Contributing workflow
+
+Card -> worktree -> PR runbook: follow `~/.claude/CONTRIBUTING.md` (the global generic runbook). Signal Web App specifics:
+
+- **Board:** Signal Web App, id `6a353dfe`, **local backend** - every board command needs `--backend local`. Lists: To Do / Doing / Done. Atomic pickup (truly atomic on the local backend): `trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"`.
+- **Default branch:** `main`. **GitHub:** solo public repo (unprotected `main` -> PR + self-merge, no approval needed).
+- **Worktrees:** `.trees/<branch>` (branch-named, gitignored). **Zero-dep app** - no `.env`, no `node_modules`, no build step - so a fresh worktree is ready to run immediately (no bootstrap).
+- **Verification gate:** no automated test suite yet - verification is hands-on. `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
 
 ## The one thing you must know about the CDP layer
 
