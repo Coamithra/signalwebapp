@@ -315,7 +315,7 @@ function messageRow(msg, prev, isGroup) {
       rx.appendChild(el('span', {
         class: 'reaction-pill',
         text: n > 1 ? `${emoji} ${n}` : emoji,
-        title: names.join(', '),
+        title: [...new Set(names)].join(', '),
       }));
     }
     row.appendChild(rx);
