@@ -303,11 +303,20 @@ function messageRow(msg, prev, isGroup) {
   appendBubble(row, msg, bubble);
 
   if (msg.reactions && msg.reactions.length) {
-    const counts = {};
-    for (const r of msg.reactions) counts[r.emoji] = (counts[r.emoji] || 0) + 1;
+    // Group by emoji, keeping the reactor names so hovering a pill shows who reacted.
+    const byEmoji = new Map();
+    for (const r of msg.reactions) {
+      if (!byEmoji.has(r.emoji)) byEmoji.set(r.emoji, []);
+      byEmoji.get(r.emoji).push(r.from || 'Unknown');
+    }
     const rx = el('div', { class: 'reactions' });
-    for (const [emoji, n] of Object.entries(counts)) {
-      rx.appendChild(el('span', { class: 'reaction-pill', text: n > 1 ? `${emoji} ${n}` : emoji }));
+    for (const [emoji, names] of byEmoji) {
+      const n = names.length;
+      rx.appendChild(el('span', {
+        class: 'reaction-pill',
+        text: n > 1 ? `${emoji} ${n}` : emoji,
+        title: [...new Set(names)].join(', '),
+      }));
     }
     row.appendChild(rx);
   }
