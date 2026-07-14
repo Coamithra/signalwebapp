@@ -115,15 +115,16 @@ export class SignalBridge extends EventEmitter {
     return this._call('getAttachment', messageId, index, opts);
   }
 
-  sendText(id, body) {
-    return this._call('sendText', id, body);
+  // bodyRanges: optional [{ start, length, style }] formatting (see page-api.js).
+  sendText(id, body, bodyRanges) {
+    return this._call('sendText', id, body, bodyRanges || []);
   }
 
   // files: [{ fileName, contentType, base64, width?, height? }]. The base64
   // rides inside the evaluate expression (_call JSON-stringifies args), so the
   // server caps total payload size before calling this.
-  sendMedia(id, body, files) {
-    return this._call('sendMedia', id, body, files);
+  sendMedia(id, body, files, bodyRanges) {
+    return this._call('sendMedia', id, body, files, bodyRanges || []);
   }
 
   markRead(id) {
@@ -134,8 +135,8 @@ export class SignalBridge extends EventEmitter {
     return this._call('sendTyping', id, isTyping);
   }
 
-  editMessage(conversationId, targetMessageId, body) {
-    return this._call('editMessage', conversationId, targetMessageId, body);
+  editMessage(conversationId, targetMessageId, body, bodyRanges) {
+    return this._call('editMessage', conversationId, targetMessageId, body, bodyRanges || []);
   }
 
   // forEveryone=true is Signal's "unsend" (can fail); false deletes locally only.

@@ -139,6 +139,27 @@ const ATTACH_CACHE_MAX = 64 * 1024 * 1024;
 const SEND_BODY_MAX = 48 * 1024 * 1024; // total JSON request body for a send
 const SEND_FILE_MAX = 25 * 1024 * 1024; // per-file raw bytes (matches inline view cap)
 const SEND_MAX_FILES = 10;
+const SEND_MAX_BODY_RANGES = 250;
+
+// Formatting ranges the client parsed out of its markdown-ish composer syntax
+// ({ start, length, style }, style 1..5 = Signal's BodyRange.Style). They go
+// straight into Signal's send path, so drop anything malformed or out of bounds
+// rather than letting it reach the renderer.
+function sanitizeBodyRanges(ranges, text) {
+  if (!Array.isArray(ranges)) return [];
+  const out = [];
+  for (const r of ranges) {
+    if (!r || out.length >= SEND_MAX_BODY_RANGES) break;
+    const start = Number(r.start);
+    const length = Number(r.length);
+    const style = Number(r.style);
+    if (!Number.isInteger(start) || !Number.isInteger(length) || !Number.isInteger(style)) continue;
+    if (style < 1 || style > 5) continue;
+    if (start < 0 || length < 1 || start + length > text.length) continue;
+    out.push({ start, length, style });
+  }
+  return out;
+}
 // In-flight fetches, keyed identically to the cache. A <video> fires several
 // Range requests at once; without this each would do its own CDP round-trip and
 // base64 decode of the whole file. Concurrent misses share one promise instead.
@@ -408,6 +429,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, tooBig ? 413 : 400, { ok: false, error: tooBig ? 'too-large' : 'invalid-body' });
       }
       const text = (body.text || '').toString();
+      const bodyRanges = sanitizeBodyRanges(body.bodyRanges, text);
       const rawAttachments = Array.isArray(body.attachments) ? body.attachments : [];
       if (!text.trim() && !rawAttachments.length) return sendJson(res, 400, { ok: false, error: 'empty' });
 
@@ -432,15 +454,15 @@ const server = http.createServer(async (req, res) => {
             height: Number(a.height) || undefined,
           });
         }
-        const result = await bridge.sendMedia(id, text, files);
+        const result = await bridge.sendMedia(id, text, files, bodyRanges);
         return sendJson(res, result.ok ? 200 : 400, result);
       }
 
-      const result = await bridge.sendText(id, text);
+      const result = await bridge.sendText(id, text, bodyRanges);
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 
-    // /api/conversations/:id/messages/:messageId/edit   { text }
+    // /api/conversations/:id/messages/:messageId/edit   { text, bodyRanges? }
     m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/edit$/);
     if (m && req.method === 'POST') {
       const id = decodeURIComponent(m[1]);
@@ -450,7 +472,7 @@ const server = http.createServer(async (req, res) => {
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const text = (body.text || '').toString();
       if (!text.trim()) return sendJson(res, 400, { ok: false, error: 'empty' });
-      const result = await bridge.editMessage(id, messageId, text);
+      const result = await bridge.editMessage(id, messageId, text, sanitizeBodyRanges(body.bodyRanges, text));
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 
@@ -528,7 +550,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // POST /api/conversations/:id/send-gif   { id, text? }
+    // POST /api/conversations/:id/send-gif   { id, text?, bodyRanges? }
     // The browser passes only a Giphy gif id; the server resolves it to a media
     // URL via Giphy's API, fetches the bytes, and sends through the same
     // sendMedia path as any other attachment (so it lands as a real image/gif).
@@ -572,7 +594,7 @@ const server = http.createServer(async (req, res) => {
         width: pick.w || undefined,
         height: pick.h || undefined,
       };
-      const result = await bridge.sendMedia(convId, text, [file]);
+      const result = await bridge.sendMedia(convId, text, [file], sanitizeBodyRanges(body.bodyRanges, text));
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

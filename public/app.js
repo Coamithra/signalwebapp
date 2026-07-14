@@ -1,6 +1,8 @@
 // Signal web app — frontend. Talks to the local bridge server over REST,
 // receives realtime nudges via SSE, and renders a Signal-like chat UI.
 
+import { parseFormatting, toMarkdown, renderFormatted, shortcodeBefore } from './format.js';
+
 const $ = (sel) => document.querySelector(sel);
 
 const state = {
@@ -297,7 +299,11 @@ function messageRow(msg, prev, isGroup) {
     for (let i = 0; i < (msg.attachments || []).length; i++) {
       bubble.appendChild(attachmentEl(msg, msg.attachments[i], i));
     }
-    if (msg.text) bubble.appendChild(document.createTextNode(msg.text));
+    // Text goes in its own span so bold/italic/etc. (msg.bodyRanges) can be real
+    // elements around it, and so an in-place edit can swap just the body.
+    if (msg.text) {
+      bubble.appendChild(el('span', { class: 'msg-text' }, [renderFormatted(msg.text, msg.bodyRanges)]));
+    }
   }
   if (!bubble.childNodes.length) bubble.appendChild(document.createTextNode(' '));
   appendBubble(row, msg, bubble);
@@ -439,9 +445,12 @@ function lastEditableOutgoing() {
 // ----- edit mode (composer) -----
 function startEdit(msg) {
   if (!msg || !msg.id) return;
-  state.editing = { messageId: msg.id, original: msg.text || '' };
+  // Put the composer's own syntax back in the box, so editing an italic message
+  // shows "_like this_" and doesn't silently strip the formatting on save.
+  const source = toMarkdown(msg.text || '', msg.bodyRanges);
+  state.editing = { messageId: msg.id, original: source };
   const input = $('#composerInput');
-  input.value = msg.text || '';
+  input.value = source;
   $('#editBanner').classList.remove('hidden');
   autoGrow();
   updateSendEnabled();
@@ -459,18 +468,15 @@ function cancelEdit() {
   updateSendEnabled();
 }
 
-// Last text node inside a bubble (where messageRow puts the body, after any media).
-function bubbleTextNode(bubble) {
-  return [...bubble.childNodes].reverse().find((n) => n.nodeType === Node.TEXT_NODE) || null;
-}
-
 async function submitEdit() {
   const input = $('#composerInput');
   const editing = state.editing;
-  const text = input.value.trim();
+  const raw = input.value.trim();
   if (!editing || !state.activeId || state.sending) return;
-  if (!text) { toast('Message is empty — delete it instead', true); return; }
-  if (text === (editing.original || '').trim()) { cancelEdit(); return; } // no change
+  if (!raw) { toast('Message is empty — delete it instead', true); return; }
+  if (raw === (editing.original || '').trim()) { cancelEdit(); return; } // no change
+  const { text, bodyRanges } = parseFormatting(raw);
+  if (!text.trim()) { toast('Message is empty — delete it instead', true); return; }
   const id = state.activeId;
   const messageId = editing.messageId;
   state.sending = true;
@@ -479,12 +485,12 @@ async function submitEdit() {
   // Optimistic: update the bubble text in place. Keep edit mode active until the
   // server confirms, so a failure leaves the user's text right where they can retry.
   const row = rowByMid(messageId);
-  const bubble = row ? row.querySelector('.bubble') : null;
-  if (bubble) { const tn = bubbleTextNode(bubble); if (tn) tn.nodeValue = text; }
+  const textEl = row ? row.querySelector('.bubble .msg-text') : null;
+  if (textEl) textEl.replaceChildren(renderFormatted(text, bodyRanges));
 
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, bodyRanges }),
     });
     if (!r.ok) throw new Error(r.error || 'edit failed');
     cancelEdit();           // success -> leave edit mode and clear the composer
@@ -824,7 +830,11 @@ async function sendMessage() {
   if (state.editing) return submitEdit(); // composer is in edit mode -> save the edit
   if (tryGifCommand()) return; // "/gif …" opens the picker instead of sending
   const input = $('#composerInput');
-  const text = input.value.trim();
+  // What Signal stores is plain text + formatting ranges, so the composer's
+  // "_italic_ :shrug:" syntax is resolved here, once, and both halves are sent.
+  // `raw` is kept to restore the box verbatim if the send fails.
+  const raw = input.value.trim();
+  const { text, bodyRanges } = parseFormatting(raw);
   const attachments = state.pendingAttachments.slice();
   if ((!text && !attachments.length) || !state.activeId || state.sending) return;
   const id = state.activeId;
@@ -840,7 +850,7 @@ async function sendMessage() {
   // real, server-backed render on the refresh that follows a successful send)
   const inner = $('#messagesInner');
   const optimistic = messageRow(
-    { direction: 'outgoing', text, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
+    { direction: 'outgoing', text, bodyRanges, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
     null, false,
   );
   optimistic.classList.add('optimistic');
@@ -859,6 +869,7 @@ async function sendMessage() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         text,
+        bodyRanges,
         attachments: attachments.map((a) => ({
           fileName: a.fileName, contentType: a.contentType, base64: a.base64, width: a.width, height: a.height,
         })),
@@ -878,7 +889,7 @@ async function sendMessage() {
       state.pendingAttachments = attachments.concat(state.pendingAttachments);
       renderPending();
     }
-    if (text) input.value = input.value || text;
+    if (raw) input.value = input.value || raw;
     updateSendEnabled();
   } finally {
     state.sending = false;
@@ -889,6 +900,19 @@ function autoGrow() {
   const input = $('#composerInput');
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+}
+
+// Swap ":shrug:" for 🤷 the moment you close the colon, like Signal's own
+// composer — so what's in the box is what gets sent. (parseFormatting() expands
+// any that slip through, e.g. pasted text, at send time.)
+function expandShortcodeAtCaret(input) {
+  const caret = input.selectionStart;
+  if (caret !== input.selectionEnd) return; // mid-selection: leave it alone
+  const hit = shortcodeBefore(input.value, caret);
+  if (!hit) return;
+  input.value = input.value.slice(0, hit.start) + hit.emoji + input.value.slice(hit.end);
+  const at = hit.start + hit.emoji.length;
+  input.setSelectionRange(at, at);
 }
 
 // ---------- GIF picker ----------
@@ -1000,7 +1024,7 @@ async function sendGif(g) {
   const id = state.activeId;
   if (!id || state.sending) return;
   const input = $('#composerInput');
-  const text = input.value.trim();
+  const { text, bodyRanges } = parseFormatting(input.value.trim()); // the caption formats like any other message
   state.sending = true;
   input.value = '';
   autoGrow();
@@ -1008,7 +1032,7 @@ async function sendGif(g) {
 
   const inner = $('#messagesInner');
   const optimistic = messageRow(
-    { direction: 'outgoing', text, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
+    { direction: 'outgoing', text, bodyRanges, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
     null, false,
   );
   optimistic.classList.add('optimistic');
@@ -1027,7 +1051,7 @@ async function sendGif(g) {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/send-gif`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: g.id, text }),
+      body: JSON.stringify({ id: g.id, text, bodyRanges }),
     });
     if (!r.ok) throw new Error(r.error || 'send failed');
     scheduleRefreshActive();
@@ -1308,7 +1332,7 @@ function init() {
   $('#search').addEventListener('input', () => { applySearch(); renderConversations(); });
 
   const input = $('#composerInput');
-  input.addEventListener('input', () => { autoGrow(); updateSendEnabled(); });
+  input.addEventListener('input', () => { expandShortcodeAtCaret(input); autoGrow(); updateSendEnabled(); });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); return; }
     if (e.key === 'Escape' && state.editing) { e.preventDefault(); cancelEdit(); return; }
