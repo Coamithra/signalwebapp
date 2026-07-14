@@ -208,9 +208,10 @@ body {
   font-size: .92em; background: rgba(0, 0, 0, .22); border-radius: 4px; padding: 0 4px;
 }
 /* Spoiler: hidden until clicked, like Signal's. Block the text out rather than
-   blurring it — blur still leaks word shapes. */
+   blurring it — blur still leaks word shapes. (The bar can't be `currentColor`:
+   `color: transparent` below would make it transparent too.) */
 .msg-text .spoiler {
-  background: currentColor; border-radius: 4px; color: transparent;
+  background: var(--text); border-radius: 4px; color: transparent;
   cursor: pointer; user-select: none;
 }
 .msg-text .spoiler * { visibility: hidden; }

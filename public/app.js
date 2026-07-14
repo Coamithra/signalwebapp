@@ -910,9 +910,9 @@ function expandShortcodeAtCaret(input) {
   if (caret !== input.selectionEnd) return; // mid-selection: leave it alone
   const hit = shortcodeBefore(input.value, caret);
   if (!hit) return;
-  input.value = input.value.slice(0, hit.start) + hit.emoji + input.value.slice(hit.end);
-  const at = hit.start + hit.emoji.length;
-  input.setSelectionRange(at, at);
+  // setRangeText rather than rewriting .value: it edits in place, so Ctrl+Z can
+  // still step back through what was typed.
+  input.setRangeText(hit.emoji, hit.start, hit.end, 'end');
 }
 
 // ---------- GIF picker ----------
@@ -1332,7 +1332,11 @@ function init() {
   $('#search').addEventListener('input', () => { applySearch(); renderConversations(); });
 
   const input = $('#composerInput');
-  input.addEventListener('input', () => { expandShortcodeAtCaret(input); autoGrow(); updateSendEnabled(); });
+  input.addEventListener('input', (e) => {
+    if (!e.isComposing) expandShortcodeAtCaret(input); // never rewrite mid-IME-composition
+    autoGrow();
+    updateSendEnabled();
+  });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); return; }
     if (e.key === 'Escape' && state.editing) { e.preventDefault(); cancelEdit(); return; }

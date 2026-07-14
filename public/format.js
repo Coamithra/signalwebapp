@@ -33,14 +33,21 @@ const MAX_RANGES = 250; // pathological input shouldn't hand Signal a huge array
 
 const isWordChar = (c) => c !== undefined && /[\p{L}\p{N}]/u.test(c);
 
+// Every lookup goes through here: a bare EMOJI_SHORTCODES[name] would walk the
+// prototype chain, so ":constructor:" or ":__proto__:" would splice a function
+// source string / "[object Object]" into the outgoing message.
+const emojiFor = (name) => {
+  const key = name.toLowerCase();
+  return Object.hasOwn(EMOJI_SHORTCODES, key) ? EMOJI_SHORTCODES[key] : undefined;
+};
+
 // ":shrug:" -> 🤷, using Signal's own shortcode table. A backslash escapes it
 // (`\:shrug:` sends the literal text). Runs before the markdown pass so ranges
 // are measured against the final text.
 export function expandShortcodes(text) {
   return text.replace(/(\\?):([a-z0-9_+-]+):/gi, (all, esc, name) => {
     if (esc) return all.slice(1); // "\:name:" -> literal ":name:"
-    const emoji = EMOJI_SHORTCODES[name.toLowerCase()];
-    return emoji || all;
+    return emojiFor(name) || all;
   });
 }
 
@@ -49,7 +56,7 @@ export function expandShortcodes(text) {
 export function shortcodeBefore(text, caret) {
   const m = /:([a-z0-9_+-]+):$/i.exec(text.slice(0, caret));
   if (!m || text[m.index - 1] === '\\') return null;
-  const emoji = EMOJI_SHORTCODES[m[1].toLowerCase()];
+  const emoji = emojiFor(m[1]);
   return emoji ? { emoji, start: m.index, end: caret } : null;
 }
 
@@ -92,7 +99,7 @@ function parseInto(src, ctx) {
     const c = src[i];
     if (c === '\\' && ESCAPABLE.has(src[i + 1])) { literal += src[i + 1]; i += 2; continue; }
 
-    const m = ctx.ranges.length < MAX_RANGES ? openerAt(src, i, src[i - 1]) : null;
+    const m = openerAt(src, i, src[i - 1]);
     const close = m ? findCloser(src, i + m.marker.length, m) : -1;
     if (m && close !== -1) {
       flush();
@@ -101,7 +108,9 @@ function parseInto(src, ctx) {
       // Monospace is literal: `*not bold*` inside backticks stays as typed.
       if (m.style === STYLE.MONOSPACE) ctx.out += inner;
       else parseInto(inner, ctx);
-      if (ctx.out.length > start) {
+      // Past the cap, markers are still *consumed* — dropping the styling is one
+      // thing, leaving stray asterisks in what the message says is another.
+      if (ctx.out.length > start && ctx.ranges.length < MAX_RANGES) {
         ctx.ranges.push({ start, length: ctx.out.length - start, style: m.style });
       }
       i = close + m.marker.length;
@@ -125,16 +134,28 @@ export function parseFormatting(raw) {
 // Markers are inserted at range boundaries (closers before openers at the same
 // offset, so nested spans stay balanced) and any literal marker char in the
 // text is escaped so a re-parse round-trips.
+// Signal's own composer can produce ranges ours never would — crossing spans
+// (bold 0-3 + italic 2-5), or a span padded with spaces — and there is no
+// marker placement that survives a re-parse for those. Saving such an edit must
+// not rewrite what the message *says*, so each candidate is checked by
+// re-parsing it, cheapest first, and the last resort keeps the text exactly and
+// gives up only the styling.
 export function toMarkdown(text, bodyRanges) {
   const ranges = (bodyRanges || []).filter((r) => MARKER_FOR[r.style] && r.length > 0);
-  // Escaping every marker char is always *safe*, but it's noise in the composer:
-  // most text ("snake_case_ok", "C:\Users") re-parses to itself untouched. So
-  // emit the clean version, and only fall back to the escaped one if a re-parse
-  // wouldn't give the message back exactly.
+  const faithful = (candidate) => {
+    const re = parseFormatting(candidate);
+    return re.text === text && sameRanges(re.bodyRanges, ranges);
+  };
+
+  // Escaping every marker char is always safe, but it's noise in the composer:
+  // most text ("snake_case_ok", "C:\Users") re-parses to itself untouched.
   const clean = buildMarkdown(text, ranges, false);
-  const reparsed = parseFormatting(clean);
-  if (reparsed.text === text && sameRanges(reparsed.bodyRanges, ranges)) return clean;
-  return buildMarkdown(text, ranges, true);
+  if (faithful(clean)) return clean;
+
+  const escaped = buildMarkdown(text, ranges, true);
+  if (faithful(escaped)) return escaped;
+
+  return buildMarkdown(text, [], true); // text intact, formatting dropped
 }
 
 function buildMarkdown(text, ranges, escape) {
@@ -178,7 +199,7 @@ const escapeMarkers = (s) => s.replace(/[*_~`|\\]/g, '\\$&');
 // composer text is re-parsed. Safe inside monospace too: expandShortcodes strips
 // the backslash before the markdown pass ever sees the span.
 const escapeShortcodes = (s) => s.replace(/:([a-z0-9_+-]+):/gi,
-  (all, name) => (EMOJI_SHORTCODES[name.toLowerCase()] ? '\\' + all : all));
+  (all, name) => (emojiFor(name) ? '\\' + all : all));
 
 // ---------- rendering ----------
 

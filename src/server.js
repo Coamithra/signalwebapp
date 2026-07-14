@@ -149,7 +149,8 @@ function sanitizeBodyRanges(ranges, text) {
   if (!Array.isArray(ranges)) return [];
   const out = [];
   for (const r of ranges) {
-    if (!r || out.length >= SEND_MAX_BODY_RANGES) break;
+    if (out.length >= SEND_MAX_BODY_RANGES) break;
+    if (!r) continue; // a junk entry drops itself, not every range after it
     const start = Number(r.start);
     const length = Number(r.length);
     const style = Number(r.style);
