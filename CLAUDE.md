@@ -55,7 +55,9 @@ evaluate must target the isolated context's id.
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
-| [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing). |
+| [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). |
+| [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). |
+| [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map after a Signal update). |
 
 ## How the core operations work (don't relearn these the hard way)
 
@@ -65,9 +67,10 @@ evaluate must target the isolated context's id.
   This populates `messagesByConversation[id]` + `messagesLookup` in redux **without
   changing the user's visible Signal window** (verified). Then read those. Messages are
   *not* in redux until loaded.
-- **Send text** — `conversation.enqueueMessageForSend({ body, attachments: [], preview: [], bodyRanges: [] }, { dontClearDraft: true })`.
+- **Send text** — `conversation.enqueueMessageForSend({ body, attachments: [], preview: [], bodyRanges }, { dontClearDraft: true })`.
   ⚠️ `attachments` **must be an array** — the function does `attachments.map(...)` and
-  throws `undefined.map` if you pass only `{ body }`.
+  throws `undefined.map` if you pass only `{ body }`. `bodyRanges` carries the formatting
+  (see **Text formatting** below); `[]` for unformatted text.
 - **Send media** — `window.__sb.sendMedia(id, body, files)` where
   `files = [{ fileName, contentType, base64, width?, height? }]`. It hands Signal
   *in-memory* attachment objects (`{ data: Uint8Array, contentType, size, fileName }`)
@@ -89,6 +92,27 @@ evaluate must target the isolated context's id.
   native `Uint8Array.fromBase64` (Chrome 140+/current Signal, ~30x faster than a
   per-byte loop, no intermediate binary string), falling back to a chunked `atob`
   that yields to the event loop so a large decode never freezes Signal's UI.
+- **Text formatting (bold/italic/…) + emoji shortcodes** — Signal keeps a message's `body`
+  **plain** and describes formatting out-of-band in `bodyRanges`:
+  `{ start, length, style }` with `style` = Signal's `BodyRange.Style`
+  (**BOLD=1, ITALIC=2, SPOILER=3, STRIKETHROUGH=4, MONOSPACE=5** — probed out of Signal's
+  own bundle; @mentions ride in the same array instead carrying a `mentionAci`). Offsets are
+  **UTF-16 code units** (plain JS string indices), the same units Signal's own composer uses.
+  Signal Desktop has **no markdown input** (its formatting comes from the toolbar/hotkeys),
+  so the `*bold*` / `_italic_` / `~strike~` / `` `mono` `` / `||spoiler||` syntax is **ours**,
+  parsed in [public/format.js](public/format.js) — but what goes on the wire is Signal's
+  native ranges, so recipients on any client see real formatting. Flow: the composer parses
+  `raw → { text, bodyRanges }` **client-side** (one parser, also used for the optimistic echo
+  and re-used by the `↑` quick-edit prefill via `toMarkdown`), the server *sanitizes* the
+  ranges (`sanitizeBodyRanges` — drops anything malformed/out-of-bounds; they go straight into
+  Signal), and `page-api.js` hands them to the same `enqueueMessageForSend` /
+  `sendEditedMessage` calls as before. Reading back, `formatBody` in
+  [src/page-api.js](src/page-api.js) inlines mentions into the text **and realigns the style
+  ranges** across each splice (a mention placeholder is 1 char but renders as `@Name`), so the
+  frontend gets `{ text, bodyRanges }` already aligned. `:shortcode:` emoji expand **as you
+  type** in the composer and again at send time (for pasted text); the map is generated from
+  Signal's own emoji table (see the file map). A marker or shortcode you meant literally is
+  escaped with a backslash (`\_not italic\_`).
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
@@ -99,15 +123,15 @@ evaluate must target the isolated context's id.
   `sendMedia` path** as any attachment, so there's no `page-api.js`/`bridge.js`
   change. The browser only ever passes a Giphy id, so the proxy can't be aimed at
   arbitrary hosts. Optional `GIPHY_RATING` (default `g`) caps the content rating.
-- **Edit a message** — `window.__sb.editMessage(conversationId, targetMessageId, body)` →
-  `window.reduxActions.composer.sendEditedMessage(conversationId, { targetMessageId, message, bodyRanges: [] })`.
+- **Edit a message** — `window.__sb.editMessage(conversationId, targetMessageId, body, bodyRanges)` →
+  `window.reduxActions.composer.sendEditedMessage(conversationId, { targetMessageId, message, bodyRanges })`.
   This is Signal's own edit path (the composer thunk); it replaces the body, **keeps
   the same message id**, records an edit revision, and re-sends per Signal's edit
   protocol. Verified it works **without the conversation being open**. There is **no**
   `enqueueEditMessageForSend` model method in current Signal — the composer action is the
   path. Text-only (attachments on the message are left untouched). `formatMessage` exposes
   an `edited` flag (from `editMessageTimestamp`/`editHistory`) so the UI shows an "Edited"
-  marker. Route: `POST /api/conversations/:id/messages/:messageId/edit` with `{ text }`.
+  marker. Route: `POST /api/conversations/:id/messages/:messageId/edit` with `{ text, bodyRanges? }`.
 - **Delete a message** — `window.__sb.deleteMessage(conversationId, messageId, forEveryone)`.
   `forEveryone:false` → `reduxActions.conversations.deleteMessages({ conversationId, messageIds:[id] })`
   (local-only delete; **always works**, removes the message). `forEveryone:true` →

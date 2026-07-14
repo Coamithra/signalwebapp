@@ -65,25 +65,59 @@ export const INSTALL_SCRIPT = `(function () {
     } catch (_) { return null; }
   }
 
-  // An @mention is stored as a placeholder char (U+FFFC) in the body, with the
-  // real target carried in m.bodyRanges as { start, length, mentionAci }. Read
-  // raw, that placeholder renders as a "[OBJ]"/tofu glyph. Mirror Signal's own
-  // renderer: slice the body at each range and swap the placeholder for
-  // "@Name". Walk ranges right-to-left so an earlier splice doesn't shift the
-  // offsets of later ones. (Formatting ranges — bold/italic/etc., which carry a
-  // style field and no mention id — reference existing text, left untouched.)
-  function applyMentions(body, ranges) {
-    if (!body || !Array.isArray(ranges) || !ranges.length) return body || '';
-    var mentions = ranges.filter(function (r) {
-      return r && typeof r.start === 'number' && (r.mentionAci || r.mentionUuid);
-    }).sort(function (a, b) { return b.start - a.start; });
-    for (var i = 0; i < mentions.length; i++) {
-      var r = mentions[i];
-      var name = resolveAuthorTitle(r.mentionAci || r.mentionUuid) || 'Unknown';
-      var len = typeof r.length === 'number' ? r.length : 1;
-      body = body.slice(0, r.start) + '@' + name + body.slice(r.start + len);
+  // Signal keeps a message's text plain and describes everything else in a
+  // parallel bodyRanges array. Two kinds live in there:
+  //
+  //   - @mentions: a placeholder char (U+FFFC) in the body plus a range carrying
+  //     { start, length, mentionAci }. Read raw, the placeholder renders as a
+  //     "[OBJ]"/tofu glyph, so we mirror Signal's renderer and splice "@Name"
+  //     into the text.
+  //   - formatting: { start, length, style } (BOLD=1 … MONOSPACE=5), referencing
+  //     text that's really there. The frontend renders these (public/format.js).
+  //
+  // Splicing a mention changes the text length, which would leave every later
+  // style range pointing at the wrong characters — so both are handled together:
+  // walk the mentions right-to-left (so earlier splices don't shift the offsets
+  // of later ones) and shift the style ranges by each splice's delta as we go.
+  function formatBody(body, ranges) {
+    var text = body || '';
+    var styles = [];
+    var mentions = [];
+    if (Array.isArray(ranges)) {
+      for (var i = 0; i < ranges.length; i++) {
+        var r = ranges[i];
+        if (!r || typeof r.start !== 'number') continue;
+        if (r.mentionAci || r.mentionUuid) mentions.push(r);
+        else if (typeof r.style === 'number' && typeof r.length === 'number') {
+          styles.push({ start: r.start, length: r.length, style: r.style });
+        }
+      }
     }
-    return body;
+    mentions.sort(function (a, b) { return b.start - a.start; });
+
+    for (var m = 0; m < mentions.length; m++) {
+      var mr = mentions[m];
+      var name = '@' + (resolveAuthorTitle(mr.mentionAci || mr.mentionUuid) || 'Unknown');
+      var len = typeof mr.length === 'number' ? mr.length : 1;
+      var end = mr.start + len;
+      var delta = name.length - len;
+      text = text.slice(0, mr.start) + name + text.slice(end);
+
+      for (var s = 0; s < styles.length; s++) {
+        var st = styles[s];
+        var stEnd = st.start + st.length;
+        if (st.start >= end) st.start += delta;          // wholly after the mention
+        else if (stEnd > mr.start) st.length += delta;   // covers it -> grows/shrinks with it
+      }
+    }
+
+    // Clamp: a malformed range must never make the renderer slice past the end.
+    styles = styles.filter(function (st) {
+      if (st.start < 0) { st.length += st.start; st.start = 0; }
+      if (st.start + st.length > text.length) st.length = text.length - st.start;
+      return st.length > 0;
+    });
+    return { text: text, styles: styles };
   }
 
   function describeAttachment(a) {
@@ -195,11 +229,15 @@ export const INSTALL_SCRIPT = `(function () {
       return { emoji: r.emoji, from: resolveAuthorTitle(r.fromId) };
     }) : [];
     var status = direction === 'outgoing' ? computeOutgoingStatus(m) : null;
+    var formatted = formatBody(m.body || '', m.bodyRanges);
     return {
       id: m.id,
       direction: direction,
       type: m.type,
-      text: applyMentions(m.body || '', m.bodyRanges),
+      text: formatted.text,
+      // Formatting only (mentions are already inlined into the text above), with
+      // offsets realigned to it.
+      bodyRanges: formatted.styles,
       authorTitle: authorTitle,
       authorId: m.sourceServiceId || m.source || null,
       timestamp: m.sent_at || m.timestamp || m.received_at_ms || 0,
@@ -337,13 +375,16 @@ export const INSTALL_SCRIPT = `(function () {
       }
     },
 
-    sendText: async function (id, body) {
+    // bodyRanges: optional [{ start, length, style }] — the formatting the
+    // composer parsed out of its markdown-ish syntax. Signal's own composer
+    // produces the identical shape from its toolbar. Sanitized server-side.
+    sendText: async function (id, body, bodyRanges) {
       var conv = window.ConversationController.get(id);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
       if (typeof body !== 'string' || !body.length) return { ok: false, error: 'empty-body' };
       try {
         await conv.enqueueMessageForSend(
-          { body: body, attachments: [], preview: [], bodyRanges: [] },
+          { body: body, attachments: [], preview: [], bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [] },
           { dontClearDraft: true },
         );
         return { ok: true };
@@ -364,7 +405,7 @@ export const INSTALL_SCRIPT = `(function () {
     // coupled to the conversation being open/mounted in Signal's own window, so
     // driving it headlessly would be fragile and disruptive. (Confirmed by
     // probing the running app — the old window.Signal.Migrations API is gone.)
-    sendMedia: async function (id, body, files) {
+    sendMedia: async function (id, body, files, bodyRanges) {
       var conv = window.ConversationController.get(id);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
       if (!Array.isArray(files) || !files.length) return { ok: false, error: 'no-files' };
@@ -387,7 +428,12 @@ export const INSTALL_SCRIPT = `(function () {
           attachments.push(att);
         }
         await conv.enqueueMessageForSend(
-          { body: typeof body === 'string' ? body : '', attachments: attachments, preview: [], bodyRanges: [] },
+          {
+            body: typeof body === 'string' ? body : '',
+            attachments: attachments,
+            preview: [],
+            bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [],
+          },
           { dontClearDraft: true },
         );
         return { ok: true };
@@ -451,13 +497,15 @@ export const INSTALL_SCRIPT = `(function () {
     // conversation being open. There is NO conversation-model method for this in
     // current Signal (no enqueueEditMessageForSend); the composer thunk is the
     // path. Text-only: any attachments on the message are left untouched.
-    editMessage: async function (conversationId, targetMessageId, body) {
+    editMessage: async function (conversationId, targetMessageId, body, bodyRanges) {
       var conv = window.ConversationController.get(conversationId);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
       if (typeof body !== 'string' || !body.length) return { ok: false, error: 'empty-body' };
       try {
         var r = window.reduxActions.composer.sendEditedMessage(conversationId, {
-          targetMessageId: targetMessageId, message: body, bodyRanges: [],
+          targetMessageId: targetMessageId,
+          message: body,
+          bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [],
         });
         if (r && typeof r.then === 'function') await r; // thunk returns a promise
         return { ok: true };

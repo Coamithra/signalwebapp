@@ -202,6 +202,25 @@ body {
 
 .bubble.deleted { font-style: italic; color: var(--text-dim); background: transparent; border: 1px solid var(--border); }
 
+/* ---------- Message text formatting (Signal style bodyRanges) ---------- */
+.msg-text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .92em; background: rgba(0, 0, 0, .22); border-radius: 4px; padding: 0 4px;
+}
+/* Spoiler: hidden until clicked, like Signal's. Block the text out rather than
+   blurring it — blur still leaks word shapes. (The bar can't be `currentColor`:
+   `color: transparent` below would make it transparent too.) */
+.msg-text .spoiler {
+  background: var(--text); border-radius: 4px; color: transparent;
+  cursor: pointer; user-select: none;
+}
+.msg-text .spoiler * { visibility: hidden; }
+.msg-text .spoiler:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.msg-text .spoiler.revealed {
+  background: transparent; color: inherit; cursor: auto; user-select: text;
+}
+.msg-text .spoiler.revealed * { visibility: visible; }
+
 .attachment-chip {
   display: inline-flex; align-items: center; gap: 7px;
   background: rgba(255,255,255,.08); border-radius: 10px; padding: 8px 11px;

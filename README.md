@@ -103,6 +103,11 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 - Conversation list (sorted, pinned, unread badges, mute/typing indicators)
 - Message history with day dividers, group sender names, delivery/read ticks, reactions
 - Sending text messages (Enter to send, Shift+Enter for newline)
+- **Text formatting and emoji shortcodes** — type `*bold*`, `_italic_`, `~strikethrough~`,
+  `` `monospace` `` or `||spoiler||` and it sends as real Signal formatting (the recipient
+  sees it styled, in any Signal client), and `:shrug:` becomes 🤷 as you type — using
+  Signal's own shortcode list. Backslash escapes a marker you meant literally (`\_like this\_`).
+  Incoming messages with formatting render styled too; spoilers are click-to-reveal.
 - Attachments shown as labelled chips (📷 / 🎬 / 🎤 / 📎) — inline image/media rendering is
   the top roadmap item (see [`PLAN.md`](PLAN.md))
 - Live updates via SSE; auto-reconnect if Signal restarts or reloads
