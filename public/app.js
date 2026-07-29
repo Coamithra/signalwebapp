@@ -1043,8 +1043,13 @@ function readEmojiFreq() {
 }
 
 function bumpEmojiFreq(name) {
-  const payload = JSON.stringify(nextEmojiFreq(emojiFreq(), name));
-  try { localStorage.setItem(EMOJI_FREQ_KEY, payload); } catch { /* full or disabled */ }
+  const freq = emojiFreq();
+  const snap = nextEmojiFreq(freq, name);
+  // nextEmojiFreq mutates freq.counts but deliberately not freq.picks — the
+  // caller owns that. Without this the cached count never advances, so the
+  // decay would only ever fire on the first pick after a page load.
+  freq.picks = snap.picks;
+  try { localStorage.setItem(EMOJI_FREQ_KEY, JSON.stringify(snap)); } catch { /* full or disabled */ }
 }
 
 let emojiPop = null;      // { node, list, items, index, start } while open
