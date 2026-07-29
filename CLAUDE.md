@@ -200,8 +200,16 @@ evaluate must target the isolated context's id.
   20 words, copied word-for-word, and omitted entirely rather than invented when nothing is
   worth quoting (the summary is clamped to `MAX_TLDR_CHARS` before sending, since it
   auto-posts to real contacts),
-  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The TLDR has no link, so
-  it can't trigger itself. **Failures are logged and swallowed — never posted into the
+  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The transcript and
+  title are untrusted third-party text, so `buildPrompt` **fences** them in `<transcript>`
+  tags framed as data-never-instructions (a literal tag in the captions is stripped first);
+  keep the instruction sentences above the fence byte-identical - that exact string is the
+  one the quote experiment measured (card daa054ce). The TLDR can't trigger itself because
+  `defangUrls` **strips the URL scheme** from the summary before sending (`https://youtu.be/x`
+  -> `youtu.be/x`), and `findYouTubeUrl` requires a literal `http(s)://` - the TLDR is an
+  outgoing message, so without that a quoted link would loop. `clampSummary` closes an
+  unbalanced quotation mark when it truncates, so a cut never presents half a quote as
+  speech. **Failures are logged and swallowed — never posted into the
   chat.** This is entirely server-side (works with no browser tab open) and touches no
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
