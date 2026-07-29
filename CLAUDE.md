@@ -28,7 +28,7 @@ Card -> worktree -> PR runbook: follow `~/.claude/CONTRIBUTING.md` (the global g
 - **Board:** Signal Web App, id `6a353dfe`, **local backend** - every board command needs `--backend local`. Lists: To Do / Doing / Done. Atomic pickup (truly atomic on the local backend): `trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"`.
 - **Default branch:** `main`. **GitHub:** solo public repo (unprotected `main` -> PR + self-merge, no approval needed).
 - **Worktrees:** `.trees/<branch>` (branch-named, gitignored). **Zero-dep app** - no `.env`, no `node_modules`, no build step - so a fresh worktree is ready to run immediately (no bootstrap).
-- **Verification gate:** no automated test suite yet - verification is hands-on. `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
+- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free half of [public/format.js](public/format.js) - the formatting parser and the shortcode lookups. Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
 
 ## The one thing you must know about the CDP layer
 
@@ -258,6 +258,15 @@ npm start               # server on http://127.0.0.1:7700
   breaks after a Signal update, the fix is almost always localized to
   [src/page-api.js](src/page-api.js). Re-probe with a small CDP `Runtime.evaluate` in the
   isolated context.
-- No automated test suite yet. Verify by running the app and exercising it (the
+- `npm test` only reaches [public/format.js](public/format.js) — the parser and the
+  shortcode lookups, which are pure and DOM-free. Nothing that touches CDP, the server, or
+  the DOM is covered, so **also** run the app and exercise the change (the
   `Claude_Preview` / `claude-in-chrome` tools work well; test sends against **Note to
   Self** so you never message real contacts).
+- **`textarea.setRangeText()` does not write to the browser's undo stack** — Ctrl+Z skips
+  straight past anything inserted with it (verified in Chrome 150). Any programmatic edit to
+  the composer goes through `replaceRange()` in [public/app.js](public/app.js), which uses
+  `document.execCommand('insertText')` instead. Deprecated, but it's the only API that still
+  records undo. It fires a **synchronous `input` event**, so the composer's own `input`
+  handler re-enters once per edit — harmless (the second pass finds nothing left to expand)
+  but worth knowing before adding work to that handler.

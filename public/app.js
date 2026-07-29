@@ -920,10 +920,15 @@ function expandShortcodeAtCaret(input) {
 }
 
 // Swap [start, end) for `text` in a way the browser's own undo stack records, so
-// Ctrl+Z steps back over an expansion instead of skipping past it. execCommand
-// is deprecated but it is still the only API that writes to that stack —
-// setRangeText edits the value without it, leaving the undo history stale
-// (verified in Chrome). Falls back to setRangeText if it's ever removed.
+// Ctrl+Z steps back over an expansion instead of skipping past it. execCommand is
+// deprecated but it is still the only API that writes to that stack: setRangeText
+// edits the value without it, so before this Ctrl+Z jumped straight over an
+// expansion to whatever was typed before (verified in Chrome 150). Falls back to
+// setRangeText if it's ever removed.
+// Note it fires a SYNCHRONOUS input event, so the composer's input handler
+// re-enters once per call. That's fine — the second pass finds no shortcode left
+// to expand and no open run to complete — but keep it in mind before adding
+// anything heavier to that handler.
 function replaceRange(input, start, end, text) {
   input.setSelectionRange(start, end);
   if (!document.execCommand('insertText', false, text)) {
@@ -947,10 +952,20 @@ function replaceRange(input, start, end, text) {
 // picks instead of ranking forever, while something you still use keeps
 // re-earning its place. Scores are fractional after a decay — that's fine,
 // they're only ever compared to each other.
+const EMOJI_POP_LIMIT = 8;        // rows shown; a hard cap, not a page size
 const EMOJI_FREQ_KEY = 'sb.emojiFreq';
 const EMOJI_FREQ_MAX = 200;       // bounded: this is a ranking hint, not a history
 const EMOJI_FREQ_HALFLIFE = 60;   // picks between halvings
 const EMOJI_FREQ_FLOOR = 0.05;    // decayed below this -> forgotten entirely
+
+// Parsed once and kept: the popup needs this on every keystroke, and only a
+// pick can change it. Another tab writing the key is not worth a storage
+// listener — the two would just re-learn each other's favourites.
+let emojiFreqCache = null;
+function emojiFreq() {
+  if (!emojiFreqCache) emojiFreqCache = readEmojiFreq();
+  return emojiFreqCache;
+}
 
 // -> { counts: {name: score}, picks: number-since-last-decay }
 function readEmojiFreq() {
@@ -969,7 +984,7 @@ function readEmojiFreq() {
 }
 
 function bumpEmojiFreq(name) {
-  const { counts, picks: prev } = readEmojiFreq();
+  const { counts, picks: prev } = emojiFreq();
   counts[name] = (counts[name] || 0) + 1;
 
   let picks = prev + 1;
@@ -986,12 +1001,24 @@ function bumpEmojiFreq(name) {
   try { localStorage.setItem(EMOJI_FREQ_KEY, payload); } catch { /* full or disabled */ }
 }
 
-let emojiPop = null; // { node, list, items, index, start } while open
+let emojiPop = null;      // { node, list, items, index, start } while open
+let emojiPopDismissed = null; // start offset of the ":run" Escape rejected, until it's broken
 
 function closeEmojiPop() {
   if (!emojiPop) return;
   emojiPop.node.remove();
   emojiPop = null;
+  const input = $('#composerInput');
+  input.setAttribute('aria-expanded', 'false');
+  input.removeAttribute('aria-activedescendant');
+}
+
+// Escape means "I meant this text literally", so unlike closeEmojiPop() it has
+// to stick: without this the next keystroke re-matches the same run and pops
+// the list straight back up.
+function dismissEmojiPop() {
+  if (emojiPop) emojiPopDismissed = emojiPop.start;
+  closeEmojiPop();
 }
 
 // Recompute from the caret. Called on input and on anything that can move the
@@ -1001,8 +1028,12 @@ function updateEmojiPop() {
   const input = $('#composerInput');
   if (input.selectionStart !== input.selectionEnd) return closeEmojiPop();
   const q = shortcodeQueryBefore(input.value, input.selectionStart);
-  if (!q) return closeEmojiPop();
-  const items = matchShortcodes(q.query, 8, readEmojiFreq().counts);
+  if (!q) { emojiPopDismissed = null; return closeEmojiPop(); } // run broken -> Escape forgotten
+  // Still the run Escape rejected (typing more of the same word keeps it
+  // dismissed); a different run is a fresh ask.
+  if (emojiPopDismissed === q.start) return closeEmojiPop();
+  emojiPopDismissed = null;
+  const items = matchShortcodes(q.query, EMOJI_POP_LIMIT, emojiFreq().counts);
   if (!items.length) return closeEmojiPop();
   renderEmojiPop(items, q.start);
 }
@@ -1016,6 +1047,12 @@ function renderEmojiPop(items, start) {
     ]);
     $('.composer').appendChild(node);
     emojiPop = { node, list, items: [], index: 0, start };
+    const input = $('#composerInput');
+    // The textarea stays the focused element, so it's what a screen reader is
+    // reading — the listbox has to be announced through it.
+    input.setAttribute('aria-expanded', 'true');
+    input.setAttribute('aria-controls', 'emojiPopList');
+    list.id = 'emojiPopList';
   }
   // Keep the highlight on the same name across a keystroke where it survived,
   // so typing another character doesn't yank the selection back to the top.
@@ -1028,7 +1065,7 @@ function renderEmojiPop(items, start) {
   const frag = document.createDocumentFragment();
   items.forEach((item, i) => {
     frag.appendChild(el('button', {
-      class: 'emoji-pop-item', type: 'button', role: 'option',
+      class: 'emoji-pop-item', type: 'button', role: 'option', id: `emojiPopItem${i}`,
       // The composer must keep focus and the caret: a blur here would collapse
       // the selection state the insert depends on.
       onmousedown: (e) => e.preventDefault(),
@@ -1050,7 +1087,10 @@ function paintEmojiPopSelection() {
     rows[i].classList.toggle('selected', on);
     rows[i].setAttribute('aria-selected', String(on));
   }
-  rows[emojiPop.index]?.scrollIntoView({ block: 'nearest' });
+  const active = rows[emojiPop.index];
+  if (!active) return;
+  active.scrollIntoView({ block: 'nearest' });
+  $('#composerInput').setAttribute('aria-activedescendant', active.id);
 }
 
 function setEmojiPopIndex(i) {
@@ -1067,13 +1107,18 @@ function moveEmojiPop(delta) {
 function pickEmoji(i) {
   const item = emojiPop?.items[i];
   if (!item) return;
-  const { start } = emojiPop;
   const input = $('#composerInput');
-  closeEmojiPop();
   // Focus first: a mouse pick has to put the caret back before the insert, and
   // execCommand only writes to the undo stack of the focused element.
   input.focus();
-  replaceRange(input, start, input.selectionStart, item.emoji);
+  // Re-read the run rather than trusting the offset captured at render time.
+  // Not every caret move is observable (Ctrl+A, a context-menu paste, an IME
+  // commit), so a stale `start` would splice the emoji into the middle of the
+  // text and leave the ":shr" behind.
+  const q = shortcodeQueryBefore(input.value, input.selectionStart);
+  closeEmojiPop();
+  if (!q) return;
+  replaceRange(input, q.start, input.selectionStart, item.emoji);
   bumpEmojiFreq(item.name);
   autoGrow();
   updateSendEnabled();
@@ -1082,12 +1127,17 @@ function pickEmoji(i) {
 // Returns true when the popup consumed the key, so the composer's own Enter /
 // ArrowUp handlers stay out of the way while it's open.
 function emojiPopKey(e) {
-  if (!emojiPop) return false;
+  // Mid-composition an IME owns these keys: Enter commits its candidate and the
+  // arrows walk the candidate list. Stealing them would insert an emoji instead.
+  if (!emojiPop || e.isComposing) return false;
+  // Modifiers mean something else in the composer (Shift+Enter is a newline), so
+  // only the bare keys belong to the popup.
+  const bare = !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey;
   switch (e.key) {
-    case 'ArrowDown': moveEmojiPop(1); break;
-    case 'ArrowUp': moveEmojiPop(-1); break;
-    case 'Enter': case 'Tab': pickEmoji(emojiPop.index); break;
-    case 'Escape': closeEmojiPop(); break;
+    case 'ArrowDown': if (!bare) return false; moveEmojiPop(1); break;
+    case 'ArrowUp': if (!bare) return false; moveEmojiPop(-1); break;
+    case 'Enter': case 'Tab': if (!bare) return false; pickEmoji(emojiPop.index); break;
+    case 'Escape': dismissEmojiPop(); break;
     default: return false;
   }
   e.preventDefault();
@@ -1524,13 +1574,19 @@ function init() {
   // popup describes a position, so it has to follow.
   input.addEventListener('click', updateEmojiPop);
   input.addEventListener('keyup', (e) => {
-    if (emojiPop && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return; // those moved the highlight, not the caret
-    if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') updateEmojiPop();
+    const key = e.key || ''; // synthetic/autofill events can arrive without one
+    if (emojiPop && (key === 'ArrowUp' || key === 'ArrowDown')) return; // those moved the highlight, not the caret
+    if (key.startsWith('Arrow') || key === 'Home' || key === 'End') updateEmojiPop();
   });
   input.addEventListener('blur', closeEmojiPop);
+  // An IME owns Enter and the arrows while composing, and updateEmojiPop() is
+  // skipped for the duration, so the list would sit there going stale.
+  input.addEventListener('compositionstart', closeEmojiPop);
   input.addEventListener('keydown', (e) => {
     if (emojiPopKey(e)) return; // suggestions open: they get Enter/Tab/arrows/Escape first
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); return; }
+    // Enter commits the candidate mid-IME-composition; sending there would fire
+    // on every word a CJK user types.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); return; }
     if (e.key === 'Escape' && state.editing) { e.preventDefault(); cancelEdit(); return; }
     // ↑ on an empty composer pulls your last editable message in for a quick edit.
     if (e.key === 'ArrowUp' && !state.editing && input.value === '') {

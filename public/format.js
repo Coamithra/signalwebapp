@@ -61,10 +61,11 @@ export function shortcodeBefore(text, caret) {
 }
 
 // The open half of the same idea: an unclosed ":na" run ending at `caret`, which
-// is what the composer's autocomplete popup completes. Same guards as above — a
-// backslash escapes it, and the ":" must not be glued to a word on its left, so
-// "http://x" and "12:30" don't open a suggestion list. Two chars minimum: ":a"
-// matches a third of the table and suggests nothing useful.
+// is what the composer's autocomplete popup completes. It keeps the backslash
+// guard from above and adds two the closed path doesn't need: the ":" must not
+// follow a word char or another ":", so "http://x" and "12:30" never open a
+// suggestion list. Two chars minimum — ":a" matches a third of the table and
+// suggests nothing useful.
 export function shortcodeQueryBefore(text, caret) {
   const m = /:([a-z0-9_+-]{2,})$/i.exec(text.slice(0, caret));
   if (!m) return null;
@@ -93,12 +94,18 @@ export function matchShortcodes(query, limit = 8, weights = {}) {
     const at = name.indexOf(q);
     if (at < 0) continue;
     const tier = name === q ? 0 : at === 0 ? 1 : 2;
-    scored.push({ name, tier, weight: Object.hasOwn(weights, name) ? weights[name] : 0 });
+    // `weights` comes out of localStorage, so it can carry anything a user has
+    // hand-edited in — including "__proto__". hasOwn keeps a junk value from
+    // ranking, and a non-number would poison the sort.
+    const w = Object.hasOwn(weights, name) ? weights[name] : 0;
+    scored.push({ name, tier, weight: typeof w === 'number' && Number.isFinite(w) ? w : 0 });
   }
   scored.sort((a, b) => a.tier - b.tier || b.weight - a.weight || a.name.length - b.name.length);
   // Hard cap, no scrolling: past this, typing another character narrows better
   // than paging through a list ever would.
-  return scored.slice(0, limit).map(({ name }) => ({ name, emoji: EMOJI_SHORTCODES[name] }));
+  return scored.slice(0, limit)
+    .map(({ name }) => ({ name, emoji: emojiFor(name) }))
+    .filter((e) => e.emoji !== undefined);
 }
 
 // A marker only opens a span if it isn't glued to a word on its left ("snake_case"

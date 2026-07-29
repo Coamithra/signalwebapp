@@ -291,7 +291,9 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
   background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: 0 12px 36px rgba(0,0,0,.5); padding: 6px; overflow: hidden;
 }
-.emoji-pop-list { display: flex; flex-direction: column; }
+/* Its own scrollport, so the scrollIntoView() that follows the highlight can
+   never scroll the app shell behind it instead. */
+.emoji-pop-list { display: flex; flex-direction: column; max-height: 288px; overflow-y: auto; }
 .emoji-pop-item {
   display: flex; align-items: center; gap: 10px; width: 100%;
   background: transparent; border: none; cursor: pointer; color: var(--text);
