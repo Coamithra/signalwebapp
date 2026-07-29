@@ -55,7 +55,7 @@ evaluate must target the isolated context's id.
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
-| [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). |
+| [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map after a Signal update). |
 
@@ -113,6 +113,20 @@ evaluate must target the isolated context's id.
   type** in the composer and again at send time (for pasted text); the map is generated from
   Signal's own emoji table (see the file map). A marker or shortcode you meant literally is
   escaped with a backslash (`\_not italic\_`).
+- **Emoji shortcode autocomplete** — the open half of the above: `shortcodeBefore` handles a
+  *closed* `:shrug:`, `shortcodeQueryBefore` spots an *open* `:shr` at the caret and
+  `matchShortcodes(query, limit, weights)` ranks candidates (both in
+  [public/format.js](public/format.js)), which [public/app.js](public/app.js) renders as a
+  popup above the composer (`.emoji-pop`, appended into `.composer`; arrows move, Enter/Tab
+  pick, Escape dismisses). Matching is **substring**, not just prefix — Signal's names are
+  often unguessable, so `:up` has to find `thumbs_up`. Ranking tiers (exact → prefix →
+  substring) are primary and stay primary; a per-browser `localStorage` pick-count
+  (`sb.emojiFreq`) only breaks ties *within* a tier, so a prefix match is never buried under
+  a favourite substring one. Those counts **decay** — halved every `EMOJI_FREQ_HALFLIFE`
+  picks — so a phase ages out instead of ranking forever. The list is a **hard cap of 8**
+  with no scrolling (type another char to narrow). The popup's keys are handled at the top of
+  the composer's existing `keydown` listener, so while it's open they win over Enter→send and
+  ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a

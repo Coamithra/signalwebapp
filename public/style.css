@@ -281,6 +281,32 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 .composer {
   flex: none; display: flex; flex-direction: column; gap: 8px;
   padding: 12px 16px; border-top: 1px solid var(--border); background: var(--bg-sidebar);
+  position: relative; /* anchors the emoji autocomplete popup */
+}
+
+/* ---------- Emoji shortcode autocomplete ---------- */
+.emoji-pop {
+  position: absolute; bottom: calc(100% + 6px); left: 16px; z-index: 30;
+  min-width: 240px; max-width: min(360px, calc(100% - 32px));
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0,0,0,.5); padding: 6px; overflow: hidden;
+}
+.emoji-pop-list { display: flex; flex-direction: column; }
+.emoji-pop-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  background: transparent; border: none; cursor: pointer; color: var(--text);
+  font: inherit; font-size: 14px; text-align: left; padding: 7px 10px; border-radius: 8px;
+}
+.emoji-pop-item.selected { background: var(--bg-hover); }
+.emoji-pop-emoji { flex: none; font-size: 19px; line-height: 1; width: 22px; text-align: center; }
+.emoji-pop-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim);
+}
+.emoji-pop-item.selected .emoji-pop-name { color: var(--text); }
+.emoji-pop-hint {
+  padding: 6px 10px 2px; margin-top: 2px; border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-faint);
 }
 .composer-row { display: flex; align-items: flex-end; gap: 8px; }
 .attach-btn {

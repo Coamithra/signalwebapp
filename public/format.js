@@ -60,6 +60,47 @@ export function shortcodeBefore(text, caret) {
   return emoji ? { emoji, start: m.index, end: caret } : null;
 }
 
+// The open half of the same idea: an unclosed ":na" run ending at `caret`, which
+// is what the composer's autocomplete popup completes. Same guards as above — a
+// backslash escapes it, and the ":" must not be glued to a word on its left, so
+// "http://x" and "12:30" don't open a suggestion list. Two chars minimum: ":a"
+// matches a third of the table and suggests nothing useful.
+export function shortcodeQueryBefore(text, caret) {
+  const m = /:([a-z0-9_+-]{2,})$/i.exec(text.slice(0, caret));
+  if (!m) return null;
+  const prev = text[m.index - 1];
+  if (prev === '\\' || prev === ':' || isWordChar(prev)) return null;
+  return { query: m[1].toLowerCase(), start: m.index };
+}
+
+// Sorted once: re-keying a ~1900-entry object on every keystroke is wasteful, and
+// the sort is what makes ties below alphabetical for free.
+let sortedNames = null;
+
+// Shortcode names matching `query`, best first, for the autocomplete popup.
+// Tiers (exact -> prefix -> substring) are primary and `weights` (how often the
+// user has picked each name) only orders *within* a tier: a prefix match must
+// never end up below a substring one just because the latter is a favourite.
+// Substring matching is the whole point — Signal's own names are often
+// unguessable, so ":up" has to be able to find "thumbs_up".
+export function matchShortcodes(query, limit = 8, weights = {}) {
+  const q = String(query || '').toLowerCase();
+  if (!q) return [];
+  if (!sortedNames) sortedNames = Object.keys(EMOJI_SHORTCODES).sort();
+
+  const scored = [];
+  for (const name of sortedNames) {
+    const at = name.indexOf(q);
+    if (at < 0) continue;
+    const tier = name === q ? 0 : at === 0 ? 1 : 2;
+    scored.push({ name, tier, weight: Object.hasOwn(weights, name) ? weights[name] : 0 });
+  }
+  scored.sort((a, b) => a.tier - b.tier || b.weight - a.weight || a.name.length - b.name.length);
+  // Hard cap, no scrolling: past this, typing another character narrows better
+  // than paging through a list ever would.
+  return scored.slice(0, limit).map(({ name }) => ({ name, emoji: EMOJI_SHORTCODES[name] }));
+}
+
 // A marker only opens a span if it isn't glued to a word on its left ("snake_case"
 // stays snake_case) and the span doesn't start with a space ("2 * 3 * 4" stays maths).
 function openerAt(src, i, prevSrcChar) {
