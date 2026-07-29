@@ -194,8 +194,11 @@ evaluate must target the isolated context's id.
   (server boot / enable time) so history is never re-summarized; a bounded `processed` set
   dedupes. It fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
   `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks Gemini
-  (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-2.5-flash`) for a ~2-sentence summary
-  (clamped to `MAX_TLDR_CHARS` before sending, since it auto-posts to real contacts),
+  (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-2.5-flash`) for a summary of at most
+  four sentences (~100 words) carrying **one short verbatim quote from the video** -- at most
+  20 words, copied word-for-word, and omitted entirely rather than invented when nothing is
+  worth quoting (the summary is clamped to `MAX_TLDR_CHARS` before sending, since it
+  auto-posts to real contacts),
   and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The TLDR has no link, so
   it can't trigger itself. **Failures are logged and swallowed — never posted into the
   chat.** This is entirely server-side (works with no browser tab open) and touches no
