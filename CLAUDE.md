@@ -239,6 +239,17 @@ evaluate must target the isolated context's id.
   (`POST /api/conversations/:id/read`) so the unread badge clears — that goes through
   Signal's real `markRead`, which sends read receipts per the user's Signal settings
   (normal Signal Desktop behavior).
+- **Loading older history: one path, one anchor.** `loadOlderMessages()` in
+  [public/app.js](public/app.js) is the only caller of `?older=1` — the `#loadOlder`
+  button *and* the scroll gesture both go through it, so the scroll-anchor settle
+  (pin the topmost `data-mid` row, keep correcting via `ResizeObserver` until sizes
+  go quiet or the user scrolls) behaves identically either way. The gesture arms
+  within `OLDER_ARM_PX` of the top, then needs `OLDER_INTENT_PX` of *further* upward
+  scrolling spread over at least `OLDER_DWELL_MS`, with `OLDER_COOLDOWN_MS` after each
+  load — so one flick to the top can't chain-load the whole history. Those four
+  constants are pure feel; retune freely. Upward intent comes from falling `scrollTop`
+  *and* from raw wheel/touch deltas, because a thread parked at `scrollTop 0` stops
+  emitting scroll events entirely.
 - Match the surrounding style; comment only where the *why* is non-obvious.
 
 ## Running
