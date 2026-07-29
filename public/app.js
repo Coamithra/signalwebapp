@@ -604,6 +604,7 @@ const OLDER_ARM_PX = 80;       // how close to the top before the gesture arms
 const OLDER_INTENT_PX = 110;   // extra upward scrolling needed once armed
 const OLDER_DWELL_MS = 250;    // ...and it must take at least this long (kills one flick)
 const OLDER_COOLDOWN_MS = 600; // quiet period after a load, so loads can't chain
+const OLDER_WHEEL_LINE_PX = 16; // assumed line height for line-mode wheel events
 
 let loadingOlder = false;
 let olderBlockedUntil = 0;
@@ -644,6 +645,9 @@ async function loadOlderMessages() {
       if (!el) return;
       const delta = el.getBoundingClientRect().top - anchorTop;
       if (delta) m.scrollBy({ top: delta, behavior: 'instant' });
+      // Keep the gesture's baseline in step: a pin correction fires a real scroll
+      // event, which would otherwise read as the user scrolling up.
+      lastScrollTop = m.scrollTop;
     };
     let idle, cap, ro;
     const stop = () => {
@@ -660,9 +664,7 @@ async function loadOlderMessages() {
     cap = setTimeout(stop, 8000);
     m.addEventListener('wheel', stop, { passive: true });
     m.addEventListener('touchstart', stop, { passive: true });
-    // The pin leaves scrollTop below the newly inserted page, so the gesture has
-    // to be earned again from scratch.
-    lastScrollTop = m.scrollTop;
+    lastScrollTop = m.scrollTop; // in case the anchor was gone and pin() never ran
   } catch (err) { toast(err.message, true); }
   finally {
     loadingOlder = false;
@@ -673,6 +675,16 @@ async function loadOlderMessages() {
 
 function resetOlderGesture() {
   olderArmedAt = 0;
+  olderIntent = 0;
+}
+
+// Start measuring upward intent. Called both when scrolling into the top zone and
+// from the wheel/touch path — the latter matters because a thread already parked at
+// scrollTop 0 emits no scroll events, so without it the gesture could never arm
+// again after a load's cooldown swallowed the last one.
+function armOlderGesture() {
+  if (olderArmedAt || !state.hasOlder || loadingOlder || Date.now() < olderBlockedUntil) return;
+  olderArmedAt = Date.now();
   olderIntent = 0;
 }
 
@@ -722,6 +734,7 @@ async function openConversation(id) {
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     resetOlderGesture(); // upward intent belongs to the thread it was built in
+    olderBlockedUntil = 0; // ...and so does another thread's cooldown
     lastScrollTop = 0;
     state.activeId = id;
     renderConversations(); // update active highlight
@@ -1505,18 +1518,21 @@ function init() {
     const up = lastScrollTop - top;
     lastScrollTop = top;
     if (up < 0) resetOlderGesture(); // heading back down abandons the gesture
-    if (top > OLDER_ARM_PX || !state.hasOlder || Date.now() < olderBlockedUntil) { resetOlderGesture(); return; }
-    if (!olderArmedAt) { olderArmedAt = Date.now(); olderIntent = 0; return; } // arriving is free
+    if (top > OLDER_ARM_PX || !state.hasOlder) { resetOlderGesture(); return; }
+    if (!olderArmedAt) { armOlderGesture(); return; } // arriving is free
     noteOlderIntent(up);
   });
 
   // Stage 2: once the thread is pinned at scrollTop 0 no scroll events fire, so
   // the raw wheel/touch deltas are the only remaining evidence of upward intent.
   $('#messages').addEventListener('wheel', (e) => {
-    if (e.deltaY >= 0) { if (e.deltaY > 0) resetOlderGesture(); return; }
-    if ($('#messages').scrollTop > 1) return;
+    if (e.deltaY > 0) { resetOlderGesture(); return; }
+    if (e.deltaY === 0) return; // horizontal-only wheel; says nothing either way
+    const m = $('#messages');
+    if (m.scrollTop > 1) return; // still scrollable, so the scroll handler counts it
+    armOlderGesture();
     // deltaMode: 0 = pixels (normal), 1 = lines, 2 = pages.
-    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? $('#messages').clientHeight : 1;
+    const unit = e.deltaMode === 1 ? OLDER_WHEEL_LINE_PX : e.deltaMode === 2 ? m.clientHeight : 1;
     noteOlderIntent(-e.deltaY * unit);
   }, { passive: true });
 
@@ -1530,7 +1546,9 @@ function init() {
     const dy = y - lastTouchY; // finger moving down = pulling older content into view
     lastTouchY = y;
     if (dy < 0) { resetOlderGesture(); return; }
-    if ($('#messages').scrollTop <= 1) noteOlderIntent(dy);
+    if ($('#messages').scrollTop > 1) return;
+    armOlderGesture();
+    noteOlderIntent(dy);
   }, { passive: true });
 
   // Double-click a bubble to select all its text (easy copy). Skip bubbles with
