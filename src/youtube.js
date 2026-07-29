@@ -157,31 +157,60 @@ async function fetchTranscriptHttp(videoId, opts) {
   return { text, title, lang: track.languageCode || null, generated: track.kind === 'asr', source: 'http' };
 }
 
-// The `--sub-langs` value for one attempt. Entries are yt-dlp *regexes*, matched
-// full-string and CASE-INSENSITIVELY.
+// Regional variants worth asking for by name, per language. YouTube publishes
+// manual captions under codes like `en-GB`, which the narrow request below would
+// otherwise miss. Only `en` is filled in because that's the only language this
+// app asks for; anything else just gets the bare code and `-orig`, and leans on
+// the wide fallback. Guessing (`de-US`) would be worse than not guessing.
+const DIALECTS = { en: ['en-US', 'en-GB'] };
+
+// Floor on the budget left before starting another yt-dlp attempt. A cold spawn
+// plus YouTube metadata extraction is a couple of seconds on its own.
+const MIN_ATTEMPT_MS = 5000;
+
+// The `--sub-langs` value for one attempt. `wide` picks the fallback form.
 //
-// Stage 0 is deliberately literal. The wide `en.*` we used to pass on every video
-// matches 55 tracks on a typical upload: `en`, `en-orig`, and 53 auto-TRANSLATED
-// "English from <language>" variants (`en-sq`, `en-ar`, `en-zh-CN`, …). yt-dlp
-// downloads every match, and ~55 timedtext requests earn a `HTTP Error 429: Too
-// Many Requests` — which can land on the one track we actually wanted. Narrowing
-// by regex is not an option (the case-insensitive match makes `en-[A-Z]{2}` catch
-// `en-sq` too), so stage 0 spells out the plausible dialects; codes the video
-// doesn't have are silently skipped, costing nothing.
+// Entries are yt-dlp *regexes*, matched full-string and CASE-INSENSITIVELY. The
+// narrow form is deliberately all literals: the wide `en.*` we used to pass on
+// every video matches 55 tracks on a typical upload — `en`, `en-orig`, and 53
+// auto-TRANSLATED "English from <language>" variants (`en-sq`, `en-ar`,
+// `en-zh-CN`, …). yt-dlp downloads every match, and ~55 timedtext requests earn
+// a `HTTP Error 429: Too Many Requests` that can land on the one track we
+// actually wanted. Note a regex would work here (`en(-orig)?` has no fan-out);
+// literals are just clearer, and the one shape to avoid is a trailing `.*` —
+// the case-insensitive match also rules out narrowing by case, since
+// `en-[A-Z]{2}` catches `en-sq` too. Codes the video lacks are silently
+// skipped, so listing extras costs nothing.
 //
-// Stage 1 is the old wide pattern, kept as a last resort so a foreign-language
-// video can still reach a translated track. It only runs when stage 0 came back
-// empty, so the 429 storm is now the exception rather than every request.
-export function subLangsFor(lang, stage) {
-  if (stage === 0) return `${lang},${lang}-orig,${lang}-US,${lang}-GB`;
-  return `${lang}.*,${lang}`;
+// The wide form is the old pattern, kept as a last resort so a foreign-language
+// video can still reach a translated track. It only runs when the narrow one
+// came back empty, which is either that foreign-language case (where the ~50
+// translated tracks — and the 429 risk — are the whole point) or a video with no
+// captions at all (where `en.*` matches nothing and yt-dlp exits straight away).
+export function subLangsFor(lang, wide) {
+  if (wide) return `${lang}.*,${lang}`;
+  return [lang, `${lang}-orig`, ...(DIALECTS[lang] || [])].join(',');
+}
+
+// Choose which of yt-dlp's written subtitle files to read. It emits several
+// variants — v.en.json3 (manual), v.en-orig.json3 (ASR original), v.en-sq.json3
+// (machine-translated) — so take the exact language first, then the ASR
+// original, and only then fall through to whatever else landed. That last
+// resort matters: readdir order is filesystem-dependent, so picking the first
+// file blindly can hand back a translated track while the real one sits next to
+// it. Returns null when there's nothing usable.
+export function pickSubFile(files, lang) {
+  const json3s = files.filter((f) => f.endsWith('.json3'));
+  return json3s.find((f) => f.endsWith(`.${lang}.json3`)) ||
+         json3s.find((f) => f.endsWith(`.${lang}-orig.json3`)) ||
+         json3s[0] || null;
 }
 
 // Run one yt-dlp attempt into a fresh temp dir; resolve to
 // `{ text, code }` — text is '' when the attempt produced nothing usable, and
 // code is yt-dlp's failure code (if any) purely so the caller can log why.
-// Rejects only for `yt-dlp-not-found`, which means retrying with another
-// --sub-langs is pointless.
+// Rejects for `yt-dlp-not-found` and `tmp-failed`: neither gets better by
+// retrying with a different --sub-langs, so those abort the whole fallback.
 function runYtDlp(videoId, lang, subLangs, timeoutMs) {
   return new Promise((resolve, reject) => {
     let dir;
@@ -203,16 +232,9 @@ function runYtDlp(videoId, lang, subLangs, timeoutMs) {
       if (err && err.code === 'ENOENT') { cleanup(); return reject(new Error('yt-dlp-not-found')); }
       // A non-zero exit can still leave a usable sub file (a 429 on the tenth
       // track doesn't undo the first), so ignore `err` and go by what landed.
-      // yt-dlp emits several variants — v.en.json3 (manual), v.en-orig.json3
-      // (ASR original), v.en-sq.json3 (machine-translated) — so prefer the exact
-      // language, then the ASR original, and only then whatever is left. Never
-      // take json3s[0] blindly: alphabetically that can be a translated track.
       let files = [];
       try { files = fs.readdirSync(dir); } catch {}
-      const json3s = files.filter((f) => f.endsWith('.json3'));
-      const subFile = json3s.find((f) => f.endsWith(`.${lang}.json3`)) ||
-                      json3s.find((f) => f.endsWith(`.${lang}-orig.json3`)) ||
-                      json3s[0];
+      const subFile = pickSubFile(files, lang);
       let text = '';
       if (subFile) {
         try { text = flattenJson3(JSON.parse(fs.readFileSync(path.join(dir, subFile), 'utf8'))); } catch {}
@@ -239,10 +261,13 @@ async function fetchViaYtDlp(videoId, opts) {
   const lang = opts.lang || 'en';
   const startedAt = Date.now();
   let lastCode = null;
-  for (let stage = 0; stage <= 1; stage++) {
+  for (const wide of [false, true]) {
     const leftMs = budgetMs - (Date.now() - startedAt);
-    if (leftMs <= 0) break;
-    const { text, code } = await runYtDlp(videoId, lang, subLangsFor(lang, stage), leftMs);
+    // Don't spawn into the dregs of the budget: a process certain to be killed
+    // before it finishes just costs time and overwrites the more informative
+    // failure code from the attempt that actually ran.
+    if (leftMs < MIN_ATTEMPT_MS) break;
+    const { text, code } = await runYtDlp(videoId, lang, subLangsFor(lang, wide), leftMs);
     if (text) return { text, title: null, lang: null, generated: null, source: 'yt-dlp' };
     lastCode = code;
   }
