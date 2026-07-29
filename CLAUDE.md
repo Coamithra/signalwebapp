@@ -28,7 +28,7 @@ Card -> worktree -> PR runbook: follow `~/.claude/CONTRIBUTING.md` (the global g
 - **Board:** Signal Web App, id `6a353dfe`, **local backend** - every board command needs `--backend local`. Lists: To Do / Doing / Done. Atomic pickup (truly atomic on the local backend): `trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"`.
 - **Default branch:** `main`. **GitHub:** solo public repo (unprotected `main` -> PR + self-merge, no approval needed).
 - **Worktrees:** `.trees/<branch>` (branch-named, gitignored). **Zero-dep app** - no `.env`, no `node_modules`, no build step - so a fresh worktree is ready to run immediately (no bootstrap).
-- **Verification gate:** no automated test suite yet - verification is hands-on. `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
+- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free half of [public/format.js](public/format.js) - the formatting parser and the shortcode lookups. Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
 
 ## The one thing you must know about the CDP layer
 
@@ -55,7 +55,7 @@ evaluate must target the isolated context's id.
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
-| [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). |
+| [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map after a Signal update). |
 
@@ -113,6 +113,20 @@ evaluate must target the isolated context's id.
   type** in the composer and again at send time (for pasted text); the map is generated from
   Signal's own emoji table (see the file map). A marker or shortcode you meant literally is
   escaped with a backslash (`\_not italic\_`).
+- **Emoji shortcode autocomplete** — the open half of the above: `shortcodeBefore` handles a
+  *closed* `:shrug:`, `shortcodeQueryBefore` spots an *open* `:shr` at the caret and
+  `matchShortcodes(query, limit, weights)` ranks candidates (both in
+  [public/format.js](public/format.js)), which [public/app.js](public/app.js) renders as a
+  popup above the composer (`.emoji-pop`, appended into `.composer`; arrows move, Enter/Tab
+  pick, Escape dismisses). Matching is **substring**, not just prefix — Signal's names are
+  often unguessable, so `:up` has to find `thumbs_up`. Ranking tiers (exact → prefix →
+  substring) are primary and stay primary; a per-browser `localStorage` pick-count
+  (`sb.emojiFreq`) only breaks ties *within* a tier, so a prefix match is never buried under
+  a favourite substring one. Those counts **decay** — halved every `EMOJI_FREQ_HALFLIFE`
+  picks — so a phase ages out instead of ranking forever. The list is a **hard cap of 8**
+  with no scrolling (type another char to narrow). The popup's keys are handled at the top of
+  the composer's existing `keydown` listener, so while it's open they win over Enter→send and
+  ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
@@ -244,6 +258,15 @@ npm start               # server on http://127.0.0.1:7700
   breaks after a Signal update, the fix is almost always localized to
   [src/page-api.js](src/page-api.js). Re-probe with a small CDP `Runtime.evaluate` in the
   isolated context.
-- No automated test suite yet. Verify by running the app and exercising it (the
+- `npm test` only reaches [public/format.js](public/format.js) — the parser and the
+  shortcode lookups, which are pure and DOM-free. Nothing that touches CDP, the server, or
+  the DOM is covered, so **also** run the app and exercise the change (the
   `Claude_Preview` / `claude-in-chrome` tools work well; test sends against **Note to
   Self** so you never message real contacts).
+- **`textarea.setRangeText()` does not write to the browser's undo stack** — Ctrl+Z skips
+  straight past anything inserted with it (verified in Chrome 150). Any programmatic edit to
+  the composer goes through `replaceRange()` in [public/app.js](public/app.js), which uses
+  `document.execCommand('insertText')` instead. Deprecated, but it's the only API that still
+  records undo. It fires a **synchronous `input` event**, so the composer's own `input`
+  handler re-enters once per edit — harmless (the second pass finds nothing left to expand)
+  but worth knowing before adding work to that handler.
