@@ -157,15 +157,32 @@ async function fetchTranscriptHttp(videoId, opts) {
   return { text, title, lang: track.languageCode || null, generated: track.kind === 'asr', source: 'http' };
 }
 
-// Robust fallback: shell out to yt-dlp (if installed) to write subtitles as
-// json3, then reuse flattenJson3. yt-dlp keeps up with YouTube's anti-scraping
-// changes (PO tokens, client rotation) so it succeeds where the direct HTTP
-// path is bot-gated — at the cost of a process spawn. No shell, so cmd.exe never
-// mangles the % in the output template on Windows; videoId is already validated
-// to 11 safe chars upstream, so it's a safe argv element regardless.
-function fetchViaYtDlp(videoId, opts) {
-  const timeoutMs = opts.ytDlpTimeoutMs || 45000;
-  const lang = opts.lang || 'en';
+// The `--sub-langs` value for one attempt. Entries are yt-dlp *regexes*, matched
+// full-string and CASE-INSENSITIVELY.
+//
+// Stage 0 is deliberately literal. The wide `en.*` we used to pass on every video
+// matches 55 tracks on a typical upload: `en`, `en-orig`, and 53 auto-TRANSLATED
+// "English from <language>" variants (`en-sq`, `en-ar`, `en-zh-CN`, …). yt-dlp
+// downloads every match, and ~55 timedtext requests earn a `HTTP Error 429: Too
+// Many Requests` — which can land on the one track we actually wanted. Narrowing
+// by regex is not an option (the case-insensitive match makes `en-[A-Z]{2}` catch
+// `en-sq` too), so stage 0 spells out the plausible dialects; codes the video
+// doesn't have are silently skipped, costing nothing.
+//
+// Stage 1 is the old wide pattern, kept as a last resort so a foreign-language
+// video can still reach a translated track. It only runs when stage 0 came back
+// empty, so the 429 storm is now the exception rather than every request.
+export function subLangsFor(lang, stage) {
+  if (stage === 0) return `${lang},${lang}-orig,${lang}-US,${lang}-GB`;
+  return `${lang}.*,${lang}`;
+}
+
+// Run one yt-dlp attempt into a fresh temp dir; resolve to
+// `{ text, code }` — text is '' when the attempt produced nothing usable, and
+// code is yt-dlp's failure code (if any) purely so the caller can log why.
+// Rejects only for `yt-dlp-not-found`, which means retrying with another
+// --sub-langs is pointless.
+function runYtDlp(videoId, lang, subLangs, timeoutMs) {
   return new Promise((resolve, reject) => {
     let dir;
     try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-tldr-')); }
@@ -174,7 +191,7 @@ function fetchViaYtDlp(videoId, opts) {
     const args = [
       '-q', '--no-warnings', '--skip-download',
       '--write-subs', '--write-auto-subs',
-      '--sub-langs', `${lang}.*,${lang}`,
+      '--sub-langs', subLangs,
       '--sub-format', 'json3',
       '-o', `${path.join(dir, 'v')}.%(ext)s`,
       `https://www.youtube.com/watch?v=${videoId}`,
@@ -184,23 +201,52 @@ function fetchViaYtDlp(videoId, opts) {
     // full transcript anyway).
     execFile('yt-dlp', args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err) => {
       if (err && err.code === 'ENOENT') { cleanup(); return reject(new Error('yt-dlp-not-found')); }
-      // A non-zero exit can still leave a usable sub file, so check for output
-      // before treating `err` as fatal. yt-dlp may emit several variants
-      // (v.en.json3 = manual, v.en-orig.json3 = ASR, v.en-en.json3 = translated);
-      // prefer the exact-language (manual) track, then any json3.
+      // A non-zero exit can still leave a usable sub file (a 429 on the tenth
+      // track doesn't undo the first), so ignore `err` and go by what landed.
+      // yt-dlp emits several variants — v.en.json3 (manual), v.en-orig.json3
+      // (ASR original), v.en-sq.json3 (machine-translated) — so prefer the exact
+      // language, then the ASR original, and only then whatever is left. Never
+      // take json3s[0] blindly: alphabetically that can be a translated track.
       let files = [];
       try { files = fs.readdirSync(dir); } catch {}
       const json3s = files.filter((f) => f.endsWith('.json3'));
-      const subFile = json3s.find((f) => f.endsWith(`.${lang}.json3`)) || json3s[0];
+      const subFile = json3s.find((f) => f.endsWith(`.${lang}.json3`)) ||
+                      json3s.find((f) => f.endsWith(`.${lang}-orig.json3`)) ||
+                      json3s[0];
       let text = '';
       if (subFile) {
         try { text = flattenJson3(JSON.parse(fs.readFileSync(path.join(dir, subFile), 'utf8'))); } catch {}
       }
       cleanup();
-      if (!text) return reject(new Error(err ? `yt-dlp ${err.code || 'error'}` : 'yt-dlp-no-subs'));
-      resolve({ text, title: null, lang: null, generated: null, source: 'yt-dlp' });
+      resolve({ text, code: err ? (err.code || 'error') : null });
     });
   });
+}
+
+// Robust fallback: shell out to yt-dlp (if installed) to write subtitles as
+// json3, then reuse flattenJson3. yt-dlp keeps up with YouTube's anti-scraping
+// changes (PO tokens, client rotation) so it succeeds where the direct HTTP
+// path is bot-gated — at the cost of a process spawn. No shell, so cmd.exe never
+// mangles the % in the output template on Windows; videoId is already validated
+// to 11 safe chars upstream, so it's a safe argv element regardless.
+//
+// Two attempts at most (see subLangsFor): a narrow, literal request first, then
+// the wide pattern only if that found nothing. `ytDlpTimeoutMs` is a budget
+// shared across both, so the fallback never takes longer than a single attempt
+// used to.
+async function fetchViaYtDlp(videoId, opts) {
+  const budgetMs = opts.ytDlpTimeoutMs || 45000;
+  const lang = opts.lang || 'en';
+  const startedAt = Date.now();
+  let lastCode = null;
+  for (let stage = 0; stage <= 1; stage++) {
+    const leftMs = budgetMs - (Date.now() - startedAt);
+    if (leftMs <= 0) break;
+    const { text, code } = await runYtDlp(videoId, lang, subLangsFor(lang, stage), leftMs);
+    if (text) return { text, title: null, lang: null, generated: null, source: 'yt-dlp' };
+    lastCode = code;
+  }
+  throw new Error(lastCode ? `yt-dlp ${lastCode}` : 'yt-dlp-no-subs');
 }
 
 // Fetch a video's transcript. Tries the zero-dep HTTP path first (fast, but
