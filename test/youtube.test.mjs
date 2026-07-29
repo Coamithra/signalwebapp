@@ -5,26 +5,49 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { subLangsFor, parseVideoId, findYouTubeUrl } from '../src/youtube.js';
+import { subLangsFor, pickSubFile, parseVideoId, findYouTubeUrl } from '../src/youtube.js';
 
-test('subLangsFor: the first attempt is literal, never a regex', () => {
-  const stage0 = subLangsFor('en', 0);
+test('subLangsFor: the narrow attempt is literal, never a regex', () => {
   // The whole bug: yt-dlp treats each entry as a case-insensitive full-match
   // regex, so a single `.` or `*` here fans out to ~55 auto-translated tracks
-  // and earns a 429. Keep the first attempt free of metacharacters.
-  for (const entry of stage0.split(',')) {
-    assert.match(entry, /^[a-z]{2}(-[A-Za-z]+)?$/, `"${entry}" is not a plain language code`);
+  // and earns a 429. Keep the narrow attempt free of metacharacters, whatever
+  // language it's built for.
+  for (const lang of ['en', 'de', 'pt']) {
+    for (const entry of subLangsFor(lang, false).split(',')) {
+      assert.match(entry, /^[a-z]{2}(-[A-Za-z]+)?$/, `"${entry}" is not a plain language code`);
+    }
   }
-  assert.deepEqual(stage0.split(','), ['en', 'en-orig', 'en-US', 'en-GB']);
+});
+
+test('subLangsFor: the narrow attempt covers the plain code and the ASR original', () => {
+  assert.ok(subLangsFor('en', false).split(',').includes('en'));
+  assert.ok(subLangsFor('en', false).split(',').includes('en-orig'));
+  assert.ok(subLangsFor('de', false).split(',').includes('de-orig'));
+});
+
+test('subLangsFor: regional variants are per-language, never guessed', () => {
+  // `en-GB` is real; `de-GB` is not. Asking for a code the video lacks is free,
+  // but inventing dialects for a language we know nothing about is noise.
+  assert.ok(subLangsFor('en', false).split(',').includes('en-GB'));
+  assert.deepEqual(subLangsFor('de', false).split(','), ['de', 'de-orig']);
 });
 
 test('subLangsFor: the fallback attempt widens to the regex form', () => {
-  assert.equal(subLangsFor('en', 1), 'en.*,en');
+  assert.equal(subLangsFor('en', true), 'en.*,en');
+  assert.equal(subLangsFor('de', true), 'de.*,de');
 });
 
-test('subLangsFor: honours a non-default language', () => {
-  assert.equal(subLangsFor('de', 0), 'de,de-orig,de-US,de-GB');
-  assert.equal(subLangsFor('de', 1), 'de.*,de');
+test('pickSubFile: prefers the exact language, then the ASR original', () => {
+  const all = ['v.en-sq.json3', 'v.en-orig.json3', 'v.en.json3'];
+  assert.equal(pickSubFile(all, 'en'), 'v.en.json3');
+  assert.equal(pickSubFile(['v.en-sq.json3', 'v.en-orig.json3'], 'en'), 'v.en-orig.json3');
+  // Last resort: a machine-translated track beats no transcript at all.
+  assert.equal(pickSubFile(['v.en-sq.json3'], 'en'), 'v.en-sq.json3');
+});
+
+test('pickSubFile: ignores non-json3 files and reports nothing usable', () => {
+  assert.equal(pickSubFile(['v.en.vtt', 'v.info.json'], 'en'), null);
+  assert.equal(pickSubFile([], 'en'), null);
 });
 
 test('parseVideoId: accepts the common URL shapes', () => {
