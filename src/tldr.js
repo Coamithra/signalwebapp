@@ -124,7 +124,17 @@ async function summarize({ apiKey, model, transcript, title, onRetry }) {
   const prompt =
     'Summarize this YouTube video for a friend who is not going to watch it. ' +
     'Reply with a SHORT TLDR: at most four sentences (~100 words), plain text, ' +
-    'no preamble, no markdown, and do not start with "TLDR".\n\n' +
+    'no preamble, no markdown, and do not start with "TLDR". ' +
+    // The quote is constrained to one short span, and the never-invent/omit
+    // wording is deliberate: this auto-posts to real contacts, so a video with
+    // nothing quoteworthy must get no quote rather than a plausible-sounding
+    // fabricated one. Reword only against fresh evidence -- this exact string
+    // is the one that was measured (see card daa054ce).
+    'Include exactly one short verbatim quote from the video (at most 20 words), ' +
+    'in double quotation marks, copied word-for-word from the transcript - never ' +
+    'paraphrased or invented. If no line is worth quoting, or the transcript is ' +
+    'too fragmentary to quote cleanly, omit the quote entirely rather than ' +
+    'inventing one. The quote counts towards the four-sentence limit.\n\n' +
     (title ? `Title: ${title}\n\n` : '') +
     `Transcript:\n${body}`;
 
