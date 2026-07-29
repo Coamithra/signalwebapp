@@ -98,8 +98,12 @@ export function parseEmojiFreq(rawJson) {
 
 // Record a pick: bump the name, decay everything on the halflife boundary, and
 // return the snapshot to persist (capped to the top EMOJI_FREQ_MAX).
-// `freq.counts` is mutated in place — it's the live ranking the popup reads, so
-// the new score has to show up without a reload.
+//
+// Split responsibility, so read this before adding a caller: `freq.counts` IS
+// mutated in place — it's the live ranking the popup reads, so a new score has
+// to show up without a reload — but `freq.picks` is NOT. The new pick count
+// comes back on the snapshot only, and a caller that wants the decay to keep
+// advancing within a session has to write it back itself.
 export function nextEmojiFreq(freq, name) {
   const counts = freq.counts;
   counts[name] = (counts[name] || 0) + 1;
@@ -114,7 +118,9 @@ export function nextEmojiFreq(freq, name) {
   }
 
   const kept = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, EMOJI_FREQ_MAX);
-  return { picks, counts: Object.fromEntries(kept) };
+  // Null-prototype like parseEmojiFreq's, so the two halves of this state agree:
+  // a stored "toString" key stays an inert score either way.
+  return { picks, counts: Object.assign(Object.create(null), Object.fromEntries(kept)) };
 }
 
 // ---------- GIF picker ----------

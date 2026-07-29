@@ -341,7 +341,9 @@ const MENU_ACTIONS = {
   deleteForMe: (msg) => ({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) }),
 };
 function menuItemsFor(msg) {
-  return menuActionsFor(msg).map((action) => MENU_ACTIONS[action](msg));
+  // An unknown name is skipped rather than thrown on: a menu missing one entry
+  // beats a TypeError inside the message list. A test keeps the two in step.
+  return menuActionsFor(msg).map((action) => MENU_ACTIONS[action]).filter(Boolean).map((build) => build(msg));
 }
 
 // The kebab button shown on hover. Null for messages with no id (optimistic

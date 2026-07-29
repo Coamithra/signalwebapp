@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -160,28 +160,36 @@ test('nextEmojiFreq: bumps the picked name and advances picks', () => {
   const freq = freqOf({ smile: 2 }, 3);
   const snap = nextEmojiFreq(freq, 'smile');
   assert.equal(snap.picks, 4);
-  assert.deepEqual(snap.counts, { smile: 3 });
-  // Mutated in place: the live ranking must see the new score without a reload.
+  assert.deepEqual({ ...snap.counts }, { smile: 3 });
+  // counts is mutated in place: the live ranking must see the new score without
+  // a reload. picks deliberately is NOT — the caller writes that back.
   assert.equal(freq.counts.smile, 3);
+  assert.equal(freq.picks, 3);
 });
 
 test('nextEmojiFreq: a new name starts at 1', () => {
   const snap = nextEmojiFreq(freqOf({}), 'thumbs_up');
-  assert.deepEqual(snap.counts, { thumbs_up: 1 });
+  assert.deepEqual({ ...snap.counts }, { thumbs_up: 1 });
   assert.equal(snap.picks, 1);
+});
+
+test('nextEmojiFreq: the snapshot counts are null-prototype, like parseEmojiFreq\'s', () => {
+  const snap = nextEmojiFreq(freqOf({}), 'toString');
+  assert.equal(Object.getPrototypeOf(snap.counts), null);
+  assert.equal(snap.counts.toString, 1);
 });
 
 test('nextEmojiFreq: decays exactly on the halflife boundary, not before', () => {
   // One short of the boundary: no halving.
   const just = nextEmojiFreq(freqOf({ a: 8 }, EMOJI_FREQ_HALFLIFE - 2), 'a');
   assert.equal(just.picks, EMOJI_FREQ_HALFLIFE - 1);
-  assert.deepEqual(just.counts, { a: 9 });
+  assert.deepEqual({ ...just.counts }, { a: 9 });
 
   // On the boundary: everything halves (including the name just bumped) and
   // the counter resets.
   const hit = nextEmojiFreq(freqOf({ a: 8, b: 4 }, EMOJI_FREQ_HALFLIFE - 1), 'a');
   assert.equal(hit.picks, 0);
-  assert.deepEqual(hit.counts, { a: 4.5, b: 2 });
+  assert.deepEqual({ ...hit.counts }, { a: 4.5, b: 2 });
 });
 
 test('nextEmojiFreq: decay prunes anything that falls under the floor', () => {
@@ -198,13 +206,15 @@ test('nextEmojiFreq: decay prunes anything that falls under the floor', () => {
 test('nextEmojiFreq: the stored snapshot keeps only the top EMOJI_FREQ_MAX, highest first', () => {
   const counts = {};
   for (let i = 0; i < EMOJI_FREQ_MAX + 25; i++) counts[`e${i}`] = i + 1; // e0 weakest
-  const snap = nextEmojiFreq(freqOf(counts), 'e0');
+  const freq = freqOf(counts);
+  const snap = nextEmojiFreq(freq, 'e0');
   const names = Object.keys(snap.counts);
   assert.equal(names.length, EMOJI_FREQ_MAX);
   assert.equal(names[0], `e${EMOJI_FREQ_MAX + 24}`, 'strongest first');
   assert.ok(!names.includes('e0'), 'the weakest is dropped from the snapshot');
-  // The cap applies to what gets persisted, not to the in-memory ranking.
-  assert.equal(Object.keys(snap.counts).length < Object.keys(counts).length, true);
+  // The cap applies to what gets persisted, not to the in-memory ranking, which
+  // keeps everything it had (plus nothing new — 'e0' was already present).
+  assert.equal(Object.keys(freq.counts).length, EMOJI_FREQ_MAX + 25);
 });
 
 test('nextEmojiFreq: the snapshot survives a JSON round-trip back through parseEmojiFreq', () => {
@@ -276,35 +286,61 @@ test('retryErrorReason', () => {
 
 // ---------- import guard ----------
 
+const PUBLIC_DIR = path.join(here, '..', 'public');
+const readPublic = (file) => readFile(path.join(PUBLIC_DIR, file), 'utf8');
+// Comments are stripped before looking for a name, so prose about a function
+// doesn't count as using it.
+const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
 // app.js can't be imported here (it calls init(), which needs a DOM), so a
 // mistyped import path would break the browser while `npm test` stayed green.
 // Cheapest possible guard: every relative specifier in public/ must resolve.
 test('every relative import in public/ resolves to a real file', async () => {
-  const pub = path.join(here, '..', 'public');
-  for (const file of ['app.js', 'ui-logic.js', 'format.js']) {
-    const src = await readFile(path.join(pub, file), 'utf8');
+  const files = (await readdir(PUBLIC_DIR)).filter((f) => f.endsWith('.js'));
+  assert.ok(files.includes('app.js'), 'sanity: found the frontend modules');
+  for (const file of files) {
+    const src = await readPublic(file);
     const specs = [...src.matchAll(/^\s*(?:import|export)[^'"]*from\s*['"](\.[^'"]+)['"]/gm)].map((m) => m[1]);
     for (const spec of specs) {
-      const target = path.resolve(path.dirname(path.join(pub, file)), spec);
+      const target = path.resolve(PUBLIC_DIR, spec);
       await assert.doesNotReject(readFile(target, 'utf8'), `${file} imports missing ${spec}`);
     }
   }
 });
 
-test('app.js imports every name it uses from ui-logic.js', async () => {
-  const pub = path.join(here, '..', 'public');
-  const app = await readFile(path.join(pub, 'app.js'), 'utf8');
+test('every name app.js imports from ui-logic.js is exported and referenced', async () => {
+  const app = await readPublic('app.js');
   const block = /import\s*\{([^}]*)\}\s*from\s*['"]\.\/ui-logic\.js['"]/.exec(app);
   assert.ok(block, 'app.js must import from ./ui-logic.js');
   const imported = block[1].split(',').map((s) => s.trim()).filter(Boolean);
   assert.ok(imported.length > 0);
-  const body = app.slice(block.index + block[0].length);
+  const body = stripComments(app.slice(block.index + block[0].length));
+  const mod = await import('../public/ui-logic.js');
   for (const name of imported) {
-    assert.match(body, new RegExp(`\\b${name}\\b`), `app.js imports ${name} but never uses it`);
-    // And it must actually exist in the module.
-    assert.ok(
-      Object.hasOwn(await import('../public/ui-logic.js'), name),
-      `ui-logic.js does not export ${name}`,
-    );
+    assert.ok(Object.hasOwn(mod, name), `ui-logic.js does not export ${name}`);
+    assert.match(body, new RegExp(`\\b${name}\\b`), `app.js imports ${name} but never references it`);
   }
+});
+
+// menuActionsFor emits action names that app.js looks up in its MENU_ACTIONS
+// table. Nothing at runtime connects the two, so drift shows up as a missing
+// menu entry in the browser — catch it here instead.
+test('every action menuActionsFor can emit has a handler in app.js', async () => {
+  const app = await readPublic('app.js');
+  const table = /const MENU_ACTIONS = \{([\s\S]*?)\n\};/.exec(app);
+  assert.ok(table, 'app.js must define MENU_ACTIONS');
+  const handled = new Set([...table[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]));
+
+  const emitted = new Set();
+  for (const direction of ['outgoing', 'incoming', 'system', undefined]) {
+    for (const text of ['hi', '', '   ', undefined]) {
+      for (const deletedForEveryone of [true, false]) {
+        for (const isViewOnce of [true, false]) {
+          for (const a of menuActionsFor({ direction, text, deletedForEveryone, isViewOnce })) emitted.add(a);
+        }
+      }
+    }
+  }
+  assert.ok(emitted.size > 0);
+  for (const action of emitted) assert.ok(handled.has(action), `MENU_ACTIONS has no entry for '${action}'`);
 });
