@@ -15,6 +15,7 @@ const state = {
   sending: false,
   pendingAttachments: [], // staged files awaiting send: {id, fileName, contentType, base64, size, kind, width, height, previewUrl}
   messages: [],           // messages of the open thread (for up-arrow quick-edit lookup)
+  hasOlder: false,        // the open thread has unloaded history above (drives #loadOlder + auto-load)
   editing: null,          // { messageId, original } while editing an already-sent message
 };
 
@@ -589,12 +590,104 @@ function renderMessages(data) {
   }
   inner.replaceChildren(frag);
 
-  $('#loadOlder').classList.toggle('hidden', !data.hasOlder);
+  state.hasOlder = !!data.hasOlder;
+  $('#loadOlder').classList.toggle('hidden', !state.hasOlder);
 }
 
-// Stops an in-flight "load older" scroll-anchor settle (see the #loadOlder
-// handler). Held at module scope so a conversation switch can cancel it.
+// Stops an in-flight "load older" scroll-anchor settle (see loadOlderMessages()).
+// Held at module scope so a conversation switch can cancel it.
 let cancelOlderPin = null;
+
+// Feel parameters for the scroll-to-load-older gesture — tweak freely, they're
+// pure UX tuning and nothing else depends on their values.
+const OLDER_ARM_PX = 80;       // how close to the top before the gesture arms
+const OLDER_INTENT_PX = 110;   // extra upward scrolling needed once armed
+const OLDER_DWELL_MS = 250;    // ...and it must take at least this long (kills one flick)
+const OLDER_COOLDOWN_MS = 600; // quiet period after a load, so loads can't chain
+
+let loadingOlder = false;
+let olderBlockedUntil = 0;
+let olderArmedAt = 0;   // 0 = disarmed
+let olderIntent = 0;    // upward scroll accumulated since arming, in px
+let lastScrollTop = 0;
+
+// Fetch one more page of history and put the viewport back where it was. Shared
+// by the #loadOlder button and the scroll gesture, so both anchor identically.
+async function loadOlderMessages() {
+  if (!state.activeId || loadingOlder) return;
+  loadingOlder = true;
+  try {
+    const m = $('#messages');
+    const inner = $('#messagesInner');
+    // Anchor on the topmost rendered message: remember which one and exactly
+    // where it sits in the viewport. renderMessages() rebuilds every row, so we
+    // re-find it afterwards by its stable id (data-mid) and nudge the scroll so
+    // it lands back in the same spot. Pinning the element itself (rather than a
+    // height delta) survives reflow ABOVE *or* below it — late-loading media,
+    // author-label regrouping, the lot.
+    let anchorId = null, anchorTop = 0;
+    for (const row of inner.children) {
+      if (row.dataset && row.dataset.mid) { anchorId = row.dataset.mid; anchorTop = row.getBoundingClientRect().top; break; }
+    }
+    const id = state.activeId;
+    const data = await api(`/api/conversations/${encodeURIComponent(id)}/messages?older=1`);
+    if (id !== state.activeId) return; // switched threads mid-load; those rows aren't ours
+    renderMessages(data);
+    if (cancelOlderPin) cancelOlderPin(); // supersede any prior in-flight settle
+    // Re-pin instantly (.messages is scroll-behavior:smooth, so scrollBy would
+    // otherwise animate). Keep correcting until sizes go quiet (media settled),
+    // the user starts scrolling, or a safety cap elapses.
+    const pin = () => {
+      if (!anchorId) return;
+      let el = null;
+      for (const row of inner.children) { if (row.dataset && row.dataset.mid === anchorId) { el = row; break; } }
+      if (!el) return;
+      const delta = el.getBoundingClientRect().top - anchorTop;
+      if (delta) m.scrollBy({ top: delta, behavior: 'instant' });
+    };
+    let idle, cap, ro;
+    const stop = () => {
+      if (ro) ro.disconnect();
+      clearTimeout(idle); clearTimeout(cap);
+      m.removeEventListener('wheel', stop);
+      m.removeEventListener('touchstart', stop);
+      cancelOlderPin = null;
+    };
+    cancelOlderPin = stop;
+    ro = new ResizeObserver(() => { pin(); clearTimeout(idle); idle = setTimeout(stop, 600); });
+    pin();
+    ro.observe(inner);
+    cap = setTimeout(stop, 8000);
+    m.addEventListener('wheel', stop, { passive: true });
+    m.addEventListener('touchstart', stop, { passive: true });
+    // The pin leaves scrollTop below the newly inserted page, so the gesture has
+    // to be earned again from scratch.
+    lastScrollTop = m.scrollTop;
+  } catch (err) { toast(err.message, true); }
+  finally {
+    loadingOlder = false;
+    olderBlockedUntil = Date.now() + OLDER_COOLDOWN_MS;
+    resetOlderGesture();
+  }
+}
+
+function resetOlderGesture() {
+  olderArmedAt = 0;
+  olderIntent = 0;
+}
+
+// Accumulate "keep scrolling up" intent and fire once it clears both the distance
+// and the dwell-time gate. Upward intent arrives as scrollTop decreases while in
+// the arming zone, and — once pinned at the very top, where no scroll events fire
+// any more — as raw wheel/touch deltas.
+function noteOlderIntent(px) {
+  if (px <= 0 || !state.hasOlder || loadingOlder || !olderArmedAt) return;
+  olderIntent += px;
+  if (olderIntent >= OLDER_INTENT_PX && Date.now() - olderArmedAt >= OLDER_DWELL_MS) {
+    resetOlderGesture();
+    loadOlderMessages();
+  }
+}
 
 let openToken = 0;
 // Tell Signal the thread has been read so its unread badge clears. Fire-and-forget:
@@ -628,6 +721,8 @@ async function openConversation(id) {
     cancelEdit();   // an in-progress edit belongs to the conversation it started in
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
+    resetOlderGesture(); // upward intent belongs to the thread it was built in
+    lastScrollTop = 0;
     state.activeId = id;
     renderConversations(); // update active highlight
     renderActiveTldr(); // re-hydrate the auto-TLDR bubble for the chat we just opened
@@ -1403,7 +1498,40 @@ function init() {
   $('#messages').addEventListener('scroll', () => {
     const m = $('#messages');
     state.nearBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 120;
+
+    // Scroll-to-load-older, stage 1: arm near the top, then measure how much
+    // further up the user keeps going (see noteOlderIntent).
+    const top = m.scrollTop;
+    const up = lastScrollTop - top;
+    lastScrollTop = top;
+    if (up < 0) resetOlderGesture(); // heading back down abandons the gesture
+    if (top > OLDER_ARM_PX || !state.hasOlder || Date.now() < olderBlockedUntil) { resetOlderGesture(); return; }
+    if (!olderArmedAt) { olderArmedAt = Date.now(); olderIntent = 0; return; } // arriving is free
+    noteOlderIntent(up);
   });
+
+  // Stage 2: once the thread is pinned at scrollTop 0 no scroll events fire, so
+  // the raw wheel/touch deltas are the only remaining evidence of upward intent.
+  $('#messages').addEventListener('wheel', (e) => {
+    if (e.deltaY >= 0) { if (e.deltaY > 0) resetOlderGesture(); return; }
+    if ($('#messages').scrollTop > 1) return;
+    // deltaMode: 0 = pixels (normal), 1 = lines, 2 = pages.
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? $('#messages').clientHeight : 1;
+    noteOlderIntent(-e.deltaY * unit);
+  }, { passive: true });
+
+  let lastTouchY = null;
+  $('#messages').addEventListener('touchstart', (e) => {
+    lastTouchY = e.touches.length === 1 ? e.touches[0].clientY : null;
+  }, { passive: true });
+  $('#messages').addEventListener('touchmove', (e) => {
+    if (lastTouchY == null || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY;
+    const dy = y - lastTouchY; // finger moving down = pulling older content into view
+    lastTouchY = y;
+    if (dy < 0) { resetOlderGesture(); return; }
+    if ($('#messages').scrollTop <= 1) noteOlderIntent(dy);
+  }, { passive: true });
 
   // Double-click a bubble to select all its text (easy copy). Skip bubbles with
   // no real text (media-only, placeholders, the blank-bubble filler) so the
@@ -1432,52 +1560,7 @@ function init() {
   // (a message arrived while it was hidden) marks it read now that you can see it.
   document.addEventListener('visibilitychange', maybeMarkActiveRead);
 
-  $('#loadOlder').addEventListener('click', async () => {
-    if (!state.activeId) return;
-    try {
-      const m = $('#messages');
-      const inner = $('#messagesInner');
-      // Anchor on the topmost rendered message: remember which one and exactly
-      // where it sits in the viewport. renderMessages() rebuilds every row, so we
-      // re-find it afterwards by its stable id (data-mid) and nudge the scroll so
-      // it lands back in the same spot. Pinning the element itself (rather than a
-      // height delta) survives reflow ABOVE *or* below it — late-loading media,
-      // author-label regrouping, the lot.
-      let anchorId = null, anchorTop = 0;
-      for (const row of inner.children) {
-        if (row.dataset && row.dataset.mid) { anchorId = row.dataset.mid; anchorTop = row.getBoundingClientRect().top; break; }
-      }
-      const data = await api(`/api/conversations/${encodeURIComponent(state.activeId)}/messages?older=1`);
-      renderMessages(data);
-      if (cancelOlderPin) cancelOlderPin(); // supersede any prior in-flight settle
-      // Re-pin instantly (.messages is scroll-behavior:smooth, so scrollBy would
-      // otherwise animate). Keep correcting until sizes go quiet (media settled),
-      // the user starts scrolling, or a safety cap elapses.
-      const pin = () => {
-        if (!anchorId) return;
-        let el = null;
-        for (const row of inner.children) { if (row.dataset && row.dataset.mid === anchorId) { el = row; break; } }
-        if (!el) return;
-        const delta = el.getBoundingClientRect().top - anchorTop;
-        if (delta) m.scrollBy({ top: delta, behavior: 'instant' });
-      };
-      let idle, cap, ro;
-      const stop = () => {
-        if (ro) ro.disconnect();
-        clearTimeout(idle); clearTimeout(cap);
-        m.removeEventListener('wheel', stop);
-        m.removeEventListener('touchstart', stop);
-        cancelOlderPin = null;
-      };
-      cancelOlderPin = stop;
-      ro = new ResizeObserver(() => { pin(); clearTimeout(idle); idle = setTimeout(stop, 600); });
-      pin();
-      ro.observe(inner);
-      cap = setTimeout(stop, 8000);
-      m.addEventListener('wheel', stop, { passive: true });
-      m.addEventListener('touchstart', stop, { passive: true });
-    } catch (err) { toast(err.message, true); }
-  });
+  $('#loadOlder').addEventListener('click', () => { loadOlderMessages(); });
 
   connectSSE();
   loadConversations();
