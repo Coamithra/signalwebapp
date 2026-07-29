@@ -5,6 +5,10 @@ import {
   parseFormatting, toMarkdown, renderFormatted,
   shortcodeBefore, shortcodeQueryBefore, matchShortcodes,
 } from './format.js';
+import {
+  colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
+  parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
+} from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -45,21 +49,6 @@ function el(tag, attrs = {}, children = []) {
 }
 
 // ---------- avatars ----------
-const AVATAR_COLORS = [
-  '#a84d4d', '#c46a2d', '#b89b2d', '#5e9e54', '#3f9c8f', '#3f7fae',
-  '#4a6fd0', '#7059c4', '#9b53b8', '#b8527f', '#7a8a99', '#8a7250',
-];
-function colorFor(id) {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
-}
-function initials(title) {
-  const words = (title || '?').trim().split(/\s+/).filter(Boolean);
-  if (!words.length) return '?';
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[words.length - 1][0]).toUpperCase();
-}
 function avatarEl(conv, size) {
   const node = el('div', { class: size === 'small' ? 'thread-avatar' : 'conv-avatar' });
   node.style.background = conv.isMe ? '#3a76f0' : colorFor(conv.id);
@@ -104,13 +93,6 @@ async function api(path, opts) {
 }
 
 // ---------- conversation list ----------
-function previewText(conv) {
-  if (conv.typing) return '…typing';
-  if (conv.lastMessageDeleted) return 'This message was deleted';
-  const t = conv.lastMessageText || '';
-  return t || (conv.lastMessageStatus ? 'Attachment' : '');
-}
-
 function renderConversations() {
   const list = $('#conversationList');
   const items = state.filtered ?? state.conversations;
@@ -351,19 +333,17 @@ function messageRow(msg, prev, isGroup) {
 // Which actions apply to a given message. Edit only makes sense for your own
 // text messages; "Delete for everyone" only for your own (Signal's unsend);
 // "Delete for me" (local) is always available. Tombstones/incoming get just the
-// local delete.
+// local delete. The eligibility rules live in ui-logic.js (testable); this only
+// binds the action names to labels and handlers.
+const MENU_ACTIONS = {
+  edit: (msg) => ({ label: 'Edit', onClick: () => startEdit(msg) }),
+  deleteForEveryone: (msg) => ({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) }),
+  deleteForMe: (msg) => ({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) }),
+};
 function menuItemsFor(msg) {
-  const items = [];
-  const isOut = msg.direction === 'outgoing';
-  const hasText = !!(msg.text && msg.text.trim());
-  if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) {
-    items.push({ label: 'Edit', onClick: () => startEdit(msg) });
-  }
-  if (isOut && !msg.deletedForEveryone) {
-    items.push({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) });
-  }
-  items.push({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) });
-  return items;
+  // An unknown name is skipped rather than thrown on: a menu missing one entry
+  // beats a TypeError inside the message list. A test keeps the two in step.
+  return menuActionsFor(msg).map((action) => MENU_ACTIONS[action]).filter(Boolean).map((build) => build(msg));
 }
 
 // The kebab button shown on hover. Null for messages with no id (optimistic
@@ -810,16 +790,6 @@ function scrollToBottom(force) {
 }
 
 // ---------- composer: pending attachments ----------
-function kindForType(ct) {
-  if (/^image\//.test(ct)) return 'image';
-  if (/^video\//.test(ct)) return 'video';
-  if (/^audio\//.test(ct)) return 'audio';
-  return 'file';
-}
-function iconForKind(kind) {
-  return kind === 'image' ? '🖼️' : kind === 'video' ? '🎬' : kind === 'audio' ? '🎵' : '📎';
-}
-
 // FileReader -> base64 (without the "data:<ct>;base64," prefix the server/Signal
 // don't want).
 function readFileAsBase64(file) {
@@ -1050,21 +1020,11 @@ function replaceRange(input, start, end, text) {
 // which is what you need when you can't guess Signal's name for the thing
 // (":+1:" for 👍). Keyboard-first; the popup only exists while it has matches.
 
-// Picks are counted so a hard-capped list of 8 stays useful: substring matching
-// means ":up" has ~40 candidates, and the ones you actually use should be in
-// them. Per-browser and best-effort — localStorage can be full, disabled, or
-// hand-edited, so every read is defensive and every write can fail silently.
-//
-// Counts DECAY: every EMOJI_FREQ_HALFLIFE picks, every score is halved. A
-// phase you go through fades out on its own over the next couple of hundred
-// picks instead of ranking forever, while something you still use keeps
-// re-earning its place. Scores are fractional after a decay — that's fine,
-// they're only ever compared to each other.
+// The counting/decay/cap rules live in ui-logic.js (and are unit-tested); what
+// stays here is the localStorage wiring, which is best-effort — storage can be
+// full or disabled, so the read and the write both tolerate throwing.
 const EMOJI_POP_LIMIT = 8;        // rows shown; a hard cap, not a page size
 const EMOJI_FREQ_KEY = 'sb.emojiFreq';
-const EMOJI_FREQ_MAX = 200;       // bounded: this is a ranking hint, not a history
-const EMOJI_FREQ_HALFLIFE = 60;   // picks between halvings
-const EMOJI_FREQ_FLOOR = 0.05;    // decayed below this -> forgotten entirely
 
 // Parsed once and kept: the popup needs this on every keystroke, and only a
 // pick can change it. Another tab writing the key is not worth a storage
@@ -1078,34 +1038,12 @@ function emojiFreq() {
 // -> { counts: {name: score}, picks: number-since-last-decay }
 function readEmojiFreq() {
   try {
-    const raw = JSON.parse(localStorage.getItem(EMOJI_FREQ_KEY) || '{}');
-    const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.counts : null;
-    const counts = Object.create(null);
-    if (src && typeof src === 'object' && !Array.isArray(src)) {
-      for (const [k, v] of Object.entries(src)) {
-        if (typeof v === 'number' && Number.isFinite(v) && v > 0) counts[k] = v;
-      }
-    }
-    const picks = Number.isFinite(raw?.picks) && raw.picks >= 0 ? raw.picks : 0;
-    return { counts, picks };
+    return parseEmojiFreq(localStorage.getItem(EMOJI_FREQ_KEY));
   } catch { return { counts: Object.create(null), picks: 0 }; }
 }
 
 function bumpEmojiFreq(name) {
-  const { counts, picks: prev } = emojiFreq();
-  counts[name] = (counts[name] || 0) + 1;
-
-  let picks = prev + 1;
-  if (picks >= EMOJI_FREQ_HALFLIFE) {
-    picks = 0;
-    for (const k of Object.keys(counts)) {
-      const decayed = counts[k] / 2;
-      if (decayed < EMOJI_FREQ_FLOOR) delete counts[k]; else counts[k] = decayed;
-    }
-  }
-
-  const kept = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, EMOJI_FREQ_MAX);
-  const payload = JSON.stringify({ picks, counts: Object.fromEntries(kept) });
+  const payload = JSON.stringify(nextEmojiFreq(emojiFreq(), name));
   try { localStorage.setItem(EMOJI_FREQ_KEY, payload); } catch { /* full or disabled */ }
 }
 
@@ -1258,12 +1196,12 @@ function emojiPopKey(e) {
 function tryGifCommand() {
   if (!state.activeId) return false;
   const input = $('#composerInput');
-  const m = /^\s*\/gif\b[ \t]*(.*)$/i.exec(input.value);
-  if (!m) return false;
+  const query = parseGifCommand(input.value);
+  if (query === null) return false;
   input.value = '';
   autoGrow();
   updateSendEnabled();
-  openGifPicker(m[1].trim());
+  openGifPicker(query);
   return true;
 }
 
@@ -1488,21 +1426,12 @@ async function setTldr(id, next) {
 // event. A sidebar/cross-conversation indicator is out of scope.
 const tldrByConv = new Map(); // conversationId -> { stage, reason, url }
 
-// Store a conversation's status, bounding the Map. Entries normally clear on
-// 'done'/dismiss, but a 'failed' left in a background chat lingers until it's
-// reopened and dismissed, so cap defensively: FIFO-evict the oldest entry that
-// isn't the chat currently on screen.
+// Store a conversation's status, bounding the Map (eviction rule in ui-logic.js).
 const TLDR_CONV_CAP = 50;
 function setTldrFor(convId, status) {
   const key = String(convId);
   tldrByConv.set(key, status);
-  if (tldrByConv.size > TLDR_CONV_CAP) {
-    for (const oldest of tldrByConv.keys()) {
-      if (oldest === state.activeId) continue;
-      tldrByConv.delete(oldest);
-      break;
-    }
-  }
+  evictOldestTldr(tldrByConv, TLDR_CONV_CAP, state.activeId);
 }
 
 // Drop a conversation's stored status (on 'done', or when the user dismisses a
@@ -1570,14 +1499,6 @@ function renderActiveTldr() {
     return;
   }
   renderTldrStatus(st.stage, st.reason, st.url);
-}
-
-// Friendly text for the error tokens the retry endpoint can return, so the bubble
-// never shows a raw enum like "not-configured".
-function retryErrorReason(msg) {
-  if (msg === 'not-configured') return 'auto-TLDR is not configured';
-  if (msg === 'bad-url') return 'not a recognized YouTube link';
-  return msg || 'retry failed';
 }
 
 // Manual retry: ask the server to re-run this link's summary. Optimistically store

@@ -28,7 +28,7 @@ Card -> worktree -> PR runbook: follow `~/.claude/CONTRIBUTING.md` (the global g
 - **Board:** Signal Web App, id `6a353dfe`, **local backend** - every board command needs `--backend local`. Lists: To Do / Doing / Done. Atomic pickup (truly atomic on the local backend): `trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"`.
 - **Default branch:** `main`. **GitHub:** solo public repo (unprotected `main` -> PR + self-merge, no approval needed).
 - **Worktrees:** `.trees/<branch>` (branch-named, gitignored). **Zero-dep app** - no `.env`, no `node_modules`, no build step - so a fresh worktree is ready to run immediately (no bootstrap).
-- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free half of [public/format.js](public/format.js) - the formatting parser and the shortcode lookups. Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
+- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free logic: [public/format.js](public/format.js) (the formatting parser and the shortcode lookups), [public/ui-logic.js](public/ui-logic.js), and the pure helpers of [src/tldr.js](src/tldr.js). Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
 
 ## The one thing you must know about the CDP layer
 
@@ -56,6 +56,7 @@ evaluate must target the isolated context's id.
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
+| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map after a Signal update). |
 
@@ -199,8 +200,16 @@ evaluate must target the isolated context's id.
   20 words, copied word-for-word, and omitted entirely rather than invented when nothing is
   worth quoting (the summary is clamped to `MAX_TLDR_CHARS` before sending, since it
   auto-posts to real contacts),
-  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The TLDR has no link, so
-  it can't trigger itself. **Failures are logged and swallowed — never posted into the
+  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The transcript and
+  title are untrusted third-party text, so `buildPrompt` **fences** them in `<transcript>`
+  tags framed as data-never-instructions (a literal tag in the captions is stripped first);
+  keep the instruction sentences above the fence byte-identical - that exact string is the
+  one the quote experiment measured (card daa054ce). The TLDR can't trigger itself because
+  `defangUrls` **strips the URL scheme** from the summary before sending (`https://youtu.be/x`
+  -> `youtu.be/x`), and `findYouTubeUrl` requires a literal `http(s)://` - the TLDR is an
+  outgoing message, so without that a quoted link would loop. `clampSummary` closes an
+  unbalanced quotation mark when it truncates, so a cut never presents half a quote as
+  speech. **Failures are logged and swallowed — never posted into the
   chat.** This is entirely server-side (works with no browser tab open) and touches no
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
@@ -272,9 +281,10 @@ npm start               # server on http://127.0.0.1:7700
   breaks after a Signal update, the fix is almost always localized to
   [src/page-api.js](src/page-api.js). Re-probe with a small CDP `Runtime.evaluate` in the
   isolated context.
-- `npm test` only reaches [public/format.js](public/format.js) — the parser and the
-  shortcode lookups, which are pure and DOM-free. Nothing that touches CDP, the server, or
-  the DOM is covered, so **also** run the app and exercise the change (the
+- `npm test` only reaches pure, DOM-free logic ([public/format.js](public/format.js),
+  [public/ui-logic.js](public/ui-logic.js), the helpers in [src/tldr.js](src/tldr.js)). Nothing that touches
+  CDP, the server, or the DOM is covered (notably the emoji popup's state machine, which
+  still lives in `app.js`), so **also** run the app and exercise the change (the
   `Claude_Preview` / `claude-in-chrome` tools work well; test sends against **Note to
   Self** so you never message real contacts).
 - **`textarea.setRangeText()` does not write to the browser's undo stack** — Ctrl+Z skips
