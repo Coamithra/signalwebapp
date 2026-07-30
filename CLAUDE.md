@@ -56,7 +56,7 @@ evaluate must target the isolated context's id.
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
-| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
+| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map after a Signal update). |
 
@@ -128,6 +128,22 @@ evaluate must target the isolated context's id.
   with no scrolling (type another char to narrow). The popup's keys are handled at the top of
   the composer's existing `keydown` listener, so while it's open they win over Enter→send and
   ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
+- **Jumbomoji (emoji-only messages)** - a message whose text is *nothing but* emoji renders
+  large and with no bubble at all. The rule and the sizes are **Signal Desktop's own**, read
+  out of its bundle (`getJumboEmojiCount` + the size enum) so the same message looks the same
+  in both apps: whitespace is ignored, any non-emoji character disqualifies it, and the cap is
+  **5** emoji -> **1=56px, 2=48px, 3=40px, 4=36px, 5=32px**; 6+ or mixed text falls back to the
+  ordinary 14.5px bubble. Attachments veto it (a caption beside a photo is still a caption).
+  `jumbomojiSize` in [public/ui-logic.js](public/ui-logic.js) is the whole decision;
+  `applyJumbo` in [public/app.js](public/app.js) only paints it (class + inline `font-size`,
+  which is why the `.bubble.jumbomoji` CSS must never set a size of its own). Counting uses
+  `/\p{RGI_Emoji}/v` - the `v` flag's set-of-strings property, so a ZWJ family, flag, keycap or
+  skin-toned emoji is **one** match rather than several code points; `\p{Extended_Pictographic}`
+  is a second alternative purely to catch the bare pre-VS16 forms (a bare `❤` with no U+FE0F)
+  that RGI excludes but other clients still send. `applyJumbo` always *clears* as well as sets,
+  because an in-place edit reuses the same bubble node and can cross the emoji-only line in
+  either direction; both optimistic send echoes re-apply it after they inject their media,
+  since `messageRow` built those rows with an empty `attachments` array.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
