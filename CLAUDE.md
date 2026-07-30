@@ -129,18 +129,25 @@ evaluate must target the isolated context's id.
   the composer's existing `keydown` listener, so while it's open they win over Enter→send and
   ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
 - **Jumbomoji (emoji-only messages)** - a message whose text is *nothing but* emoji renders
-  large and with no bubble at all. The rule and the sizes are **Signal Desktop's own**, read
-  out of its bundle (`getJumboEmojiCount` + the size enum) so the same message looks the same
-  in both apps: whitespace is ignored, any non-emoji character disqualifies it, and the cap is
-  **5** emoji -> **1=56px, 2=48px, 3=40px, 4=36px, 5=32px**; 6+ or mixed text falls back to the
-  ordinary 14.5px bubble. Attachments veto it (a caption beside a photo is still a caption).
-  `jumbomojiSize` in [public/ui-logic.js](public/ui-logic.js) is the whole decision;
+  large and with no bubble at all. The sizes and the cap are **Signal Desktop's own**, read out
+  of its bundle (`getJumboEmojiCount` + the size enum): whitespace is ignored, any non-emoji
+  character disqualifies it, and the cap is **5** emoji -> **1=56px, 2=48px, 3=40px, 4=36px,
+  5=32px**; 6+ or mixed text falls back to the ordinary 14.5px bubble. Signal's veto clauses
+  come with it - **attachments** (a caption beside a photo is still a caption) and **any
+  `bodyRanges`**, so a spoilered or monospaced emoji stays an ordinary message. (Signal's
+  predicate also lists quotes and link previews; this UI doesn't render either into the bubble,
+  so there is nothing to veto on.) Where we *do* diverge from Signal knowingly: Signal filters
+  its matches through its own emoji table, we go by Unicode properties, so a handful of bare
+  pre-VS16 pictographs (`☝`, `⬆`) jumbo here and don't there.
+  `jumboSizeFor` in [public/ui-logic.js](public/ui-logic.js) is the whole decision;
   `applyJumbo` in [public/app.js](public/app.js) only paints it (class + inline `font-size`,
   which is why the `.bubble.jumbomoji` CSS must never set a size of its own). Counting uses
   `/\p{RGI_Emoji}/v` - the `v` flag's set-of-strings property, so a ZWJ family, flag, keycap or
   skin-toned emoji is **one** match rather than several code points; `\p{Extended_Pictographic}`
   is a second alternative purely to catch the bare pre-VS16 forms (a bare `❤` with no U+FE0F)
-  that RGI excludes but other clients still send. `applyJumbo` always *clears* as well as sets,
+  that RGI excludes but other clients still send - minus a deny-list of five that are
+  typography rather than emoji when written bare (`© ® ™ ‼ ⁉`), or the one-character message
+  "™" would render at 56px. `applyJumbo` always *clears* as well as sets,
   because an in-place edit reuses the same bubble node and can cross the emoji-only line in
   either direction; both optimistic send echoes re-apply it after they inject their media,
   since `messageRow` built those rows with an empty `attachments` array.

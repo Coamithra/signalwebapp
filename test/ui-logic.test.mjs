@@ -15,7 +15,7 @@ import {
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason,
-  jumbomojiSize, JUMBO_MAX_EMOJI,
+  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
 } from '../public/ui-logic.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -409,4 +409,45 @@ test('jumbomojiSize is not order-dependent', () => {
   assert.equal(jumbomojiSize('\u{1F600}'), 56);
   assert.equal(jumbomojiSize('\u{1F600}'), 56);
   assert.equal(jumbomojiSize('\u{1F600}\u{1F600}\u{1F600}'), 40);
+});
+
+// The typographic pictographs: Extended_Pictographic, but plainly text when
+// written bare. Their U+FE0F forms are genuine emoji and must still jumbo.
+test('jumbomojiSize treats bare (c)/(R)/TM/!!/!? as text, not emoji', () => {
+  for (const ch of ['\u00A9', '\u00AE', '\u2122', '\u203C', '\u2049']) {
+    assert.equal(jumbomojiSize(ch), null, `bare ${JSON.stringify(ch)} must not jumbo`);
+    assert.equal(jumbomojiSize(ch + '\uFE0F'), 56, `${JSON.stringify(ch)} + VS16 is a real emoji`);
+  }
+});
+
+// A lone U+FE0F outrides the sequence it belonged to on copy-paste. It is not
+// a glyph, so it must not disqualify the message or count as an emoji.
+test('jumbomojiSize skips a stray variation selector', () => {
+  assert.equal(jumbomojiSize('\u{1F600}\uFE0F'), 56);
+  assert.equal(jumbomojiSize('\uFE0F'), null); // nothing but the selector
+});
+
+// ---------- jumbomoji: the veto ----------
+// Signal refuses jumbomoji when the message carries anything besides the emoji.
+
+test('jumboSizeFor passes plain emoji-only messages through', () => {
+  assert.equal(jumboSizeFor({ text: '\u{1F44D}' }), 56);
+  assert.equal(jumboSizeFor({ text: '\u{1F44D}', attachments: [], bodyRanges: [] }), 56);
+  assert.equal(jumboSizeFor({ text: 'hello' }), null);
+});
+
+test('jumboSizeFor vetoes media, view-once and formatted messages', () => {
+  const emoji = '\u{1F44D}';
+  assert.equal(jumboSizeFor({ text: emoji, attachments: [{ contentType: 'image/png' }] }), null);
+  assert.equal(jumboSizeFor({ text: emoji, isViewOnce: true }), null);
+  // bodyRanges is the one that matters most: a spoilered emoji blown up to 56px
+  // would defeat the spoiler, and Signal keeps it an ordinary message too.
+  assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 3 }] }), null);
+  assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 1 }] }), null);
+});
+
+test('jumboSizeFor survives a missing or empty message', () => {
+  assert.equal(jumboSizeFor(null), null);
+  assert.equal(jumboSizeFor(undefined), null);
+  assert.equal(jumboSizeFor({}), null);
 });

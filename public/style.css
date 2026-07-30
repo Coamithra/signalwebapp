@@ -207,8 +207,9 @@ body {
    Signal's ladder), so nothing here may set font-size. Declared after the
    .incoming/.outgoing bubble colours so the transparent background wins on
    source order; the corner radii those rules set are moot without a fill.
-   line-height 1.15 keeps a tall glyph from pushing the row apart, and the
-   horizontal padding stays so the hover "…" menu clears the emoji. */
+   line-height 1.15 keeps a tall glyph from pushing the row apart; the small
+   padding that remains keeps the glyph optically in line with the bubbles
+   above and below it, rather than flush against the thread edge. */
 .bubble.jumbomoji { background: transparent; padding: 2px 4px; line-height: 1.15; }
 
 /* ---------- Message text formatting (Signal style bodyRanges) ---------- */
