@@ -49,6 +49,63 @@ export function menuActionsFor(msg) {
   return actions;
 }
 
+// ---------- jumbomoji ----------
+// A message that is *nothing but* emoji renders big and bubble-less, the way
+// Signal Desktop (and Telegram) do it. The thresholds are Signal's own, read
+// out of its bundle so the same message looks the same in both apps:
+// getJumboEmojiCount() ignores whitespace, refuses any non-emoji character,
+// and caps at 5 — beyond that it's an ordinary message.
+export const JUMBO_MAX_EMOJI = 5;
+const JUMBO_PX = { 1: 56, 2: 48, 3: 40, 4: 36, 5: 32 };
+
+// Characters that are Extended_Pictographic but read as *typography*, not
+// emoji, when written bare: © ® ™ ‼ ⁉. Without this, the message "™" would
+// render at 56px. Their U+FE0F forms (™️) are real emoji and still match, via
+// \p{RGI_Emoji} above them in the alternation.
+const TEXT_SYMBOLS = '\\u00A9\\u00AE\\u2122\\u203C\\u2049';
+
+// -> font-size in px for an emoji-only string, or null to render normally.
+// `\p{RGI_Emoji}` (the `v` flag's set-of-strings property) is what makes this
+// zero-dep and correct: it consumes a whole ZWJ family, flag, keycap or
+// skin-toned emoji as ONE match, where a naive per-code-point scan would count
+// 👨‍👩‍👧‍👦 as four. `\p{Extended_Pictographic}` is a second alternative only to
+// catch the older bare forms RGI deliberately excludes (a `❤` with no U+FE0F,
+// as some clients still send), minus the typographic ones above. A lone U+FE0F
+// is skipped like whitespace: it survives copy-paste after RGI has already
+// consumed the sequence it belonged to, and it isn't a glyph of its own.
+export function jumbomojiSize(text) {
+  if (typeof text !== 'string' || !text) return null;
+  // Built per call: a /g/ regex carries `lastIndex` between calls.
+  const token = new RegExp(`\\p{RGI_Emoji}|[\\p{Extended_Pictographic}--[${TEXT_SYMBOLS}]]|[\\s\\uFE0F]+`, 'gv');
+  let pos = 0;
+  let count = 0;
+  let m;
+  while ((m = token.exec(text))) {
+    // A gap before this match is a character that is neither emoji nor space,
+    // so the message is mixed text — bail rather than scan the rest.
+    if (m.index !== pos) return null;
+    pos = token.lastIndex;
+    if (!/^[\s\uFE0F]/.test(m[0])) count++;
+    if (count > JUMBO_MAX_EMOJI) return null;
+  }
+  if (pos !== text.length) return null; // trailing non-emoji
+  return count ? JUMBO_PX[count] : null; // whitespace-only counts as nothing
+}
+
+// The veto, kept beside the sizing so both halves of the rule are testable and
+// in one place. Signal refuses jumbomoji for a message carrying anything *other*
+// than the emoji — media, or formatting ranges (its own predicate also lists
+// quotes and link previews, which this UI doesn't render into the bubble).
+// bodyRanges matters most: a spoilered or monospaced emoji is an ordinary
+// message in Signal, and blowing it up here would out-and-out break the spoiler.
+export function jumboSizeFor(msg) {
+  if (!msg) return null;
+  if (msg.isViewOnce) return null;
+  if ((msg.attachments || []).length) return null;
+  if ((msg.bodyRanges || []).length) return null;
+  return jumbomojiSize(msg.text);
+}
+
 // ---------- composer: pending attachments ----------
 export function kindForType(ct) {
   if (/^image\//.test(ct)) return 'image';

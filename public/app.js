@@ -8,6 +8,7 @@ import {
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
+  jumboSizeFor,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -292,6 +293,7 @@ function messageRow(msg, prev, isGroup) {
     }
   }
   if (!bubble.childNodes.length) bubble.appendChild(document.createTextNode(' '));
+  applyJumbo(bubble, msg);
   appendBubble(row, msg, bubble);
 
   if (msg.reactions && msg.reactions.length) {
@@ -356,6 +358,16 @@ function buildMenuButton(msg) {
   });
   btn.addEventListener('click', (e) => { e.stopPropagation(); openMessageMenu(msg, btn); });
   return btn;
+}
+
+// Emoji-only text renders big and bubble-less (Signal's "jumbomoji"). Both the
+// size and the veto come from ui-logic; here we only paint it. Toggles rather
+// than sets, because an in-place edit reuses the same bubble node and can turn
+// a 👍 back into ordinary text.
+function applyJumbo(bubble, msg) {
+  const px = jumboSizeFor(msg);
+  bubble.classList.toggle('jumbomoji', !!px);
+  bubble.style.fontSize = px ? `${px}px` : '';
 }
 
 // Lay the bubble out with its hover menu button on the outer edge (or bare if
@@ -432,7 +444,13 @@ function startEdit(msg) {
   // Put the composer's own syntax back in the box, so editing an italic message
   // shows "_like this_" and doesn't silently strip the formatting on save.
   const source = toMarkdown(msg.text || '', msg.bodyRanges);
-  state.editing = { messageId: msg.id, original: source };
+  // The message's non-text parts ride along so the optimistic repaint in
+  // submitEdit can re-decide jumbomoji without re-finding the message. Signal's
+  // edit is text-only, so these are exactly as true after the edit as before.
+  state.editing = {
+    messageId: msg.id, original: source,
+    attachments: msg.attachments || [], isViewOnce: !!msg.isViewOnce,
+  };
   const input = $('#composerInput');
   closeEmojiPop(); // the box is being replaced wholesale; any suggestions are stale
   input.value = source;
@@ -472,7 +490,11 @@ async function submitEdit() {
   // server confirms, so a failure leaves the user's text right where they can retry.
   const row = rowByMid(messageId);
   const textEl = row ? row.querySelector('.bubble .msg-text') : null;
-  if (textEl) textEl.replaceChildren(renderFormatted(text, bodyRanges));
+  if (textEl) {
+    textEl.replaceChildren(renderFormatted(text, bodyRanges));
+    // The edit may have crossed the emoji-only line in either direction.
+    applyJumbo(textEl.closest('.bubble'), { ...editing, text, bodyRanges });
+  }
 
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}/edit`, {
@@ -943,6 +965,7 @@ async function sendMessage() {
     if (!text) bubble.textContent = ''; // drop the empty-bubble placeholder
     const ref = text ? bubble.firstChild : null;
     for (const item of attachments) bubble.insertBefore(pendingEchoEl(item), ref);
+    applyJumbo(bubble, { text, bodyRanges, attachments }); // messageRow was handed none
   }
   inner.appendChild(optimistic);
   scrollToBottom(true);
@@ -1324,6 +1347,7 @@ async function sendGif(g) {
     const img = el('img', { class: 'att-media att-image', src: g.preview.url, alt: g.title || 'GIF' });
     if (g.preview.w && g.preview.h) img.style.aspectRatio = `${g.preview.w} / ${g.preview.h}`;
     bubble.insertBefore(wrapMedia(img), ref);
+    applyJumbo(bubble, { text, bodyRanges, attachments: [g] }); // ditto: the GIF is media
   }
   inner.appendChild(optimistic);
   scrollToBottom(true);

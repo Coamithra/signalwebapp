@@ -15,6 +15,7 @@ import {
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason,
+  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
 } from '../public/ui-logic.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -343,4 +344,110 @@ test('every action menuActionsFor can emit has a handler in app.js', async () =>
   }
   assert.ok(emitted.size > 0);
   for (const action of emitted) assert.ok(handled.has(action), `MENU_ACTIONS has no entry for '${action}'`);
+});
+
+// ---------- jumbomoji ----------
+// Emoji-only messages render big and bubble-less. The sizes are Signal
+// Desktop's own ladder, so a message looks the same in both apps.
+
+test('jumbomojiSize follows Signal\'s size ladder by emoji count', () => {
+  assert.equal(jumbomojiSize('\u{1F600}'), 56);
+  assert.equal(jumbomojiSize('\u{1F600}\u{1F600}'), 48);
+  assert.equal(jumbomojiSize('\u{1F600}\u{1F600}\u{1F600}'), 40);
+  assert.equal(jumbomojiSize('\u{1F600}\u{1F600}\u{1F600}\u{1F600}'), 36);
+  assert.equal(jumbomojiSize('\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}'), 32);
+});
+
+test('jumbomojiSize gives up past the cap', () => {
+  const over = '\u{1F600}'.repeat(JUMBO_MAX_EMOJI + 1);
+  assert.equal(jumbomojiSize(over), null);
+  assert.equal(jumbomojiSize('\u{1F600}'.repeat(50)), null);
+});
+
+test('jumbomojiSize ignores whitespace but not other text', () => {
+  assert.equal(jumbomojiSize('  \u{1F44D}\n '), 56);       // padding doesn't count
+  assert.equal(jumbomojiSize('\u{1F44D} \u{1F44D}'), 48);  // separator doesn't count
+  assert.equal(jumbomojiSize('ok \u{1F44D}'), null);       // mixed text
+  assert.equal(jumbomojiSize('\u{1F44D}!'), null);         // trailing punctuation
+  assert.equal(jumbomojiSize('\u{1F44D}.'), null);
+});
+
+// The whole reason for the `v` flag: these are multi-code-point sequences that
+// a naive per-character scan would miscount (a ZWJ family as four people, a
+// flag as two letters), which would push them over the cap and lose the jumbo.
+test('jumbomojiSize counts multi-code-point emoji as one', () => {
+  assert.equal(jumbomojiSize('\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}'), 56); // ZWJ family
+  assert.equal(jumbomojiSize('\u{1F1F3}\u{1F1F1}'), 56);        // flag
+  assert.equal(jumbomojiSize('1\uFE0F\u20E3'), 56);             // keycap
+  assert.equal(jumbomojiSize('\u{1F44D}\u{1F3FD}'), 56);        // skin tone modifier
+  assert.equal(jumbomojiSize('\u{1F44D}\u{1F3FD}\u{1F44D}\u{1F3FF}'), 48);
+});
+
+// RGI excludes emoji written without U+FE0F, but clients still send them, so
+// the bare pictographic forms have to jumbo too — without dragging in digits
+// or '#'/'*', which carry Emoji=Yes but are plainly text.
+test('jumbomojiSize accepts bare pictographic emoji, not digits or symbols', () => {
+  assert.equal(jumbomojiSize('\u2764\uFE0F'), 56); // heart with VS16
+  assert.equal(jumbomojiSize('\u2764'), 56);       // heart without
+  assert.equal(jumbomojiSize('\u263A'), 56);
+  assert.equal(jumbomojiSize('1'), null);
+  assert.equal(jumbomojiSize('#'), null);
+  assert.equal(jumbomojiSize('*'), null);
+  assert.equal(jumbomojiSize('123'), null);
+});
+
+test('jumbomojiSize returns null for anything without emoji', () => {
+  for (const v of ['', '   ', '\n', 'hello', null, undefined, 42, {}]) {
+    assert.equal(jumbomojiSize(v), null, `expected null for ${JSON.stringify(v)}`);
+  }
+});
+
+// Regex state bug insurance: the matcher is /g/, so a shared instance would
+// carry lastIndex between calls and make results depend on call order.
+test('jumbomojiSize is not order-dependent', () => {
+  assert.equal(jumbomojiSize('\u{1F600}\u{1F600}\u{1F600}'), 40);
+  assert.equal(jumbomojiSize('\u{1F600}'), 56);
+  assert.equal(jumbomojiSize('\u{1F600}'), 56);
+  assert.equal(jumbomojiSize('\u{1F600}\u{1F600}\u{1F600}'), 40);
+});
+
+// The typographic pictographs: Extended_Pictographic, but plainly text when
+// written bare. Their U+FE0F forms are genuine emoji and must still jumbo.
+test('jumbomojiSize treats bare (c)/(R)/TM/!!/!? as text, not emoji', () => {
+  for (const ch of ['\u00A9', '\u00AE', '\u2122', '\u203C', '\u2049']) {
+    assert.equal(jumbomojiSize(ch), null, `bare ${JSON.stringify(ch)} must not jumbo`);
+    assert.equal(jumbomojiSize(ch + '\uFE0F'), 56, `${JSON.stringify(ch)} + VS16 is a real emoji`);
+  }
+});
+
+// A lone U+FE0F outrides the sequence it belonged to on copy-paste. It is not
+// a glyph, so it must not disqualify the message or count as an emoji.
+test('jumbomojiSize skips a stray variation selector', () => {
+  assert.equal(jumbomojiSize('\u{1F600}\uFE0F'), 56);
+  assert.equal(jumbomojiSize('\uFE0F'), null); // nothing but the selector
+});
+
+// ---------- jumbomoji: the veto ----------
+// Signal refuses jumbomoji when the message carries anything besides the emoji.
+
+test('jumboSizeFor passes plain emoji-only messages through', () => {
+  assert.equal(jumboSizeFor({ text: '\u{1F44D}' }), 56);
+  assert.equal(jumboSizeFor({ text: '\u{1F44D}', attachments: [], bodyRanges: [] }), 56);
+  assert.equal(jumboSizeFor({ text: 'hello' }), null);
+});
+
+test('jumboSizeFor vetoes media, view-once and formatted messages', () => {
+  const emoji = '\u{1F44D}';
+  assert.equal(jumboSizeFor({ text: emoji, attachments: [{ contentType: 'image/png' }] }), null);
+  assert.equal(jumboSizeFor({ text: emoji, isViewOnce: true }), null);
+  // bodyRanges is the one that matters most: a spoilered emoji blown up to 56px
+  // would defeat the spoiler, and Signal keeps it an ordinary message too.
+  assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 3 }] }), null);
+  assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 1 }] }), null);
+});
+
+test('jumboSizeFor survives a missing or empty message', () => {
+  assert.equal(jumboSizeFor(null), null);
+  assert.equal(jumboSizeFor(undefined), null);
+  assert.equal(jumboSizeFor({}), null);
 });
