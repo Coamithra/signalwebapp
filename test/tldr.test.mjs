@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPrompt, defangUrls, clampSummary, MAX_TRANSCRIPT_CHARS } from '../src/tldr.js';
+import { buildPrompt, defangUrls, clampSummary, splitQuoteLine, formatTldr, MAX_TRANSCRIPT_CHARS } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
 
 // The fenced region of a prompt: everything the untrusted data was allowed to fill.
@@ -27,12 +27,12 @@ test('the transcript is fenced and framed as data, not instructions', () => {
   assert.equal(fenced(p), 'Title: A Video\n\nhello world');
 });
 
-test('the measured instruction sentences are unchanged and stay outside the fence', () => {
+test('the instruction sentences are unchanged and stay outside the fence', () => {
   const p = buildPrompt({ transcript: 'x' });
   const head = p.slice(0, p.indexOf('<transcript>'));
   assert.match(head, /Summarize this YouTube video for a friend who is not going to watch it\. /);
   assert.match(head, /Reply with a SHORT TLDR: at most four sentences \(~100 words\), plain text, no preamble, no markdown, and do not start with "TLDR"\. /);
-  assert.match(head, /Include exactly one short verbatim quote from the video \(at most 20 words\), in double quotation marks, copied word-for-word from the transcript - never paraphrased or invented\. If no line is worth quoting, or the transcript is too fragmentary to quote cleanly, omit the quote entirely rather than inventing one\. The quote counts towards the four-sentence limit\./);
+  assert.match(head, /After the summary, leave a blank line and then give one verbatim quote from the video on a line of its own: between 5 and 20 words, wrapped in double quotation marks, copied word-for-word from the transcript - never paraphrased or invented\. It must be a complete thought that stands on its own, not a fragment, and nothing else may appear on that line - no speaker name, no commentary, no markdown\. If no line is worth quoting, or the transcript is too fragmentary to quote cleanly, omit the quote line entirely rather than inventing one\. The quote line does not count towards the four-sentence limit\./);
 });
 
 // Anything a caption could use to forge a fence delimiter. Asserted on the WHOLE
@@ -134,4 +134,90 @@ test('a cut never leaves half an emoji', () => {
   const out = clampSummary('the robot 🤖 said hello', 11);
   assert.equal(out, 'the robot…');
   assert.doesNotMatch(out, /[\uD800-\uDBFF]/);
+});
+
+// --- pulling the quote onto its own line ----------------------------------
+
+const SUMMARY = 'The show is bad. The pacing is worse.';
+const QUOTE = '"What was the point of any event that happened to Zuko?"';
+const PREFIX = '\u{1F916} TLDR: ';
+const italic = (ranges) => ranges.find((b) => b.style === 2);
+
+test('the final quoted line is split off the summary', () => {
+  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n${QUOTE}`), { summary: SUMMARY, quote: QUOTE });
+  // a single newline, or trailing whitespace, is the same shape
+  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n${QUOTE}\n\n`), { summary: SUMMARY, quote: QUOTE });
+  // curly marks are what the model actually tends to emit
+  const curly = '“Zuko had no arc.”';
+  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n${curly}`), { summary: SUMMARY, quote: curly });
+});
+
+test('markdown emphasis around the quote is stripped, not sent literally', () => {
+  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n*${QUOTE}*`), { summary: SUMMARY, quote: QUOTE });
+  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n__${QUOTE}__`), { summary: SUMMARY, quote: QUOTE });
+});
+
+// Anything that isn't unambiguously a quote line stays part of the summary: a
+// mis-split would italicise half a sentence, which is worse than no italics.
+const notQuoteLines = [
+  `${SUMMARY} It is "really, really bad".`,             // quote inlined, no line of its own
+  `${SUMMARY}\n\n"Zuko had no arc." - the narrator`,    // attribution tacked on
+  `${SUMMARY}\n\nAnd one more thought.`,                // an unquoted trailing line
+  `${SUMMARY}\n\nHe says "Zuko had no arc" here.`,      // quote mid-line
+];
+
+for (const [i, text] of notQuoteLines.entries()) {
+  test(`a line that isn't purely a quote stays in the summary (#${i + 1})`, () => {
+    assert.deepEqual(splitQuoteLine(text), { summary: text.trim(), quote: '' });
+    assert.deepEqual(formatTldr(text).bodyRanges, []);
+  });
+}
+
+test('a reply that is nothing but a quote is treated as the summary', () => {
+  assert.deepEqual(splitQuoteLine(QUOTE), { summary: QUOTE, quote: '' });
+  assert.deepEqual(splitQuoteLine(`\n\n${QUOTE}`), { summary: QUOTE, quote: '' });
+});
+
+test('the italic range covers exactly the quote line', () => {
+  const { body, bodyRanges } = formatTldr(`${SUMMARY}\n\n${QUOTE}`);
+  assert.equal(body, `${PREFIX}${SUMMARY}\n\n${QUOTE}`);
+  assert.equal(bodyRanges.length, 1);
+  const r = italic(bodyRanges);
+  // offsets are UTF-16 code units, and the prefix emoji is a surrogate pair
+  assert.equal(body.slice(r.start, r.start + r.length), QUOTE);
+  assert.equal(r.start + r.length, body.length);
+});
+
+test('no quote line means no ranges at all', () => {
+  const { body, bodyRanges } = formatTldr(SUMMARY);
+  assert.equal(body, `${PREFIX}${SUMMARY}`);
+  assert.deepEqual(bodyRanges, []);
+});
+
+test('a link in the quote is still defanged before the range is measured', () => {
+  const quoted = '"go to https://youtu.be/dQw4w9WgXcQ now, seriously"';
+  const { body, bodyRanges } = formatTldr(`${SUMMARY}\n\n${quoted}`);
+  assert.doesNotMatch(body, /https?:\/\//i);
+  assert.equal(findYouTubeUrl(body), null);
+  const r = italic(bodyRanges);
+  assert.equal(body.slice(r.start, r.start + r.length), '"go to youtu.be/dQw4w9WgXcQ now, seriously"');
+});
+
+test('clamping the summary never eats the quote line', () => {
+  const long = 'word '.repeat(600); // well past MAX_TLDR_CHARS
+  const { body, bodyRanges } = formatTldr(`${long}\n\n${QUOTE}`);
+  assert.ok(body.endsWith(QUOTE), 'quote survives the clamp');
+  assert.match(body, /…\n\n"/);
+  const r = italic(bodyRanges);
+  assert.equal(body.slice(r.start, r.start + r.length), QUOTE);
+});
+
+test('a runaway quote is clamped with the closing mark inside', () => {
+  const huge = `"${'long '.repeat(200)}end"`;
+  const { body, bodyRanges } = formatTldr(`${SUMMARY}\n\n${huge}`);
+  const r = italic(bodyRanges);
+  const line = body.slice(r.start, r.start + r.length);
+  assert.ok(line.length <= 300, `quote line is ${line.length} chars`);
+  assert.match(line, /^"/);
+  assert.match(line, /…"$/);
 });

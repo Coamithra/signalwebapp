@@ -219,20 +219,28 @@ evaluate must target the isolated context's id.
   dedupes. It fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
   `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks Gemini
   (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-2.5-flash`) for a summary of at most
-  four sentences (~100 words) carrying **one short verbatim quote from the video** -- at most
-  20 words, copied word-for-word, and omitted entirely rather than invented when nothing is
-  worth quoting (the summary is clamped to `MAX_TLDR_CHARS` before sending, since it
-  auto-posts to real contacts),
+  four sentences (~100 words) followed by **one verbatim quote from the video on a line of
+  its own** -- 5 to 20 words, copied word-for-word, and omitted entirely rather than invented
+  when nothing is worth quoting,
   and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The transcript and
   title are untrusted third-party text, so `buildPrompt` **fences** them in `<transcript>`
   tags framed as data-never-instructions (a literal tag in the captions is stripped first);
-  keep the instruction sentences above the fence byte-identical - that exact string is the
-  one the quote experiment measured (card daa054ce). The TLDR can't trigger itself because
+  the *summary* sentence above the fence is still the byte-identical string card daa054ce
+  measured, but the quote instruction beside it was rewritten for the quote line (card
+  b8c86329) and is no longer covered by that experiment. The TLDR can't trigger itself because
   `defangUrls` **strips the URL scheme** from the summary before sending (`https://youtu.be/x`
   -> `youtu.be/x`), and `findYouTubeUrl` requires a literal `http(s)://` - the TLDR is an
-  outgoing message, so without that a quoted link would loop. `clampSummary` closes an
+  outgoing message, so without that a quoted link would loop. `formatTldr` composes what
+  actually goes out: `splitQuoteLine` peels the trailing quoted line off the model's reply
+  (only when that line is *nothing but* a quoted span -- an attribution or an inline quote
+  stays in the paragraph, since a mis-split would italicise half a sentence), the summary and
+  the quote are clamped separately (`MAX_TLDR_CHARS` / `MAX_QUOTE_CHARS`, so the clamp cannot
+  eat the quote we just went to the trouble of pulling out; `clampSummary` closes an
   unbalanced quotation mark when it truncates, so a cut never presents half a quote as
-  speech. **Failures are logged and swallowed — never posted into the
+  speech), and the quote line carries a **real Signal ITALIC `bodyRange`** (style 2, offsets
+  measured on the composed string -- the prefix emoji is a surrogate pair) rather than literal
+  `_underscores_`. That is the only reason this feature passes `bodyRanges` to `sendText` at
+  all. **Failures are logged and swallowed — never posted into the
   chat.** This is entirely server-side (works with no browser tab open) and touches no
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
