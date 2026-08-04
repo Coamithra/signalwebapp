@@ -303,11 +303,46 @@ evaluate must target the isolated context's id.
   measured on the composed string -- the prefix emoji is a surrogate pair) rather than literal
   `_underscores_`. That is the only reason this feature passes `bodyRanges` to `sendText` at
   all. **Failures are logged and swallowed — never posted into the
-  chat.** This is entirely server-side (works with no browser tab open) and touches no
+  chat.**
+- **The "For context" block (`TLDR_CONTEXT`, default on)** - a third section under the quote:
+  who the channel/author is, and how the video's claims hold up. It is a **SECOND, SEPARATE
+  `claude` run** (`researchContext`), and that separation is the whole design, not an
+  accident of implementation:
+  - Researching a channel needs `WebSearch`/`WebFetch`. The **summary** pass holds up to
+    `MAX_TRANSCRIPT_CHARS` of attacker-influenceable caption text, and giving web tools to
+    *that* run is exactly the injection surface `--tools ""` exists to close. **Never merge
+    the two passes.**
+  - So the context pass never sees the transcript. Its entire input is the channel name, the
+    title and the summary pass's own output (~430 chars measured, vs up to 600k) -- still
+    transcript-derived, but a fraction of the surface -- and its tools are limited to search
+    and fetch. Its fence is `<video>`; `stripFenceTags` strips **both** fence names from every
+    untrusted field so a caption cannot forge the *other* pass's delimiter and ride through on
+    the summary handed between them.
+  - ⚠️ **`--tools` and `--allowedTools` are both required.** `--tools` decides which tools
+    exist, `--allowedTools` which may run unprompted. In `-p` mode nobody can approve a
+    permission prompt, so a tool that exists but isn't allowed makes the model ask and then
+    give up -- which looks identical to "researched it and found nothing". That cost a
+    debugging round: 5 turns, 0 searches, both fields empty.
+  - The prompt (`CONTEXT_SYSTEM_PROMPT`) ports the Core Principles of the user's `research`
+    skill rather than loading it: a search blurb is not a source, never fill a gap with a
+    guess, don't supplement from memory, delete anything unsupported, prefer `""` over a
+    hedge. Loading the real skill would need `--setting-sources user`, which re-prepends the
+    global CLAUDE.md to every run and re-enables user hooks on transcript-derived input, and
+    would couple a shipped feature to personal files outside the repo. These guardrails matter
+    more here than anywhere else in the app: the block asserts things about **real people** and
+    auto-sends with nobody reviewing it.
+  - Both fields are optional and an empty pair means **no block at all** (`parseContext`
+    returns null) -- a music video with nothing to fact-check is a normal outcome. The pass is
+    never retried and every failure is swallowed: the summary goes out without the block
+    rather than not at all. Channel/author comes free from `videoDetails.author` in
+    [src/youtube.js](src/youtube.js); the yt-dlp fallback path has no title or author, so the
+    block degrades to researching the summary alone.
+  - The label carries a **BOLD** `bodyRange` (style 1) covering exactly `For context:` and not
+    its trailing space, alongside the quote's ITALIC range. This is entirely server-side (works with no browser tab open) and touches no
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
 - **Live UI feedback for auto-TLDR** - the pipeline emits per-stage events
-  (`fetching` -> `summarizing` -> `retrying` -> `done`/`failed`, keyed by
+  (`fetching` -> `summarizing` -> `researching` -> `retrying` -> `done`/`failed`, keyed by
   conversationId) through an `onStage` callback passed into `createTldr`.
   [src/server.js](src/server.js) forwards them over the **existing** SSE channel as
   `broadcast('signal', {type:'tldr', conversationId, state, url, reason?})`. The
