@@ -256,6 +256,55 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 .att-audio { height: 36px; max-width: 240px; }
 .view-once { font-style: italic; color: var(--text-dim); }
 
+/* ---------- Link preview card ---------- */
+/* The "postcard" under a message that links somewhere. Sits inside the bubble,
+   so it tints itself off the bubble rather than picking a fixed colour — the
+   same card has to read on both the grey incoming and the blue outgoing fill.
+   white-space: normal undoes the bubble's pre-wrap: the title and description
+   are prose from a web page and must wrap on their own terms. */
+.link-preview {
+  display: block; margin: 6px 0 2px;
+  background: rgba(0, 0, 0, .22);
+  border-left: 3px solid rgba(255, 255, 255, .35);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-width: min(330px, 60vw);
+  white-space: normal;
+  color: inherit; text-decoration: none;
+  overflow: hidden;
+}
+a.link-preview:hover { background: rgba(0, 0, 0, .32); }
+.outgoing .link-preview { border-left-color: rgba(255, 255, 255, .5); }
+
+.lp-domain {
+  font-size: 11.5px; color: var(--text-dim);
+  text-transform: none; letter-spacing: .01em;
+  margin-bottom: 2px;
+}
+.outgoing .lp-domain { color: rgba(255, 255, 255, .72); }
+.lp-title {
+  font-size: 13.5px; font-weight: 600; line-height: 1.25;
+  /* Two lines is enough to identify a page; a 200-char headline shouldn't
+     outgrow the message it's attached to. */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.lp-desc {
+  font-size: 12.5px; line-height: 1.35; margin-top: 3px;
+  color: var(--text-dim);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.outgoing .lp-desc { color: rgba(255, 255, 255, .82); }
+.lp-image {
+  display: block; width: 100%; height: auto;
+  margin-top: 8px; border-radius: 4px;
+  background: rgba(0, 0, 0, .18);
+  /* aspect-ratio is set inline from the stored dimensions so the row keeps its
+     height before the bytes arrive; this caps a very tall image regardless. */
+  max-height: 220px; object-fit: cover;
+}
+
 .lightbox {
   position: fixed; inset: 0; z-index: 1000;
   background: rgba(0,0,0,.88);

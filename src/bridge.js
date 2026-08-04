@@ -115,9 +115,22 @@ export class SignalBridge extends EventEmitter {
     return this._call('getAttachment', messageId, index, opts);
   }
 
+  // Hero image of a link preview: message.preview[index].image.
+  getPreviewImage(messageId, index) {
+    return this._call('getPreviewImage', messageId, index);
+  }
+
+  // Ask Signal to start fetching a link preview for text still being typed, so
+  // sendText finds one waiting instead of blocking on the network.
+  warmLinkPreview(text) {
+    return this._call('warmLinkPreview', text);
+  }
+
   // bodyRanges: optional [{ start, length, style }] formatting (see page-api.js).
-  sendText(id, body, bodyRanges) {
-    return this._call('sendText', id, body, bodyRanges || []);
+  // opts.linkPreview attaches a link preview card (resolved in-page; see
+  // page-api.js for why the grab can't happen out here).
+  sendText(id, body, bodyRanges, opts = {}) {
+    return this._call('sendText', id, body, bodyRanges || [], opts);
   }
 
   // files: [{ fileName, contentType, base64, width?, height? }]. The base64

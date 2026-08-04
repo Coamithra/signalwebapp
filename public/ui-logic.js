@@ -94,16 +94,52 @@ export function jumbomojiSize(text) {
 
 // The veto, kept beside the sizing so both halves of the rule are testable and
 // in one place. Signal refuses jumbomoji for a message carrying anything *other*
-// than the emoji — media, or formatting ranges (its own predicate also lists
-// quotes and link previews, which this UI doesn't render into the bubble).
+// than the emoji — media, a link preview, or formatting ranges (its own
+// predicate also lists quotes, which this UI doesn't render into the bubble).
 // bodyRanges matters most: a spoilered or monospaced emoji is an ordinary
 // message in Signal, and blowing it up here would out-and-out break the spoiler.
 export function jumboSizeFor(msg) {
   if (!msg) return null;
   if (msg.isViewOnce) return null;
   if ((msg.attachments || []).length) return null;
+  if ((msg.preview || []).length) return null;
   if ((msg.bodyRanges || []).length) return null;
   return jumbomojiSize(msg.text);
+}
+
+// ---------- link preview cards ----------
+
+// Cheap "is there anything here worth previewing" gate, so the composer only
+// asks Signal to warm a preview when the text actually holds a link. Signal
+// does the real link-finding itself; this only avoids pointless round-trips.
+export function hasLink(text) {
+  return typeof text === 'string' && /https?:\/\/\S/i.test(text);
+}
+
+// The card's href comes off a received message, i.e. is attacker-controlled.
+// Anything that isn't plain http(s) — javascript:, data:, vbscript:, a
+// protocol-relative //evil.com — returns null and the card renders unclickable.
+// Returns the url unchanged when it's safe, so the caller can use it directly.
+export function safeHttpUrl(url) {
+  if (typeof url !== 'string' || !url) return null;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null; // not absolute / not parseable -> never linkify
+  }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? url : null;
+}
+
+// Domain line at the top of the card. Stored previews carry no 'domain' field
+// (only freshly-grabbed ones do), so it always comes from the url. Lowercased
+// with 'www.' dropped, the way every other client shows it.
+export function previewDomain(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '').toLowerCase() || null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- composer: pending attachments ----------

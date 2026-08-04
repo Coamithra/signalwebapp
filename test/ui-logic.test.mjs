@@ -16,6 +16,7 @@ import {
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason,
   jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
+  hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -446,8 +447,54 @@ test('jumboSizeFor vetoes media, view-once and formatted messages', () => {
   assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 1 }] }), null);
 });
 
+test('jumboSizeFor vetoes a message carrying a link preview card', () => {
+  // A card under the emoji makes it an ordinary message, same as media does —
+  // and Signal's own predicate vetoes on link previews too.
+  const emoji = '\u{1F44D}';
+  assert.equal(jumboSizeFor({ text: emoji, preview: [{ url: 'https://example.com', title: 'Hi' }] }), null);
+  assert.equal(jumboSizeFor({ text: emoji, preview: [] }), 56);
+});
+
 test('jumboSizeFor survives a missing or empty message', () => {
   assert.equal(jumboSizeFor(null), null);
   assert.equal(jumboSizeFor(undefined), null);
   assert.equal(jumboSizeFor({}), null);
+});
+
+// ---------- link preview cards ----------
+
+test('hasLink spots a URL worth warming a preview for', () => {
+  assert.equal(hasLink('look at https://example.com/x'), true);
+  assert.equal(hasLink('HTTP://EXAMPLE.COM'), true);
+  assert.equal(hasLink('http://a'), true);
+  assert.equal(hasLink('no link here'), false);
+  assert.equal(hasLink('example.com'), false);      // needs a scheme, like Signal's own finder
+  assert.equal(hasLink('https://'), false);         // scheme with nothing after it
+  assert.equal(hasLink(''), false);
+  assert.equal(hasLink(null), false);
+  assert.equal(hasLink(undefined), false);
+});
+
+test('safeHttpUrl passes http(s) through and rejects everything else', () => {
+  assert.equal(safeHttpUrl('https://example.com/a?b=1'), 'https://example.com/a?b=1');
+  assert.equal(safeHttpUrl('http://example.com'), 'http://example.com');
+  // The href comes off a received message, so these are the ones that matter.
+  assert.equal(safeHttpUrl('javascript:alert(1)'), null);
+  assert.equal(safeHttpUrl('JavaScript:alert(1)'), null);
+  assert.equal(safeHttpUrl('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(safeHttpUrl('vbscript:msgbox'), null);
+  assert.equal(safeHttpUrl('file:///C:/windows'), null);
+  assert.equal(safeHttpUrl('//evil.com'), null);    // protocol-relative: not absolute, not parseable
+  assert.equal(safeHttpUrl('not a url'), null);
+  assert.equal(safeHttpUrl(''), null);
+  assert.equal(safeHttpUrl(null), null);
+});
+
+test('previewDomain reduces a url to the domain line on the card', () => {
+  assert.equal(previewDomain('https://www.bbc.co.uk/news'), 'bbc.co.uk');
+  assert.equal(previewDomain('https://youtube.com/watch?v=x'), 'youtube.com');
+  assert.equal(previewDomain('https://WWW.Example.COM/a'), 'example.com');
+  assert.equal(previewDomain('http://sub.www.example.com'), 'sub.www.example.com'); // only a LEADING www. goes
+  assert.equal(previewDomain('garbage'), null);
+  assert.equal(previewDomain(null), null);
 });
