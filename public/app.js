@@ -993,7 +993,10 @@ let warmTimer = null;
 let lastWarmed = '';
 
 function warmLinkPreview(text) {
-  if (warmTimer) clearTimeout(warmTimer);
+  if (warmTimer) { clearTimeout(warmTimer); warmTimer = null; }
+  // An edit never attaches a preview (submitEdit sends text only), so warming
+  // during one would stomp Signal's global slot for nothing.
+  if (state.editing) return;
   if (!hasLink(text)) return;
   if (text === lastWarmed) return; // same text (a caret move, an emoji expansion) -> already asked
   warmTimer = setTimeout(() => {
@@ -1022,6 +1025,9 @@ async function sendMessage() {
   const id = state.activeId;
   state.sending = true;
   input.value = '';
+  // Drop any warm still pending: it holds the pre-send text, and firing it after
+  // the message has gone would re-grab into Signal's global slot for nothing.
+  if (warmTimer) { clearTimeout(warmTimer); warmTimer = null; }
   lastWarmed = ''; // so re-sending the same link warms again rather than being deduped
   autoGrow();
   // Clear the tray optimistically; restore it if the send fails (below).

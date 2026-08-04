@@ -287,16 +287,37 @@ export const INSTALL_SCRIPT = `(function () {
     return (s && s.linkPreview) || null;
   }
 
+  // Does the body contain a link at all? Cheap gate, and the important one:
+  // without it every ordinary text message would fire a grab and then sit out
+  // the whole poll timeout waiting for a preview that was never coming.
+  // Mirrors hasLink() in public/ui-logic.js -- a scheme is required, which is
+  // also why a bare 'example.com' gets no card (see CLAUDE.md).
+  // Written with indexOf rather than a regex: this file is a template literal,
+  // where a '/' inside a regex literal silently becomes a line comment.
+  function bodyHasLink(body) {
+    if (typeof body !== 'string') return false;
+    return body.indexOf('http://') !== -1 || body.indexOf('https://') !== -1;
+  }
+
+  // Reduce a url to the part worth comparing: no scheme, no trailing slash.
+  // Signal normalizes what it stores (it will happily hand back an http:// url
+  // for a link the user typed without one), so comparing raw strings would miss
+  // and leave us polling for a preview we already had.
+  function urlKey(u) {
+    var k = String(u || '');
+    if (k.indexOf('https://') === 0) k = k.slice(8);
+    else if (k.indexOf('http://') === 0) k = k.slice(7);
+    while (k.length && k.charAt(k.length - 1) === '/') k = k.slice(0, -1);
+    return k;
+  }
+
   // Is this preview the one for a link in body? The slot is global and may
   // hold a leftover from a previous message (or from Signal's own composer), so
   // a preview is only used when its url actually appears in what we're sending.
-  // Tolerant of a trailing slash, which Signal may add or drop when normalizing.
   function previewMatchesBody(p, body) {
     if (!p || !p.url || typeof body !== 'string') return false;
-    if (body.indexOf(p.url) !== -1) return true;
-    var bare = p.url;
-    while (bare.length && bare.charAt(bare.length - 1) === '/') bare = bare.slice(0, -1);
-    return bare.length > 0 && body.indexOf(bare) !== -1;
+    var key = urlKey(p.url);
+    return key.length > 0 && body.indexOf(key) !== -1;
   }
 
   // A preview is only worth attaching once it has something to show. The slot is
@@ -323,6 +344,7 @@ export const INSTALL_SCRIPT = `(function () {
   // that never gave warming a chance.
   async function resolveLinkPreview(body, timeoutMs) {
     if (!linkPreviewsEnabled()) return null;
+    if (!bodyHasLink(body)) return null; // nothing to preview -> never poll
     var cur = currentLinkPreview();
     if (previewUsable(cur) && previewMatchesBody(cur, body)) return cur;
     if (!grabLinkPreview(body)) return null;
@@ -348,8 +370,10 @@ export const INSTALL_SCRIPT = `(function () {
     }) : [];
     var status = direction === 'outgoing' ? computeOutgoingStatus(m) : null;
     var formatted = formatBody(m.body || '', m.bodyRanges);
-    var preview = Array.isArray(m.preview)
-      ? m.preview.map(describePreview).filter(Boolean) : [];
+    // Mapped WITHOUT filtering, like attachments above: getPreviewImage indexes
+    // into the raw m.preview, so dropping an entry here would point the card's
+    // image request at the wrong one. A null entry renders as no card.
+    var preview = Array.isArray(m.preview) ? m.preview.map(describePreview) : [];
     return {
       id: m.id,
       direction: direction,
@@ -506,7 +530,7 @@ export const INSTALL_SCRIPT = `(function () {
     // slot that sendText reads.
     warmLinkPreview: function (text) {
       try {
-        if (typeof text !== 'string' || !text) return { ok: true, grabbed: false };
+        if (!bodyHasLink(text)) return { ok: true, grabbed: false };
         if (!linkPreviewsEnabled()) return { ok: true, grabbed: false, reason: 'disabled' };
         return { ok: true, grabbed: grabLinkPreview(text) };
       } catch (e) {

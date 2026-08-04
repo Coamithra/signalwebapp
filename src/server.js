@@ -445,7 +445,7 @@ const server = http.createServer(async (req, res) => {
     // in Signal's own slot until the send picks it up.
     if (pathname === '/api/link-preview/warm' && req.method === 'POST') {
       let body;
-      try { body = await readBody(req); }
+      try { body = await readBody(req, 16 * 1024); } // composer text; nothing here is large
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const text = (body.text || '').toString();
       if (!text.trim()) return sendJson(res, 400, { ok: false, error: 'empty' });
