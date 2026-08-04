@@ -54,21 +54,25 @@ bridge.on('status', (s) => broadcast('status', { status: s }));
 
 // ---- Auto-TLDR for YouTube links (per-chat, server-side) ----
 // Watches the realtime event stream; when the user posts a YouTube link in a
-// chat they've enabled, it fetches the transcript and posts a Gemini-generated
+// chat they've enabled, it fetches the transcript and posts a Claude-generated
 // TLDR back into that chat (see src/tldr.js). Per-chat on/off persists in a
-// gitignored JSON file at the repo root. Without a key it stays idle but the
-// toggle still works. TLDR_YTDLP=0 disables the (optional) yt-dlp transcript
-// fallback, leaving only the zero-dep HTTP fetch.
-// GEMINI_API_KEY is the documented name; GOOGLE_API_KEY is also accepted since
-// that's the name Google's own GenAI SDK/tooling uses, so an existing .env works.
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// gitignored JSON file at the repo root. Without a usable `claude` binary it
+// stays idle but the toggle still works. TLDR_YTDLP=0 disables the (optional)
+// yt-dlp transcript fallback, leaving only the zero-dep HTTP fetch.
+//
+// There is no API key: the summary is produced by spawning the Claude Code CLI,
+// which bills the user's Claude subscription rather than a metered API key.
+// TLDR_CLAUDE_BIN points at that binary if it isn't plain `claude` on PATH.
+const TLDR_CLAUDE_BIN = process.env.TLDR_CLAUDE_BIN || 'claude';
+const TLDR_MODEL = process.env.TLDR_MODEL || 'claude-opus-5';
+const TLDR_EFFORT = process.env.TLDR_EFFORT || 'medium';
 const TLDR_YTDLP = !/^(0|false|no)$/i.test(process.env.TLDR_YTDLP || '');
 const tldr = createTldr({
   bridge,
   settingsPath: path.join(__dirname, '..', '.tldr-settings.json'),
-  apiKey: GEMINI_API_KEY,
-  model: GEMINI_MODEL,
+  bin: TLDR_CLAUDE_BIN,
+  model: TLDR_MODEL,
+  effort: TLDR_EFFORT,
   ytDlp: TLDR_YTDLP,
   // Forward each pipeline stage to the browser over the existing SSE channel as a
   // 'tldr' event. The frontend renders a transient, local-only status bubble in

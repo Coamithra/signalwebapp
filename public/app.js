@@ -1497,7 +1497,7 @@ function buildThreadMenu(id, data) {
   const children = [toggle];
   if (!data.configured) {
     children.push(el('div', { class: 'menu-hint' }, [
-      'Needs ', el('code', { text: 'GEMINI_API_KEY' }), ' in the server .env.',
+      'Needs the ', el('code', { text: 'claude' }), ' CLI on the server’s PATH, logged in.',
     ]));
   } else {
     children.push(el('div', { class: 'menu-note', text: 'YouTube links you post here get a short auto-summary.' }));
