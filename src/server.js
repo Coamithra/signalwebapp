@@ -166,13 +166,16 @@ function sanitizeBodyRanges(ranges, text) {
 // base64 decode of the whole file. Concurrent misses share one promise instead.
 const ATTACH_INFLIGHT = new Map(); // key -> Promise<{ entry } | { error }>
 
-// Resolve an attachment to a cache entry, deduping concurrent identical misses.
-function loadAttachment(key, messageId, index, thumb) {
+// Resolve binary media to a cache entry, deduping concurrent identical misses.
+// `fetchFn` is the bridge call that produces it — attachments and link-preview
+// images are both immutable bytes keyed by (messageId, index), so they share
+// this cache, the dedupe, and the serving path.
+function loadMedia(key, fetchFn) {
   const cached = attachCacheGet(key);
   if (cached) return Promise.resolve({ entry: cached });
   let pending = ATTACH_INFLIGHT.get(key);
   if (!pending) {
-    pending = bridge.getAttachment(messageId, index, { thumbnail: thumb })
+    pending = fetchFn()
       .then((r) => {
         if (!r || !r.ok) return { error: (r && r.error) || 'attachment-error' };
         const buf = Buffer.from(r.base64, 'base64');
@@ -408,7 +411,7 @@ const server = http.createServer(async (req, res) => {
       const thumb = url.searchParams.get('thumb') === '1';
       const key = `${messageId}:${index}${thumb ? ':t' : ''}`;
 
-      const out = await loadAttachment(key, messageId, index, thumb);
+      const out = await loadMedia(key, () => bridge.getAttachment(messageId, index, { thumbnail: thumb }));
       if (out.error) {
         const code = out.error === 'too-large' ? 413
           : (out.error === 'pending' || out.error === 'no-path') ? 409
@@ -416,6 +419,38 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, code, { error: out.error });
       }
       return serveBuffer(req, res, out.entry.buf, out.entry.contentType, key);
+    }
+
+    // /api/previews/:messageId/:index   hero image of a link preview card
+    m = pathname.match(/^\/api\/previews\/([^/]+)\/(\d+)$/);
+    if (m && req.method === 'GET') {
+      const messageId = decodeURIComponent(m[1]);
+      const index = Number(m[2]);
+      // Message ids are UUIDs and contain no ':', so this prefix cannot collide
+      // with the unprefixed attachment keys sharing the cache.
+      const key = `prev:${messageId}:${index}`;
+
+      const out = await loadMedia(key, () => bridge.getPreviewImage(messageId, index));
+      if (out.error) {
+        const code = out.error === 'too-large' ? 413
+          : (out.error === 'pending' || out.error === 'no-path') ? 409
+          : 404;
+        return sendJson(res, code, { error: out.error });
+      }
+      return serveBuffer(req, res, out.entry.buf, out.entry.contentType, key);
+    }
+
+    // /api/link-preview/warm   { text }  -> start Signal fetching a preview for
+    // links in text the user is still typing. Fire-and-forget; the result waits
+    // in Signal's own slot until the send picks it up.
+    if (pathname === '/api/link-preview/warm' && req.method === 'POST') {
+      let body;
+      try { body = await readBody(req, 16 * 1024); } // composer text; nothing here is large
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const text = (body.text || '').toString();
+      if (!text.trim()) return sendJson(res, 400, { ok: false, error: 'empty' });
+      const result = await bridge.warmLinkPreview(text);
+      return sendJson(res, 200, result);
     }
 
     // /api/conversations/:id/send   { text?, attachments?: [{fileName,contentType,base64,width?,height?}] }
@@ -459,7 +494,9 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, result.ok ? 200 : 400, result);
       }
 
-      const result = await bridge.sendText(id, text, bodyRanges);
+      // Text-only sends get a link preview card when the text has a link and the
+      // user's Signal setting allows it (both decided in-page — see page-api.js).
+      const result = await bridge.sendText(id, text, bodyRanges, { linkPreview: true });
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

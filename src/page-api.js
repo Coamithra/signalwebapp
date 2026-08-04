@@ -135,6 +135,27 @@ export const INSTALL_SCRIPT = `(function () {
     };
   }
 
+  // Link preview ("postcard") metadata for a message. Bytes never ride along —
+  // the image is an ordinary v2 encrypted attachment, fetched on demand through
+  // getPreviewImage like any other. Signal's stored previews carry no 'domain'
+  // (only freshly-grabbed ones do), so the frontend derives it from the url.
+  function describePreview(p) {
+    if (!p || !p.url) return null;
+    var img = p.image;
+    var hasImage = !!(img && img.path && ((img.version || 1) < 2 || img.localKey) && !img.pending);
+    return {
+      url: p.url,
+      title: p.title || null,
+      description: p.description || null,
+      date: p.date || null,
+      image: hasImage ? {
+        contentType: img.contentType || '',
+        width: img.width || null,
+        height: img.height || null,
+      } : null,
+    };
+  }
+
   // Largest attachment we will inline. Bigger files keep the chip — base64 over
   // CDP for a huge video would be slow and memory-heavy. (Separate from the
   // server's larger byte cache; this is just the per-fetch inline ceiling.)
@@ -154,6 +175,29 @@ export const INSTALL_SCRIPT = `(function () {
     }
     // v1: legacy unencrypted-on-disk attachments. Best-effort.
     return 'attachment://v1/' + a.path + (a.contentType ? '?contentType=' + encodeURIComponent(a.contentType) : '');
+  }
+
+  // Decrypt-and-encode one stored attachment. Shared by getAttachment and
+  // getPreviewImage: a link preview's hero image is the same kind of object in
+  // the same on-disk format, so the guards and the size ceiling are the same.
+  async function fetchDecrypted(a) {
+    if (!a) return { ok: false, error: 'attachment-not-found' };
+    if (a.pending) return { ok: false, error: 'pending' };
+    if (!a.path) return { ok: false, error: 'no-path' };
+    if ((a.version || 1) >= 2 && !a.localKey) return { ok: false, error: 'no-key' };
+    if (a.size && a.size > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: a.size };
+    var r = await fetch(attachmentUrl(a));
+    if (!r.ok) return { ok: false, error: 'fetch-failed', status: r.status };
+    var buf = await r.arrayBuffer();
+    // Re-check against actual bytes: some attachments carry no size field,
+    // which would otherwise bypass the inline cap above.
+    if (buf.byteLength > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: buf.byteLength };
+    return {
+      ok: true,
+      contentType: a.contentType || 'application/octet-stream',
+      size: buf.byteLength,
+      base64: b64FromArrayBuffer(buf),
+    };
   }
 
   function b64FromArrayBuffer(buf) {
@@ -217,6 +261,102 @@ export const INSTALL_SCRIPT = `(function () {
     return 'sending';
   }
 
+  // ---- link previews, outgoing ----
+  //
+  // Signal's own composer fetches these; we drive the very same machinery rather
+  // than scraping OG tags ourselves, so the fetch uses Signal's HTTP client,
+  // its image downscaling, and its size/content-type limits.
+  //
+  // ⚠️ reduxStore.getState().linkPreviews is ONE GLOBAL SLOT, not per-composer.
+  // If the user happens to be typing a link into Signal Desktop's own window at
+  // the same moment we grab, whichever fires last wins and the other window
+  // briefly shows the wrong preview. It self-heals on the next keystroke there,
+  // and there is no per-conversation slot to use instead.
+
+  // The user's "Generate link previews" privacy setting (Settings > Privacy).
+  // With it off, Signal itself fetches nothing for a link the user types — so
+  // neither do we. We never fetch a URL by any other route, so this setting is
+  // the whole gate.
+  function linkPreviewsEnabled() {
+    var items = window.reduxStore.getState().items;
+    return !!(items && items.linkPreviews);
+  }
+
+  function currentLinkPreview() {
+    var s = window.reduxStore.getState().linkPreviews;
+    return (s && s.linkPreview) || null;
+  }
+
+  // Does the body contain a link at all? Cheap gate, and the important one:
+  // without it every ordinary text message would fire a grab and then sit out
+  // the whole poll timeout waiting for a preview that was never coming.
+  // Mirrors hasLink() in public/ui-logic.js -- a scheme is required, which is
+  // also why a bare 'example.com' gets no card (see CLAUDE.md).
+  // Written with indexOf rather than a regex: this file is a template literal,
+  // where a '/' inside a regex literal silently becomes a line comment.
+  function bodyHasLink(body) {
+    if (typeof body !== 'string') return false;
+    return body.indexOf('http://') !== -1 || body.indexOf('https://') !== -1;
+  }
+
+  // Reduce a url to the part worth comparing: no scheme, no trailing slash.
+  // Signal normalizes what it stores (it will happily hand back an http:// url
+  // for a link the user typed without one), so comparing raw strings would miss
+  // and leave us polling for a preview we already had.
+  function urlKey(u) {
+    var k = String(u || '');
+    if (k.indexOf('https://') === 0) k = k.slice(8);
+    else if (k.indexOf('http://') === 0) k = k.slice(7);
+    while (k.length && k.charAt(k.length - 1) === '/') k = k.slice(0, -1);
+    return k;
+  }
+
+  // Is this preview the one for a link in body? The slot is global and may
+  // hold a leftover from a previous message (or from Signal's own composer), so
+  // a preview is only used when its url actually appears in what we're sending.
+  function previewMatchesBody(p, body) {
+    if (!p || !p.url || typeof body !== 'string') return false;
+    var key = urlKey(p.url);
+    return key.length > 0 && body.indexOf(key) !== -1;
+  }
+
+  // A preview is only worth attaching once it has something to show. The slot is
+  // populated before the image finishes downloading, so title-or-image is the
+  // "ready enough" test.
+  function previewUsable(p) {
+    return !!(p && p.url && (p.title || p.image));
+  }
+
+  // Ask Signal to fetch a preview for whatever links are in text. Signal finds
+  // the links itself (and applies its own rules about which are previewable), so
+  // we hand it the raw composer text. Fire-and-forget: the result lands in the
+  // global slot, which sendText reads at send time.
+  function grabLinkPreview(text) {
+    var lp = window.reduxActions.linkPreviews;
+    if (!lp || !lp.debouncedMaybeGrabLinkPreview) return false;
+    lp.debouncedMaybeGrabLinkPreview(text, 'Composer', { conversationId: null });
+    return true;
+  }
+
+  // Resolve the preview to send with body, waiting only if we have to.
+  // The composer warms the slot while the user types, so the usual path is the
+  // first check and costs nothing; the poll is the fallback for a paste-and-send
+  // that never gave warming a chance.
+  async function resolveLinkPreview(body, timeoutMs) {
+    if (!linkPreviewsEnabled()) return null;
+    if (!bodyHasLink(body)) return null; // nothing to preview -> never poll
+    var cur = currentLinkPreview();
+    if (previewUsable(cur) && previewMatchesBody(cur, body)) return cur;
+    if (!grabLinkPreview(body)) return null;
+    var deadline = Date.now() + (typeof timeoutMs === 'number' ? timeoutMs : 5000);
+    while (Date.now() < deadline) {
+      await new Promise(function (r) { setTimeout(r, 150); });
+      cur = currentLinkPreview();
+      if (previewUsable(cur) && previewMatchesBody(cur, body)) return cur;
+    }
+    return null;
+  }
+
   function formatMessage(m) {
     if (!m) return null;
     var direction = m.type === 'incoming' ? 'incoming'
@@ -230,6 +370,10 @@ export const INSTALL_SCRIPT = `(function () {
     }) : [];
     var status = direction === 'outgoing' ? computeOutgoingStatus(m) : null;
     var formatted = formatBody(m.body || '', m.bodyRanges);
+    // Mapped WITHOUT filtering, like attachments above: getPreviewImage indexes
+    // into the raw m.preview, so dropping an entry here would point the card's
+    // image request at the wrong one. A null entry renders as no card.
+    var preview = Array.isArray(m.preview) ? m.preview.map(describePreview) : [];
     return {
       id: m.id,
       direction: direction,
@@ -244,6 +388,9 @@ export const INSTALL_SCRIPT = `(function () {
       status: status,
       readStatus: m.readStatus,
       attachments: attachments,
+      // Link preview "postcards". Signal only ever renders the first; we keep
+      // the array so the shape matches what's stored.
+      preview: preview,
       reactions: reactions,
       deletedForEveryone: !!m.deletedForEveryone,
       isViewOnce: !!m.isViewOnce,
@@ -354,22 +501,38 @@ export const INSTALL_SCRIPT = `(function () {
           if (!a.thumbnail || !a.thumbnail.path) return { ok: false, error: 'no-thumbnail' };
           a = a.thumbnail;
         }
-        if (a.pending) return { ok: false, error: 'pending' };
-        if (!a.path) return { ok: false, error: 'no-path' };
-        if ((a.version || 1) >= 2 && !a.localKey) return { ok: false, error: 'no-key' };
-        if (a.size && a.size > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: a.size };
-        var r = await fetch(attachmentUrl(a));
-        if (!r.ok) return { ok: false, error: 'fetch-failed', status: r.status };
-        var buf = await r.arrayBuffer();
-        // Re-check against actual bytes: some attachments carry no size field,
-        // which would otherwise bypass the inline cap above.
-        if (buf.byteLength > MAX_INLINE_ATTACHMENT_BYTES) return { ok: false, error: 'too-large', size: buf.byteLength };
-        return {
-          ok: true,
-          contentType: a.contentType || 'application/octet-stream',
-          size: buf.byteLength,
-          base64: b64FromArrayBuffer(buf),
-        };
+        return await fetchDecrypted(a);
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
+
+    // The hero image of a link preview. Same decrypt path as any attachment —
+    // it *is* an ordinary v2 encrypted attachment, just hanging off
+    // message.preview[index].image instead of message.attachments[index].
+    getPreviewImage: async function (messageId, index) {
+      try {
+        var lookup = window.reduxStore.getState().conversations.messagesLookup || {};
+        var m = lookup[messageId];
+        if (!m || !Array.isArray(m.preview)) return { ok: false, error: 'message-not-loaded' };
+        var p = m.preview[index];
+        if (!p) return { ok: false, error: 'preview-not-found' };
+        if (!p.image) return { ok: false, error: 'no-image' };
+        return await fetchDecrypted(p.image);
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
+
+    // Warm the link preview slot for text the user is still typing, so the
+    // eventual send doesn't have to wait on a network fetch. No-op when the
+    // user's setting is off. Fire-and-forget — the result lands in the global
+    // slot that sendText reads.
+    warmLinkPreview: function (text) {
+      try {
+        if (!bodyHasLink(text)) return { ok: true, grabbed: false };
+        if (!linkPreviewsEnabled()) return { ok: true, grabbed: false, reason: 'disabled' };
+        return { ok: true, grabbed: grabLinkPreview(text) };
       } catch (e) {
         return { ok: false, error: String(e) };
       }
@@ -378,16 +541,31 @@ export const INSTALL_SCRIPT = `(function () {
     // bodyRanges: optional [{ start, length, style }] — the formatting the
     // composer parsed out of its markdown-ish syntax. Signal's own composer
     // produces the identical shape from its toolbar. Sanitized server-side.
-    sendText: async function (id, body, bodyRanges) {
+    //
+    // opts.linkPreview asks for a link preview "postcard" to ride along. The
+    // grab happens HERE rather than in the server, because the preview carries
+    // its image as an in-memory Uint8Array — round-tripping those bytes out over
+    // CDP and back in would serialize them as an integer-keyed object for no
+    // reason. Resolving it in-page hands Signal the object it built, untouched.
+    sendText: async function (id, body, bodyRanges, opts) {
       var conv = window.ConversationController.get(id);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
       if (typeof body !== 'string' || !body.length) return { ok: false, error: 'empty-body' };
+      opts = opts || {};
       try {
+        var preview = [];
+        if (opts.linkPreview) {
+          // A preview is a nicety: a failure here must never cost the message.
+          try {
+            var p = await resolveLinkPreview(body, opts.timeoutMs);
+            if (p) preview = [p];
+          } catch (_) {}
+        }
         await conv.enqueueMessageForSend(
-          { body: body, attachments: [], preview: [], bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [] },
+          { body: body, attachments: [], preview: preview, bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [] },
           { dontClearDraft: true },
         );
-        return { ok: true };
+        return { ok: true, preview: preview.length > 0 };
       } catch (e) {
         return { ok: false, error: String(e) };
       }
@@ -431,6 +609,8 @@ export const INSTALL_SCRIPT = `(function () {
           {
             body: typeof body === 'string' ? body : '',
             attachments: attachments,
+            // No link preview on a message that carries media — Signal doesn't
+            // put a card on one either; the attachment is the visual.
             preview: [],
             bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [],
           },

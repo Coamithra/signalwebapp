@@ -8,7 +8,7 @@ import {
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
-  jumboSizeFor,
+  jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -254,6 +254,56 @@ function attachmentEl(msg, att, i) {
   return attachmentChip(att, null, src);
 }
 
+// ---------- link preview cards ----------
+
+// The "postcard" under a message that links somewhere: domain, title,
+// description, hero image. Everything here (including the href) came off the
+// wire, so it's built with createElement and the url is scheme-checked — a
+// preview whose url isn't http(s) still renders, just not as a link.
+// Returns null when the message has no preview worth drawing.
+function linkPreviewEl(msg) {
+  const p = (msg.preview || [])[0];
+  if (!p || !p.url) return null;
+  // A card with no title and no image is just the URL again — skip it.
+  if (!p.title && !p.image) return null;
+
+  const href = safeHttpUrl(p.url);
+  const card = el(href ? 'a' : 'div', { class: 'link-preview' });
+  if (href) {
+    card.setAttribute('href', href);
+    card.setAttribute('target', '_blank');
+    card.setAttribute('rel', 'noopener noreferrer');
+  }
+  // The card sits inside the bubble; without this a click would also hit
+  // whatever bubble-level handlers exist now or later.
+  card.addEventListener('click', (e) => e.stopPropagation());
+
+  const body = el('div', { class: 'lp-body' });
+  const domain = previewDomain(p.url);
+  if (domain) body.appendChild(el('div', { class: 'lp-domain', text: domain }));
+  if (p.title) body.appendChild(el('div', { class: 'lp-title', text: p.title }));
+  if (p.description) body.appendChild(el('div', { class: 'lp-desc', text: p.description }));
+  card.appendChild(body);
+
+  if (p.image) {
+    const img = el('img', {
+      class: 'lp-image',
+      src: `/api/previews/${encodeURIComponent(msg.id)}/0`,
+      loading: 'lazy',
+      alt: '',
+    });
+    // Reserve the box from the stored dimensions so the thread doesn't reflow
+    // when the bytes arrive — same reasoning as mediaBox() for attachments.
+    if (p.image.width && p.image.height) {
+      img.style.aspectRatio = `${p.image.width} / ${p.image.height}`;
+    }
+    // A preview image is decoration: if it won't load, drop it and keep the card.
+    img.addEventListener('error', () => img.remove());
+    card.appendChild(img);
+  }
+  return card;
+}
+
 function messageRow(msg, prev, isGroup) {
   if (msg.direction === 'system') return null;
 
@@ -291,6 +341,9 @@ function messageRow(msg, prev, isGroup) {
     if (msg.text) {
       bubble.appendChild(el('span', { class: 'msg-text' }, [renderFormatted(msg.text, msg.bodyRanges)]));
     }
+    // Link preview "postcard" below the text. Signal only ever shows the first.
+    const card = linkPreviewEl(msg);
+    if (card) bubble.appendChild(card);
   }
   if (!bubble.childNodes.length) bubble.appendChild(document.createTextNode(' '));
   applyJumbo(bubble, msg);
@@ -930,6 +983,32 @@ function pendingEchoEl(item) {
   return attachmentChip({ kind: item.kind, fileName: item.fileName }, null, null);
 }
 
+// ---------- composer: link preview warming ----------
+// Sending resolves the preview server-side, but a cold fetch takes a second or
+// two. Nudging Signal to start it while the user is still typing means the send
+// almost always finds one already waiting and adds no latency of its own.
+// Best-effort throughout: a failure here costs nothing but the card.
+const WARM_DEBOUNCE_MS = 400;
+let warmTimer = null;
+let lastWarmed = '';
+
+function warmLinkPreview(text) {
+  if (warmTimer) { clearTimeout(warmTimer); warmTimer = null; }
+  // An edit never attaches a preview (submitEdit sends text only), so warming
+  // during one would stomp Signal's global slot for nothing.
+  if (state.editing) return;
+  if (!hasLink(text)) return;
+  if (text === lastWarmed) return; // same text (a caret move, an emoji expansion) -> already asked
+  warmTimer = setTimeout(() => {
+    lastWarmed = text;
+    fetch('/api/link-preview/warm', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }).catch(() => {});
+  }, WARM_DEBOUNCE_MS);
+}
+
 // ---------- composer: send ----------
 async function sendMessage() {
   closeEmojiPop();
@@ -946,6 +1025,10 @@ async function sendMessage() {
   const id = state.activeId;
   state.sending = true;
   input.value = '';
+  // Drop any warm still pending: it holds the pre-send text, and firing it after
+  // the message has gone would re-grab into Signal's global slot for nothing.
+  if (warmTimer) { clearTimeout(warmTimer); warmTimer = null; }
+  lastWarmed = ''; // so re-sending the same link warms again rather than being deduped
   autoGrow();
   // Clear the tray optimistically; restore it if the send fails (below).
   state.pendingAttachments = [];
@@ -1627,6 +1710,7 @@ function init() {
     }
     autoGrow();
     updateSendEnabled();
+    warmLinkPreview(input.value);
   });
   // The caret can move without the text changing (clicks, plain arrow keys); the
   // popup describes a position, so it has to follow.

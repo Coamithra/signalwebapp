@@ -49,7 +49,7 @@ evaluate must target the isolated context's id.
 | File | Role |
 |------|------|
 | [src/cdp.js](src/cdp.js) | Generic CDP client over the built-in `WebSocket`. Probes `127.0.0.1` then `::1` (override with `SIGNAL_CDP_HOST`) for the host actually exposing `background.html`, connects to that page target, tracks the isolated context, auto-reconnects with backoff. |
-| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/sendText/sendMedia/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. |
+| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
@@ -133,10 +133,10 @@ evaluate must target the isolated context's id.
   of its bundle (`getJumboEmojiCount` + the size enum): whitespace is ignored, any non-emoji
   character disqualifies it, and the cap is **5** emoji -> **1=56px, 2=48px, 3=40px, 4=36px,
   5=32px**; 6+ or mixed text falls back to the ordinary 14.5px bubble. Signal's veto clauses
-  come with it - **attachments** (a caption beside a photo is still a caption) and **any
-  `bodyRanges`**, so a spoilered or monospaced emoji stays an ordinary message. (Signal's
-  predicate also lists quotes and link previews; this UI doesn't render either into the bubble,
-  so there is nothing to veto on.) Where we *do* diverge from Signal knowingly: Signal filters
+  come with it - **attachments** (a caption beside a photo is still a caption), **link preview
+  cards**, and **any `bodyRanges`**, so a spoilered or monospaced emoji stays an ordinary
+  message. (Signal's predicate also lists quotes; this UI doesn't render those into the bubble,
+  so there is nothing to veto on there.) Where we *do* diverge from Signal knowingly: Signal filters
   its matches through its own emoji table, we go by Unicode properties, so a handful of bare
   pre-VS16 pictographs (`☝`, `⬆`) jumbo here and don't there.
   `jumboSizeFor` in [public/ui-logic.js](public/ui-logic.js) is the whole decision;
@@ -205,6 +205,38 @@ evaluate must target the isolated context's id.
   server route `GET /api/attachments/:messageId/:index` (`?thumb=1` for video posters)
   decodes it, serves with immutable caching + Range support, and keeps a small bounded
   in-memory Buffer cache so re-views/seeks don't re-hit the renderer.
+- **Link preview cards ("postcards")** — Signal keeps them out-of-band on the message as
+  `preview: [{ url, title, description, date, image }]`, where `image` is an **ordinary v2
+  encrypted attachment** (`path` + `localKey`) — so `attachmentUrl()` handles it verbatim and
+  `fetchDecrypted()` in [src/page-api.js](src/page-api.js) is shared by `getAttachment` and the
+  new `getPreviewImage`. Route: `GET /api/previews/:messageId/:index`, which reuses the
+  attachment byte cache and its in-flight dedupe (`loadMedia`, keyed `prev:<id>:<i>` — message
+  ids are UUIDs and hold no `:`, so it can't collide with the unprefixed attachment keys).
+  Stored previews carry **no `domain` field** (only freshly-grabbed ones do), so the frontend
+  derives it from the url (`previewDomain`).
+  **Sending** one uses Signal's *own* fetcher rather than an OG scraper of ours:
+  `reduxActions.linkPreviews.debouncedMaybeGrabLinkPreview(text, 'Composer', {conversationId})`
+  fills `reduxStore.getState().linkPreviews.linkPreview`, and that object goes straight into the
+  same `enqueueMessageForSend` — Signal then encrypts, stores and uploads the image exactly as
+  it does for an attachment (verified round-trip: 26665 bytes in, 26665 out). The grab happens
+  **in-page, inside `sendText`**, because the preview's image is an in-memory `Uint8Array`;
+  returning it over CDP would serialize the bytes into an integer-keyed object for nothing.
+  ⚠️ **Gated on the user's `items.linkPreviews` setting** (Signal → Settings → Privacy →
+  *Generate link previews*). With it off Signal fetches nothing and neither do we — that
+  setting is the entire gate, because we never fetch a URL by any other route.
+  ⚠️ **`linkPreviews` is ONE GLOBAL redux slot, not per-composer.** Grabbing stomps whatever
+  Signal's own window has staged if the user is typing a link there at that instant; it
+  self-heals on their next keystroke, and there is no per-conversation slot to use instead.
+  So a preview is only ever attached when its url actually appears in the body being sent.
+  To keep sends snappy the composer **warms** the slot while you type (debounced,
+  `POST /api/link-preview/warm`), so `sendText` normally finds one waiting and waits 0ms; the
+  in-send grab (up to 5s) is the fallback for paste-and-send. A failed preview never costs the
+  message — it's caught and the message goes out bare. **A link needs an explicit `http(s)://`
+  scheme** to get a card: `bodyHasLink` gates the in-send poll and `hasLink` gates the warm, and
+  without that gate every link-free message would sit out the full 5s timeout waiting for a
+  preview that was never coming. Signal itself previews a bare `example.com`; we don't (yet). Media sends and the GIF path keep
+  `preview: []` (Signal doesn't card a message that carries attachments), and the card vetoes
+  jumbomoji.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes
   `{type:'conversations'}` / `{type:'messages',conversationId}` into `__sbQueue`. The
   server drains every 200ms and forwards over SSE. ~instant, no polling of large state.
