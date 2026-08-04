@@ -203,13 +203,18 @@ function fenceTranscript(body, name) {
 // and ride through on the summary the first pass hands the second.
 const FENCE_TAGS = ['transcript', 'video'];
 const fenceTagRe = (tag, flags) => new RegExp(`<\\s*\\/?\\s*${tag}\\b[^>]*>`, flags);
+// The outer sweep is not decoration. Removing one tag name can splice its
+// neighbours into the OTHER one -- `<tran<video>script>` becomes a working
+// `<transcript>` the moment the video pass runs -- so finishing the tag list
+// once is not enough; it has to be repeated until a whole pass changes nothing.
+// Terminates because every pass that changes anything deletes at least one char.
 function stripFenceTags(text) {
   let out = String(text ?? '');
-  for (const tag of FENCE_TAGS) {
-    const one = fenceTagRe(tag, 'i');
-    const all = fenceTagRe(tag, 'gi');
-    while (one.test(out)) out = out.replace(all, '');
-  }
+  let prev;
+  do {
+    prev = out;
+    for (const tag of FENCE_TAGS) out = out.replace(fenceTagRe(tag, 'gi'), '');
+  } while (out !== prev);
   return out;
 }
 
@@ -384,7 +389,11 @@ function contextNote(context) {
   if (!context || typeof context !== 'object') return '';
   const parts = [context.channel, context.claims]
     .map((s) => defangUrls(s).replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    // The prompt asks for sentences but never for punctuation, and the pressure
+    // to prefer "" over a hedge makes terse fragments likely -- without this a
+    // channel field that stops short runs straight into the claims field.
+    .map((s) => (/[.!?…]$/.test(s) ? s : `${s}.`));
   if (!parts.length) return '';
   return clampSummary(parts.join(' '), MAX_CONTEXT_CHARS);
 }
@@ -507,9 +516,12 @@ function claudeOnce({ bin, model, effort, prompt, timeoutMs, tools = '' }) {
 // text asserts things about real people and auto-sends with nobody reviewing it.
 const CONTEXT_TOOLS = 'WebSearch,WebFetch';
 // Research needs several round trips, so it gets a longer ceiling than the
-// summary. It is never retried: the block is optional, and a failed one costs
-// the reader nothing.
-const CONTEXT_TIMEOUT_MS = 240_000;
+// summary -- but not an unbounded one: the send WAITS on this pass, so the
+// ceiling is also how long a TLDR can be held back by an optional extra. Real
+// runs measured 11-31s; 90s is generous headroom without letting a wedged
+// research run sit on the summary for minutes. Never retried, because the block
+// is optional and a failed one costs the reader nothing.
+const CONTEXT_TIMEOUT_MS = 90_000;
 // Sized so a reply that OBEYS the prompt (two fields, <=40 words each) never
 // truncates -- the clamp is the guard against a rambling model, not a routine
 // step. Set to 600 first and watched a compliant-looking answer get cut
@@ -701,9 +713,11 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       emit(convId, 'failed', found.url, friendlyReason(e));
       return;
     }
-    // The optional second pass. Only runs off a properly parsed summary (it has
-    // nothing to research otherwise), and every failure mode here is swallowed:
-    // the summary goes out with no context block rather than not at all.
+    // The optional second pass. Deliberately restricted to the schema-compliant
+    // path: the plain-text fallback still yields a fine summary, but a reply
+    // that already ignored the output contract is a poor thing to hand the run
+    // that holds web tools. Every failure mode here is swallowed -- the summary
+    // goes out with no context block rather than not at all.
     const parsed = parseReply(reply);
     let researched = null;
     if (parsed && withContext) {
@@ -711,7 +725,15 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       try {
         researched = await enqueue(() => researchContext({
           bin, model, effort,
-          author: transcript.author, title: transcript.title, summary: parsed.summary,
+          author: transcript.author,
+          title: transcript.title,
+          // Clamp and defang BEFORE this crosses into the run that has web
+          // tools. The summary is model output shaped by an untrusted
+          // transcript, so "it's only a few hundred characters" is an
+          // observation, not a bound, and a surviving scheme would leave
+          // "never fetch a URL from here" as the only thing standing between a
+          // planted link and an outbound fetch. Make both structural.
+          summary: defangUrls(clampSummary(parsed.summary)),
         }));
       } catch (e) {
         log(`context pass failed for ${found.url}: ${e.message}`);

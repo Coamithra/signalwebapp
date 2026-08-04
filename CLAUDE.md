@@ -334,11 +334,17 @@ evaluate must target the isolated context's id.
   - Both fields are optional and an empty pair means **no block at all** (`parseContext`
     returns null) -- a music video with nothing to fact-check is a normal outcome. The pass is
     never retried and every failure is swallowed: the summary goes out without the block
-    rather than not at all. Channel/author comes free from `videoDetails.author` in
-    [src/youtube.js](src/youtube.js); the yt-dlp fallback path has no title or author, so the
-    block degrades to researching the summary alone.
+    rather than not at all.
+  - ⚠️ **Title and channel do NOT come from the watch page in practice.** `videoDetails` has
+    both, but that page is the bot-gated one -- on a gated network *every* transcript comes
+    from the yt-dlp fallback, which writes subtitles and nothing else, so both were null for
+    every video (the summary pass had been running title-less long before the context block
+    existed). `fetchMeta` in [src/youtube.js](src/youtube.js) tops up whatever is missing from
+    YouTube's **oEmbed** endpoint -- public, unauthenticated, ungated -- on every path. Only if
+    oEmbed itself fails does the block degrade to researching the summary alone.
   - The label carries a **BOLD** `bodyRange` (style 1) covering exactly `For context:` and not
-    its trailing space, alongside the quote's ITALIC range. This is entirely server-side (works with no browser tab open) and touches no
+    its trailing space, alongside the quote's ITALIC range.
+  This is entirely server-side (works with no browser tab open) and touches no
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
 - **Live UI feedback for auto-TLDR** - the pipeline emits per-stage events

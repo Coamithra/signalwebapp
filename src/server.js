@@ -67,9 +67,10 @@ const TLDR_CLAUDE_BIN = process.env.TLDR_CLAUDE_BIN || 'claude';
 const TLDR_MODEL = process.env.TLDR_MODEL || 'claude-opus-5';
 const TLDR_EFFORT = process.env.TLDR_EFFORT || 'medium';
 const TLDR_YTDLP = !/^(0|false|no)$/i.test(process.env.TLDR_YTDLP || '');
-// The "For context" block: a second, web-researching Claude run per link. Costs
-// real time (up to a few minutes) and subscription usage, so it's worth being
-// able to turn off without turning off auto-TLDR itself.
+// The "For context" block: a second, web-researching Claude run per link. The
+// summary send waits on it (~10-30s typical, 90s ceiling) and it costs real
+// subscription usage, so it's worth being able to turn off on its own without
+// turning off auto-TLDR entirely.
 const TLDR_CONTEXT = !/^(0|false|no)$/i.test(process.env.TLDR_CONTEXT || '');
 const tldr = createTldr({
   bridge,

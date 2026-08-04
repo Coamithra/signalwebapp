@@ -134,7 +134,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `TLDR_CLAUDE_BIN`  | `claude`      | The Claude Code CLI that writes the summaries. **Auto-TLDR needs no API key** — it spawns this binary, so summaries bill your Claude subscription. Requires `claude` on the server's `PATH` and already logged in; until it resolves, the per-chat toggle shows a hint. |
 | `TLDR_MODEL`       | `claude-opus-5` | Model used for the summary. `claude-sonnet-5` / `claude-haiku-4-5` are cheaper against your usage limits. |
 | `TLDR_EFFORT`      | `medium`      | Reasoning effort (`low`…`max`). `low` is slightly faster and still good; above `medium` buys little on a summarization task. |
-| `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude run per link, this one with web search, so it adds ~30s and noticeably more usage. Set to `0` to keep summaries only. |
+| `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude run per link, this one with web search, and the summary waits on it: typically ~10-30s, capped at 90s. Set to `0` to keep summaries only. |
 | `TLDR_YTDLP`       | `1` (on)      | If [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is on `PATH`, it's used as a transcript fallback when YouTube blocks the direct fetch. Set to `0` to never spawn it (direct fetch only). |
 
 ## Architecture
