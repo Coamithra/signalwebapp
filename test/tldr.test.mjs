@@ -266,6 +266,21 @@ test('an empty or whitespace quote field yields no quote line and no ranges', ()
   }
 });
 
+// Stripping the one mark out of `He said "no"` would leave the line unbalanced,
+// which is worse than the stray mark it was meant to tidy.
+test('a quote containing its own quotation marks stays balanced', () => {
+  const line = (quote) => {
+    const { body, bodyRanges } = formatTldr({ summary: SUMMARY, quote });
+    return body.slice(bodyRanges[0].start, bodyRanges[0].start + bodyRanges[0].length);
+  };
+  // internal marks survive, and our wrapper switches to curly so it can't be
+  // mistaken for the end of the span
+  assert.equal(line('He said "no" and left'), '“He said "no" and left”');
+  // a single stray mark is still dropped
+  assert.equal(line('"a dying starter is never dead'), '"a dying starter is never dead"');
+  assert.equal(line('a dying starter is never dead"'), '"a dying starter is never dead"');
+});
+
 test('a quote spanning caption lines is flattened onto one line', () => {
   const { body, bodyRanges } = formatTldr({ summary: SUMMARY, quote: 'a dying starter\nis almost never   dead' });
   const r = italic(bodyRanges);
@@ -318,6 +333,7 @@ test('a runaway quote is clamped with the closing mark inside', () => {
 test('failure reasons are fixed phrases, never the raw error text', () => {
   const cases = [
     ['claude-not-found', 'Claude Code CLI not found'],
+    ['claude-auth', 'Claude Code CLI is not logged in'],
     ['claude-timeout', 'timed out'],
     ['claude-limit', 'Claude usage limit reached'],
     ['claude-refusal', 'declined to summarize this one'],

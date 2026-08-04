@@ -65,30 +65,43 @@ function saveEnabled(file, set) {
 
 // A scratch working directory for the child process.
 //
-// `claude` discovers CLAUDE.md, hooks, settings and skills from its cwd upward.
+// `claude` discovers project CLAUDE.md, settings and skills from its cwd upward.
 // Spawning it inside this repo would load THIS project's instructions into a run
 // that only has to summarize a transcript: slower, noisier, and it would couple
 // our summaries to whatever the repo's CLAUDE.md happens to say that week. An
-// empty temp dir has nothing to discover. Made once and reused; it stays empty,
-// so there is nothing to clean up but the directory itself.
+// empty dir of our own has nothing project-scoped to discover. (User-level
+// config is a separate axis, and `--setting-sources ""` on the spawn is what
+// excludes that -- cwd alone would not.)
+//
+// Never fall back to os.tmpdir() itself: the temp root is full of other
+// processes' files and is a plausible discovery root, which is the exact thing
+// this is avoiding. A fixed named subdirectory is the fallback instead, and is
+// also what keeps a crash-restart loop from minting a new mkdtemp per boot.
 let scratchDir = null;
 function runDir() {
   if (scratchDir && fs.existsSync(scratchDir)) return scratchDir;
+  const fixed = path.join(os.tmpdir(), 'sb-tldr');
   try {
     scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-tldr-'));
+    // Best-effort: the dir stays empty, but leaving one per server start behind
+    // in %TEMP% forever is untidy.
+    process.once('exit', () => { try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch {} });
   } catch {
-    scratchDir = os.tmpdir(); // good enough: still outside the repo
+    try { fs.mkdirSync(fixed, { recursive: true }); } catch { /* fall through */ }
+    scratchDir = fixed;
   }
   return scratchDir;
 }
 
-// A transient failure worth retrying: our own timeout, or a spawn that died
-// without leaving a parseable envelope. NOT a missing binary (retrying can't
-// install it), NOT a refusal (deterministic), and NOT a usage-limit error --
-// that window is minutes to hours, so a seconds-long backoff can never clear it
-// and each extra attempt just burns more of the subscription.
+// A transient failure worth retrying: our own timeout, or a run that produced
+// no parseable envelope. Deliberately an ALLOW-list, because everything else is
+// deterministic and retrying it just burns three spawns and six seconds of
+// backoff before failing the same way -- a missing binary, a logged-out CLI, a
+// bad TLDR_MODEL and a refusal all fail identically on attempt three. A
+// usage-limit error is excluded for the same reason: that window is minutes to
+// hours, so a seconds-long backoff can never clear it.
 function isTransientClaudeError(e) {
-  return /^claude-(timeout|exit|bad-output)\b/.test(e.message);
+  return /^claude-(timeout|bad-output)\b/.test(e.message);
 }
 
 // Map an internal error to a short, human reason string for the UI status bubble.
@@ -98,6 +111,7 @@ function isTransientClaudeError(e) {
 export function friendlyReason(e) {
   const msg = (e && e.message) || '';
   if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
+  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
   if (/^claude-timeout/.test(msg)) return 'timed out';
   if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
   if (/^claude-refusal/.test(msg)) return 'declined to summarize this one';
@@ -301,9 +315,15 @@ function quoteLine(raw) {
     // rather than leaving the field empty; it must not reach the chat as one.
     if (!q.slice(1, -1).trim()) return '';
   } else {
-    q = q.replace(/^["“”]+/, '').replace(/["“”]+$/, '').trim();
+    // Only ONE end can carry a mark here -- a matched pair would have hit
+    // WRAPPED above -- so a single stray mark is dropped, but a mark that is
+    // part of the sentence (`He said "no"`) is left alone: stripping that one
+    // would unbalance the line rather than tidy it.
+    if ((q.match(/["“”]/g) || []).length === 1) q = q.replace(/^["“”]|["“”]$/, '').trim();
     if (!q) return '';
-    q = `"${q}"`;
+    // Curly wrapper when the span itself contains a straight mark, so an
+    // internal quote can't read as the end of ours.
+    q = /"/.test(q) ? `“${q}”` : `"${q}"`;
   }
   return clampQuote(q);
 }
@@ -351,15 +371,26 @@ function claudeOnce({ bin, model, effort, prompt, timeoutMs }) {
       '--output-format', 'json',
       '--system-prompt', prompt.system,
       // Keep the run lean: this wants a model, not an agent. Dropping the tool
-      // schemas, the user's own MCP servers, the skills and the dynamic
-      // system-prompt sections measured 48.5k -> 11.8k cache-creation tokens per
-      // summary and took ~2s off the wall clock. `--tools ""` is a safety
-      // property as much as a cost one: the transcript is untrusted text, and a
-      // run with no tools has nothing it can be talked into doing.
-      '--exclude-dynamic-system-prompt-sections',
+      // schemas, the user's own MCP servers, the skills and every settings
+      // source measured 48.5k -> 648 cache-creation tokens per summary and took
+      // ~2s off the wall clock -- `--setting-sources ""` alone is most of it,
+      // because otherwise the user's global ~/.claude/CLAUDE.md is prepended to
+      // every single summary.
+      //
+      // Two of these are safety properties, not just cost ones. The transcript
+      // is untrusted text: a run with no tools and no MCP servers has nothing it
+      // can be talked into doing, and `--setting-sources ""` keeps the user's
+      // own hooks from firing on it. Do not add tools back without rereading
+      // that sentence.
       '--tools', '',
       '--disable-slash-commands',
       '--strict-mcp-config',
+      '--setting-sources', '',
+      // Without this, `claude -p` writes a full session transcript under
+      // ~/.claude/projects/ keyed on cwd -- i.e. up to MAX_TRANSCRIPT_CHARS of
+      // third-party caption text per video, persisted to the user's home
+      // directory forever. Nothing here is resumable, so nothing needs saving.
+      '--no-session-persistence',
       '--effort', effort,
     ];
     const child = execFile(bin, args, {
@@ -368,7 +399,16 @@ function claudeOnce({ bin, model, effort, prompt, timeoutMs }) {
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
     }, (err, stdout) => {
-      if (err && err.code === 'ENOENT') return reject(new Error('claude-not-found'));
+      // EINVAL alongside ENOENT: since the CVE-2024-27980 fix, Node refuses to
+      // execFile a .cmd/.bat without a shell, which is exactly the shape an
+      // npm-installed `claude` has on Windows. Both mean "point
+      // TLDR_CLAUDE_BIN at a real executable", so both get the same reason
+      // rather than three pointless retries and a generic failure.
+      if (err && (err.code === 'ENOENT' || err.code === 'EINVAL')) return reject(new Error('claude-not-found'));
+      // execFile sets `killed` for a maxBuffer overrun as well as for our
+      // timeout, and calling that one "timed out" would send the user chasing
+      // the wrong thing (and retrying straight into the same wall).
+      if (err && err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return reject(new Error('claude-bad-output'));
       if (err && err.killed) return reject(new Error('claude-timeout'));
       let data = null;
       try { data = JSON.parse(stdout); } catch { /* not JSON: handled just below */ }
@@ -380,6 +420,11 @@ function claudeOnce({ bin, model, effort, prompt, timeoutMs }) {
       const detail = String(data.result ?? '');
       if (data.is_error) {
         if (/usage limit|rate limit|quota/i.test(detail)) return reject(new Error('claude-limit'));
+        // A CLI that is installed but logged out fails here, not at --version,
+        // so this is the only place we can tell the user what's actually wrong.
+        if (/not logged in|log ?in|authenticat|unauthorized|credentials/i.test(detail)) {
+          return reject(new Error('claude-auth'));
+        }
         return reject(new Error(`claude-exit ${data.subtype || 'error'}`));
       }
       if (data.stop_reason === 'refusal') return reject(new Error('claude-refusal'));
@@ -392,6 +437,21 @@ function claudeOnce({ bin, model, effort, prompt, timeoutMs }) {
     child.stdin.on('error', () => {});
     child.stdin.end(prompt.user);
   });
+}
+
+// Run one summary at a time, process-wide.
+//
+// Each summary is a whole Node runtime, not an HTTP request: a message with
+// three links, or two enabled chats firing at once, would otherwise spawn that
+// many `claude` processes concurrently. The per-conversation busy/dirty
+// serialization in start() does not help here -- it's per conversation, and one
+// conversation can hand us several links at once. Summaries are never
+// latency-critical (the UI is already showing a spinner), so they queue.
+let claudeQueue = Promise.resolve();
+function enqueue(fn) {
+  const run = claudeQueue.then(fn, fn); // run next regardless of how the last one ended
+  claudeQueue = run.then(() => {}, () => {}); // keep the chain alive, retain nothing
+  return run;
 }
 
 // Ask Claude for a short TLDR of the transcript, retrying transient failures with
@@ -469,10 +529,10 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     emit(convId, 'summarizing', found.url);
     let reply;
     try {
-      reply = await summarize({
+      reply = await enqueue(() => summarize({
         bin, model, effort, transcript: transcript.text, title: transcript.title,
         onRetry: (e) => emit(convId, 'retrying', found.url, friendlyReason(e)),
-      });
+      }));
     } catch (e) {
       log(`summary failed for ${found.url}: ${e.message}`);
       emit(convId, 'failed', found.url, friendlyReason(e));

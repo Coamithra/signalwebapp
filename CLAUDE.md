@@ -258,18 +258,27 @@ evaluate must target the isolated context's id.
   bills the user's Claude *subscription* rather than a metered API key -- the same
   subprocess shape as the `yt-dlp` fallback, and the reason this is a spawn and not a
   `fetch`. Knobs: `TLDR_CLAUDE_BIN` (default `claude`), `TLDR_MODEL` (default
-  `claude-opus-5`), `TLDR_EFFORT` (default `medium`). Four things about that invocation are
-  load-bearing and should not be dropped casually:
+  `claude-opus-5`), `TLDR_EFFORT` (default `medium`). Five things about that invocation hold the feature up and
+  should not be dropped casually:
   (1) the transcript goes in on **stdin**, never argv -- 600k chars would blow past the
   Windows command-line limit;
-  (2) `cwd` is an empty temp dir (`runDir`), because `claude` discovers CLAUDE.md / hooks /
-  settings from its cwd upward and must not inherit *this* repo's;
-  (3) `--tools ""` `--strict-mcp-config` `--disable-slash-commands`
-  `--exclude-dynamic-system-prompt-sections` are cost **and safety** -- measured 48.5k -> 11.8k
-  cache-creation tokens and ~2s per summary, and a run with no tools and no MCP servers has
-  nothing an untrusted transcript can talk it into doing;
-  (4) failure is reported **in-band**: the JSON envelope can carry `is_error` with exit 0, so
-  the callback checks the envelope even when `err` is null.
+  (2) `cwd` is an empty dir of ours (`runDir`), because `claude` discovers *project* CLAUDE.md
+  and settings from its cwd upward and must not inherit *this* repo's. Never point it at
+  `os.tmpdir()` itself, which is a plausible discovery root full of other processes' files;
+  (3) `--tools ""` `--strict-mcp-config` `--disable-slash-commands` `--setting-sources ""` are
+  cost **and safety** -- measured **48.5k -> 648** cache-creation tokens and ~2s per summary
+  (`--setting-sources ""` is most of that: otherwise the user's global `~/.claude/CLAUDE.md` is
+  prepended to every summary), and a run with no tools, no MCP servers and no user hooks has
+  nothing an untrusted transcript can talk it into doing. Note `--exclude-dynamic-system-prompt-sections`
+  is **ignored** whenever `--system-prompt` is passed, so it is not in the list;
+  (4) `--no-session-persistence`, or `claude -p` writes a full session transcript under
+  `~/.claude/projects/` keyed on cwd -- i.e. up to `MAX_TRANSCRIPT_CHARS` of third-party caption
+  text per video, persisted to the user's home directory forever;
+  (5) failure is reported **in-band**: the JSON envelope can carry `is_error` with exit 0, so
+  the callback checks the envelope even when `err` is null. `isTransientClaudeError` is an
+  allow-list (`timeout`/`bad-output`) for the same reason -- retrying a logged-out CLI or a bad
+  `TLDR_MODEL` just burns three spawns to fail identically. Summaries are also serialized
+  process-wide (`enqueue`), since each one is a whole Node runtime rather than a `fetch`.
   The transcript and title are untrusted third-party text, so the **instructions live in the
   system prompt and the transcript in the user turn** (`buildPrompt` returns `{system, user}`)
   -- that turn split is the real privilege boundary, with the `<transcript>` fence kept on top
