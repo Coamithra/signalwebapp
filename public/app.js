@@ -1564,6 +1564,7 @@ function renderTldrStatus(stage, reason, url) {
   const label =
     stage === 'fetching' ? 'Fetching transcript…'
     : stage === 'summarizing' ? 'Summarizing…'
+    : stage === 'researching' ? 'Researching the channel…'
     : stage === 'retrying' ? `Retrying${reason ? ` (${reason})` : ''}…`
     : failed ? `Auto-TLDR failed${reason ? `: ${reason}` : ''}`
     : 'Working…';

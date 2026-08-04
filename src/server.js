@@ -67,6 +67,11 @@ const TLDR_CLAUDE_BIN = process.env.TLDR_CLAUDE_BIN || 'claude';
 const TLDR_MODEL = process.env.TLDR_MODEL || 'claude-opus-5';
 const TLDR_EFFORT = process.env.TLDR_EFFORT || 'medium';
 const TLDR_YTDLP = !/^(0|false|no)$/i.test(process.env.TLDR_YTDLP || '');
+// The "For context" block: a second, web-researching Claude run per link. The
+// summary send waits on it (~10-30s typical, 90s ceiling) and it costs real
+// subscription usage, so it's worth being able to turn off on its own without
+// turning off auto-TLDR entirely.
+const TLDR_CONTEXT = !/^(0|false|no)$/i.test(process.env.TLDR_CONTEXT || '');
 const tldr = createTldr({
   bridge,
   settingsPath: path.join(__dirname, '..', '.tldr-settings.json'),
@@ -74,6 +79,7 @@ const tldr = createTldr({
   model: TLDR_MODEL,
   effort: TLDR_EFFORT,
   ytDlp: TLDR_YTDLP,
+  withContext: TLDR_CONTEXT,
   // Forward each pipeline stage to the browser over the existing SSE channel as a
   // 'tldr' event. The frontend renders a transient, local-only status bubble in
   // the open thread (fetching -> summarizing -> retrying -> done/failed); nothing

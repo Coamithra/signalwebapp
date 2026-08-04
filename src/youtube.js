@@ -128,6 +128,10 @@ async function fetchTranscriptHttp(videoId, opts) {
   if (playable && playable !== 'OK') throw new Error(`not-playable:${playable}`);
 
   const title = pr?.videoDetails?.title || null;
+  // Who published it. Free here (same object as the title). Note this path is
+  // the bot-gated one, so in practice the oEmbed top-up in fetchTranscript is
+  // what usually supplies title/author -- see fetchMeta.
+  const author = pr?.videoDetails?.author || null;
   const tracks = pr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!Array.isArray(tracks) || !tracks.length) throw new Error('no-captions');
 
@@ -154,7 +158,7 @@ async function fetchTranscriptHttp(videoId, opts) {
 
   const text = flattenJson3(tt);
   if (!text) throw new Error('empty-transcript');
-  return { text, title, lang: track.languageCode || null, generated: track.kind === 'asr', source: 'http' };
+  return { text, title, author, lang: track.languageCode || null, generated: track.kind === 'asr', source: 'http' };
 }
 
 // Regional variants worth asking for by name, per language. YouTube publishes
@@ -268,18 +272,60 @@ async function fetchViaYtDlp(videoId, opts) {
     // failure code from the attempt that actually ran.
     if (leftMs < MIN_ATTEMPT_MS) break;
     const { text, code } = await runYtDlp(videoId, lang, subLangsFor(lang, wide), leftMs);
-    if (text) return { text, title: null, lang: null, generated: null, source: 'yt-dlp' };
+    // No title/author here for the same reason as the -o comment above:
+    // --write-info-json is unreliable alongside the sub flags. The context pass
+    // degrades to "no channel to research" rather than guessing one.
+    if (text) return { text, title: null, author: null, lang: null, generated: null, source: 'yt-dlp' };
     lastCode = code;
   }
   throw new Error(lastCode ? `yt-dlp ${lastCode}` : 'yt-dlp-no-subs');
 }
 
+// Title and channel from YouTube's public oEmbed endpoint.
+//
+// The watch page carries all of this in `videoDetails`, but that page is exactly
+// what gets bot-gated -- on a gated network EVERY transcript comes from the
+// yt-dlp fallback, which writes subtitles and nothing else, so title and author
+// are null for every single video. oEmbed is a separate, unauthenticated,
+// ungated endpoint that answers with just the two fields we want.
+//
+// Best-effort by design: metadata is a nice-to-have (it sharpens the summary and
+// is the only thing the auto-TLDR context pass can research a channel by), and
+// never worth failing a transcript we already have.
+async function fetchMeta(videoId) {
+  try {
+    const url = 'https://www.youtube.com/oembed?format=json&url='
+      + encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`);
+    const res = await fetch(url, { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return {};
+    const j = await res.json();
+    return { title: j?.title || null, author: j?.author_name || null };
+  } catch {
+    return {};
+  }
+}
+
 // Fetch a video's transcript. Tries the zero-dep HTTP path first (fast, but
 // increasingly bot-gated), then falls back to yt-dlp if it's installed. Resolves
-// to { text, title, lang, generated, source } or throws a short Error the caller
-// logs and treats as "no summary available". Pass opts.ytDlp = false to disable
-// the external-binary fallback entirely (HTTP path only).
+// to { text, title, author, lang, generated, source } or throws a
+// short Error the caller logs and treats as "no summary available". Pass
+// opts.ytDlp = false to disable the external-binary fallback entirely (HTTP
+// path only).
+//
+// Whichever path produced the transcript, any missing title/author is topped up
+// from oEmbed -- see fetchMeta for why that is the common case, not the rare one.
 export async function fetchTranscript(videoId, opts = {}) {
+  const got = await fetchTranscriptText(videoId, opts);
+  if (got.title && got.author) return got;
+  const meta = await fetchMeta(videoId);
+  return {
+    ...got,
+    title: got.title || meta.title || null,
+    author: got.author || meta.author || null,
+  };
+}
+
+async function fetchTranscriptText(videoId, opts = {}) {
   try {
     return await fetchTranscriptHttp(videoId, opts);
   } catch (httpErr) {

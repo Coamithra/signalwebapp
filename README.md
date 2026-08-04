@@ -114,7 +114,9 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 - Sending GIFs via a built-in picker (`/gif` command or the **GIF** button), powered by Giphy
 - **Auto-TLDR for YouTube links** — toggle it per chat (thread header → ⋮ options menu). When
   on, a YouTube link *you* post in that chat gets a short auto-summary, generated from the
-  video's transcript by Claude. **No API key** — it shells out to the `claude` CLI, so it runs
+  video's transcript by Claude, followed by a verbatim quote and a **"For context"** line on who
+  the channel is and how the video's claims hold up (web-researched; `TLDR_CONTEXT=0` turns just
+  that part off). **No API key** — it shells out to the `claude` CLI, so it runs
   on your Claude subscription (see Configuration). The
   transcript is fetched directly (zero-dep); if YouTube bot-gates that, it falls back to
   [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) **when it's installed** — optional, set
@@ -132,6 +134,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `TLDR_CLAUDE_BIN`  | `claude`      | The Claude Code CLI that writes the summaries. **Auto-TLDR needs no API key** — it spawns this binary, so summaries bill your Claude subscription. Requires `claude` on the server's `PATH` and already logged in; until it resolves, the per-chat toggle shows a hint. |
 | `TLDR_MODEL`       | `claude-opus-5` | Model used for the summary. `claude-sonnet-5` / `claude-haiku-4-5` are cheaper against your usage limits. |
 | `TLDR_EFFORT`      | `medium`      | Reasoning effort (`low`…`max`). `low` is slightly faster and still good; above `medium` buys little on a summarization task. |
+| `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude run per link, this one with web search, and the summary waits on it: typically ~10-30s, capped at 90s. Set to `0` to keep summaries only. |
 | `TLDR_YTDLP`       | `1` (on)      | If [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is on `PATH`, it's used as a transcript fallback when YouTube blocks the direct fetch. Set to `0` to never spawn it (direct fetch only). |
 
 ## Architecture
