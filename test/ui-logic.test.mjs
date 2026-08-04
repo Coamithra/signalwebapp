@@ -281,7 +281,7 @@ test('evictOldestTldr: an over-cap map holding only the active chat is left alon
 test('retryErrorReason', () => {
   assert.equal(retryErrorReason('not-configured'), 'auto-TLDR is not configured');
   assert.equal(retryErrorReason('bad-url'), 'not a recognized YouTube link');
-  assert.equal(retryErrorReason('Gemini timed out'), 'Gemini timed out');
+  assert.equal(retryErrorReason('Claude usage limit reached'), 'Claude usage limit reached');
   assert.equal(retryErrorReason(''), 'retry failed');
   assert.equal(retryErrorReason(undefined), 'retry failed');
 });

@@ -53,7 +53,7 @@ evaluate must target the isolated context's id.
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
-| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the Gemini call, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
+| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
 | [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
@@ -249,23 +249,44 @@ evaluate must target the isolated context's id.
   (`msg.direction === 'outgoing'`), and only messages newer than a per-chat timestamp floor
   (server boot / enable time) so history is never re-summarized; a bounded `processed` set
   dedupes. It fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
-  `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks Gemini
-  (`GEMINI_API_KEY`, `GEMINI_MODEL`, default `gemini-2.5-flash`) for a summary of at most
-  four sentences (~100 words) followed by **one verbatim quote from the video on a line of
-  its own** -- 5 to 20 words, copied word-for-word, and omitted entirely rather than invented
-  when nothing is worth quoting,
-  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. The transcript and
-  title are untrusted third-party text, so `buildPrompt` **fences** them in `<transcript>`
-  tags framed as data-never-instructions (a literal tag in the captions is stripped first);
-  the *summary* sentence above the fence is still the byte-identical string card daa054ce
-  measured, but the quote instruction beside it was rewritten for the quote line (card
-  b8c86329) and is no longer covered by that experiment. The TLDR can't trigger itself because
+  `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks **Claude** for a summary
+  of at most four sentences (~100 words) plus **one verbatim quote from the video** -- 5 to 20
+  words, copied word-for-word, and omitted entirely rather than invented when nothing is worth
+  quoting,
+  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. **There is no LLM API key.** The
+  summary comes from spawning the **Claude Code CLI** (`claude -p`, see `claudeOnce`), so it
+  bills the user's Claude *subscription* rather than a metered API key -- the same
+  subprocess shape as the `yt-dlp` fallback, and the reason this is a spawn and not a
+  `fetch`. Knobs: `TLDR_CLAUDE_BIN` (default `claude`), `TLDR_MODEL` (default
+  `claude-opus-5`), `TLDR_EFFORT` (default `medium`). Four things about that invocation are
+  load-bearing and should not be dropped casually:
+  (1) the transcript goes in on **stdin**, never argv -- 600k chars would blow past the
+  Windows command-line limit;
+  (2) `cwd` is an empty temp dir (`runDir`), because `claude` discovers CLAUDE.md / hooks /
+  settings from its cwd upward and must not inherit *this* repo's;
+  (3) `--tools ""` `--strict-mcp-config` `--disable-slash-commands`
+  `--exclude-dynamic-system-prompt-sections` are cost **and safety** -- measured 48.5k -> 11.8k
+  cache-creation tokens and ~2s per summary, and a run with no tools and no MCP servers has
+  nothing an untrusted transcript can talk it into doing;
+  (4) failure is reported **in-band**: the JSON envelope can carry `is_error` with exit 0, so
+  the callback checks the envelope even when `err` is null.
+  The transcript and title are untrusted third-party text, so the **instructions live in the
+  system prompt and the transcript in the user turn** (`buildPrompt` returns `{system, user}`)
+  -- that turn split is the real privilege boundary, with the `<transcript>` fence kept on top
+  of it and a literal tag in the captions stripped first. `SYSTEM_PROMPT` asks for a JSON
+  object `{summary, quote}`, so `parseReply` gets the quote as its own field instead of
+  reverse-engineering it out of the reply's last line; `splitQuoteLine` is now only the
+  fallback for a reply that misses the schema. The TLDR can't trigger itself because
   `defangUrls` **strips the URL scheme** from the summary before sending (`https://youtu.be/x`
   -> `youtu.be/x`), and `findYouTubeUrl` requires a literal `http(s)://` - the TLDR is an
   outgoing message, so without that a quoted link would loop. `formatTldr` composes what
-  actually goes out: `splitQuoteLine` peels the trailing quoted line off the model's reply
-  (only when that line is *nothing but* a quoted span -- an attribution or an inline quote
-  stays in the paragraph, since a mis-split would italicise half a sentence), the summary and
+  actually goes out, taking **either** the parsed `{summary, quote}` object **or** the raw
+  reply text; a string goes through `splitQuoteLine`, which peels off the trailing quoted line
+  only when that line is *nothing but* a quoted span -- an attribution or an inline quote stays
+  in the paragraph, since a mis-split would italicise half a sentence. `quoteLine` then
+  normalises either shape into one wrapped, single-line span: the JSON field arrives **bare**
+  (its string was the wrapper) while the text path arrives already wrapped, and a literal `""`
+  means "no quote" rather than an empty pair of marks in the chat. The summary and
   the quote are clamped separately (`MAX_TLDR_CHARS` / `MAX_QUOTE_CHARS`, so the clamp cannot
   eat the quote we just went to the trouble of pulling out; `clampSummary` closes an
   unbalanced quotation mark when it truncates, so a cut never presents half a quote as
@@ -288,9 +309,10 @@ evaluate must target the isolated context's id.
   and a dismiss "x". It is **never** a Signal message. Retry POSTs to
   `/api/conversations/:id/tldr/retry {url}` -> `tldr.retry(id, url)`, which re-runs
   the summary **bypassing the dedup/`since`-floor guards**, so it works even after
-  the automatic Gemini retries are spent (the point on a flaky-Gemini day). `reason`
-  is sanitized server-side (`friendlyReason` in [src/tldr.js](src/tldr.js)) so it
-  never leaks the API key or raw timedtext URLs. The bubble shows the open
+  the automatic retries are spent (the point on a bad day). `reason`
+  is sanitized server-side (`friendlyReason` in [src/tldr.js](src/tldr.js)): it returns only
+  fixed phrases derived from our own `claude-*` error tags, so raw stdout/stderr -- which can
+  carry transcript text or a timedtext URL -- never reaches the browser. The bubble shows the open
   conversation's status, but app.js keeps status **per conversation** in an
   in-memory `Map` (`tldrByConv`) so it survives switching chats and re-hydrates
   when you reopen a chat mid-run; it's cleared on a page reload / server restart
