@@ -153,8 +153,10 @@ test('matchShortcodes ranks exact, then prefix, then substring', () => {
   assert.deepEqual(shr.slice(0, 2), ['shrug', 'shrimp']);           // prefix, shorter first
   assert.ok(shr.indexOf('mushroom') > shr.indexOf('shrimp'));       // substring ranks below prefix
 
-  // The unguessable-name case this whole feature exists for.
-  assert.ok(names('up', 100).includes('thumbs_up'));
+  // The unguessable-name case this whole feature exists for. Asserted on the
+  // emoji, not the name: 👍 answers to several ("+1", "thumbsup", "thumbs_up")
+  // and the dedupe below picks one of them for the row.
+  assert.ok(matchShortcodes('up', 100).some((m) => m.emoji === '👍'));
   assert.deepEqual(names('+1'), ['+1']);
 
   assert.deepEqual(matchShortcodes(''), []);
@@ -175,6 +177,52 @@ test('pick weights break ties WITHIN a tier, never across one', () => {
   const heavy = matchShortcodes('shr', 8, { mushroom: 9999 }).map((m) => m.name);
   assert.deepEqual(heavy.slice(0, 2), ['shrug', 'shrimp']);
   assert.ok(heavy.indexOf('mushroom') > heavy.indexOf('shrimp'));
+});
+
+test('synonyms find an emoji whose name shares no letters with the query', () => {
+  const names = (q, ...rest) => matchShortcodes(q, ...rest).map((m) => m.name);
+
+  // The card's case: Signal calls it "cook", people call it a chef.
+  const chef = matchShortcodes('chef');
+  assert.equal(chef[0].name, 'cook');
+  assert.equal(chef[0].emoji, '🧑‍🍳');
+  assert.equal(chef[0].tag, 'chef');            // the row can say why it's here
+  assert.ok(chef.some((m) => m.name === 'hocho')); // 🔪 is tagged "chef" too
+
+  // A tag hit never appears with a name it would have matched anyway.
+  assert.ok(matchShortcodes('cook').every((m) => m.tag === undefined || !m.name.includes('cook')));
+
+  // Signal's own alternate shortcodes come along as real shortcodes, so these
+  // expand as well as autocomplete.
+  assert.equal(expandShortcodes(':poop:'), '💩');
+  assert.equal(expandShortcodes(':satisfied:'), '😆');
+  assert.deepEqual(names('poop').slice(0, 1), ['poop']);
+});
+
+test('a synonym never outranks a real name match', () => {
+  // "cook" is a name (tier 0-2) and also a tag on 🔪/👨‍🍳; every name hit sorts
+  // above every tag hit, whatever the tag's own quality.
+  const cook = matchShortcodes('cook', 100);
+  const firstTag = cook.findIndex((m) => m.tag !== undefined);
+  const lastName = cook.map((m) => m.tag === undefined).lastIndexOf(true);
+  assert.ok(firstTag > lastName, 'tags must all sort below names');
+
+  // Not even a heavily-picked favourite can lift a tag over a name.
+  const weighted = matchShortcodes('cook', 100, { hocho: 9999 });
+  assert.ok(weighted.findIndex((m) => m.name === 'hocho') > weighted.map((m) => m.tag === undefined).lastIndexOf(true));
+
+  // Within the tag tier the same exact -> prefix -> substring ladder applies.
+  const bin = matchShortcodes('trash', 100).filter((m) => m.tag);
+  assert.deepEqual(bin.map((m) => m.tag === 'trash').slice(0, 1), [true]);
+});
+
+test('one emoji, one row — however many names and tags reach it', () => {
+  for (const q of ['thumb', 'poo', 'cook', 'a', 'face', 'chef']) {
+    const emoji = matchShortcodes(q, 100).map((m) => m.emoji);
+    assert.equal(new Set(emoji).size, emoji.length, `duplicate emoji for ":${q}"`);
+  }
+  // The cap counts rows, and every row is a distinct emoji.
+  assert.equal(matchShortcodes('a').length, 8);
 });
 
 test('hand-edited weights cannot poison the ranking', () => {

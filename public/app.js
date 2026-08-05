@@ -1231,6 +1231,9 @@ function renderEmojiPop(items, start) {
     }, [
       el('span', { class: 'emoji-pop-emoji', text: item.emoji }),
       el('span', { class: 'emoji-pop-name', text: `:${item.name}:` }),
+      // A synonym hit: you typed "chef" and the row says :cook:, so show the
+      // word that put it there — otherwise the list looks like it guessed.
+      ...(item.tag ? [el('span', { class: 'emoji-pop-tag', text: item.tag })] : []),
     ]));
   });
   emojiPop.list.replaceChildren(frag);

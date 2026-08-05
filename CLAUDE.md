@@ -57,8 +57,9 @@ evaluate must target the isolated context's id.
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
 | [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
-| [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). |
-| [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map after a Signal update). |
+| [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). Carries Signal's own `shortNameAlts` too, so `:poop:` works as well as `:hankey:`. |
+| [public/emoji-tags.js](public/emoji-tags.js) | **Generated** shortcode -> synonyms (~7800 tags over ~1800 emoji), the search terms behind `:chef` finding `:cook:`. Same script, but a different Signal source: its **downloaded** emoji search index, not the asar (see the autocomplete bullet). Search terms only, never shortcodes - they rank in `matchShortcodes` and never expand. |
+| [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
 
 ## How the core operations work (don't relearn these the hard way)
 
@@ -125,7 +126,25 @@ evaluate must target the isolated context's id.
   (`sb.emojiFreq`) only breaks ties *within* a tier, so a prefix match is never buried under
   a favourite substring one. Those counts **decay** — halved every `EMOJI_FREQ_HALFLIFE`
   picks — so a phase ages out instead of ranking forever. The list is a **hard cap of 8**
-  with no scrolling (type another char to narrow). The popup's keys are handled at the top of
+  with no scrolling (type another char to narrow).
+  **Synonyms** pick up where substring matching runs out: no amount of substring cleverness
+  gets from "chef" to `cook`, or from "trash" to `wastebasket`. Those come from
+  [public/emoji-tags.js](public/emoji-tags.js) and add three more tiers (tag exact -> prefix
+  -> substring) **strictly below every name tier**, so a synonym can never bury a real
+  shortcode and nothing that matched before them has moved. Because they rank last, the
+  ~7800-tag scan is **skipped outright** once the name pass has filled the cap - the common
+  case pays nothing. A tag hit carries the matched `tag` on the result so the popup row can
+  show *why* it's there (`🧑‍🍳 :cook: chef`). Results are deduped **by emoji, not by name**:
+  one emoji now answers to several shortcodes (`:hankey:`/`:poop:`/`:shit:`) plus its
+  synonyms, and eight rows of the same glyph is a worse list than eight different ones.
+  ⚠️ **The tag data is NOT in the asar.** Signal treats its localised emoji search index as an
+  *optional resource*: the asar carries only `build/optional-resources.json` (url + size +
+  sha512) and Signal downloads the JSON itself into its user-data dir on demand
+  (`%APPDATA%/Signal/optionalResources/emoji-index-en.json`). The generator prefers that
+  downloaded copy and falls back to fetching the manifest's url, digest-verified - so it still
+  works on an install that hasn't pulled it yet. Tags are keyed by shortName and only kept
+  when the index's emoji **matches** the one we already have under that name, or synonyms
+  would hang off the wrong glyph. The popup's keys are handled at the top of
   the composer's existing `keydown` listener, so while it's open they win over Enter→send and
   ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
 - **Jumbomoji (emoji-only messages)** - a message whose text is *nothing but* emoji renders
