@@ -12,6 +12,7 @@
 // Style ids are Signal's own (probed from its bundle: proto BodyRange.Style).
 
 import { EMOJI_SHORTCODES } from './emoji-shortcodes.js';
+import { EMOJI_TAGS } from './emoji-tags.js';
 
 export const STYLE = Object.freeze({
   BOLD: 1, ITALIC: 2, SPOILER: 3, STRIKETHROUGH: 4, MONOSPACE: 5,
@@ -74,9 +75,28 @@ export function shortcodeQueryBefore(text, caret) {
   return { query: m[1].toLowerCase(), start: m.index };
 }
 
+// The synonyms Signal's own picker searches, so ":chef" can find :cook:. Same
+// prototype-chain hazard as emojiFor, same guard.
+const tagsFor = (name) => (Object.hasOwn(EMOJI_TAGS, name) ? EMOJI_TAGS[name] : undefined);
+
 // Sorted once: re-keying a ~1900-entry object on every keystroke is wasteful, and
 // the sort is what makes ties below alphabetical for free.
 let sortedNames = null;
+let sortedTagNames = null;
+
+// `weights` comes out of localStorage, so it can carry anything a user has
+// hand-edited in — including "__proto__". hasOwn keeps a junk value from
+// ranking, and a non-number would poison the sort.
+function weightOf(weights, name) {
+  const w = Object.hasOwn(weights, name) ? weights[name] : 0;
+  return typeof w === 'number' && Number.isFinite(w) ? w : 0;
+}
+
+// Length last, as a stand-in for "how much of the match the query covered". For a
+// tag hit that's the tag's length, not the shortcode's — the shortcode isn't what
+// matched. Name hits carry no tag, so the term is a no-op for them.
+const byRank = (a, b) => a.tier - b.tier || b.weight - a.weight
+  || (a.tag?.length || 0) - (b.tag?.length || 0) || a.name.length - b.name.length;
 
 // Shortcode names matching `query`, best first, for the autocomplete popup.
 // Tiers (exact -> prefix -> substring) are primary and `weights` (how often the
@@ -84,28 +104,64 @@ let sortedNames = null;
 // never end up below a substring one just because the latter is a favourite.
 // Substring matching is the whole point — Signal's own names are often
 // unguessable, so ":up" has to be able to find "thumbs_up".
+//
+// Where even a substring can't reach — a *different word* for the same thing —
+// synonyms take over: ":chef" has nothing in common with "cook". Those come
+// from Signal's own search index (see EMOJI_TAGS) and rank strictly *below*
+// every name match, so a synonym can never bury a real shortcode and nothing
+// that matched before this existed has moved.
+//
+// Results are deduped by emoji rather than by name, since one emoji now answers
+// to several names (:hankey:/:poop:/:shit:) plus its synonyms, and eight rows of
+// the same glyph would be a worse list than eight different ones.
 export function matchShortcodes(query, limit = 8, weights = {}) {
   const q = String(query || '').toLowerCase();
   if (!q) return [];
   if (!sortedNames) sortedNames = Object.keys(EMOJI_SHORTCODES).sort();
 
-  const scored = [];
+  const byName = [];
   for (const name of sortedNames) {
     const at = name.indexOf(q);
     if (at < 0) continue;
-    const tier = name === q ? 0 : at === 0 ? 1 : 2;
-    // `weights` comes out of localStorage, so it can carry anything a user has
-    // hand-edited in — including "__proto__". hasOwn keeps a junk value from
-    // ranking, and a non-number would poison the sort.
-    const w = Object.hasOwn(weights, name) ? weights[name] : 0;
-    scored.push({ name, tier, weight: typeof w === 'number' && Number.isFinite(w) ? w : 0 });
+    byName.push({ name, tier: name === q ? 0 : at === 0 ? 1 : 2, weight: weightOf(weights, name) });
   }
-  scored.sort((a, b) => a.tier - b.tier || b.weight - a.weight || a.name.length - b.name.length);
+  byName.sort(byRank);
+
+  const out = [];
+  const seen = new Set();
+  const take = (scored) => {
+    for (const { name, tag } of scored) {
+      if (out.length >= limit) return;
+      const emoji = emojiFor(name);
+      if (emoji === undefined || seen.has(emoji)) continue;
+      seen.add(emoji);
+      out.push(tag ? { name, emoji, tag } : { name, emoji });
+    }
+  };
   // Hard cap, no scrolling: past this, typing another character narrows better
   // than paging through a list ever would.
-  return scored.slice(0, limit)
-    .map(({ name }) => ({ name, emoji: emojiFor(name) }))
-    .filter((e) => e.emoji !== undefined);
+  take(byName);
+  // Tags rank below every name, so once the cap is full they cannot change the
+  // list — which makes scanning ~7800 of them per keystroke skippable outright.
+  if (out.length >= limit) return out;
+
+  if (!sortedTagNames) sortedTagNames = Object.keys(EMOJI_TAGS).sort();
+  const byTag = [];
+  for (const name of sortedTagNames) {
+    let best = null;
+    for (const tag of tagsFor(name) || []) {
+      const at = tag.indexOf(q);
+      if (at < 0) continue;
+      const tier = tag === q ? 0 : at === 0 ? 1 : 2;
+      // Best tier wins; the shortest tag breaks a tie, as the one whose match
+      // covers most of it — "chef" over "chef_hat" for the query "chef".
+      if (!best || tier < best.tier || (tier === best.tier && tag.length < best.tag.length)) best = { tier, tag };
+    }
+    if (best) byTag.push({ name, tier: best.tier, tag: best.tag, weight: weightOf(weights, name) });
+  }
+  byTag.sort(byRank);
+  take(byTag);
+  return out;
 }
 
 // A marker only opens a span if it isn't glued to a word on its left ("snake_case"
