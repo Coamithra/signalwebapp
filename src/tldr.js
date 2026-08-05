@@ -518,10 +518,11 @@ const CONTEXT_TOOLS = 'WebSearch,WebFetch';
 // Research needs several round trips, so it gets a longer ceiling than the
 // summary -- but not an unbounded one: the send WAITS on this pass, so the
 // ceiling is also how long a TLDR can be held back by an optional extra. Real
-// runs measured 11-31s; 90s is generous headroom without letting a wedged
-// research run sit on the summary for minutes. Never retried, because the block
+// runs measured 11s to 80.4s (a claims-dense video needed 13 turns and lost its
+// block to the original 90s cap), so this is a runaway ceiling like
+// CLAUDE_TIMEOUT_MS, not a typical-case bound. Never retried, because the block
 // is optional and a failed one costs the reader nothing.
-const CONTEXT_TIMEOUT_MS = 90_000;
+const CONTEXT_TIMEOUT_MS = 300_000;
 // Sized so a reply that OBEYS the prompt (two fields, <=40 words each) never
 // truncates -- the clamp is the guard against a rambling model, not a routine
 // step. Set to 600 first and watched a compliant-looking answer get cut
