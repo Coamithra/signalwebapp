@@ -82,8 +82,10 @@ const tldr = createTldr({
   withContext: TLDR_CONTEXT,
   // Forward each pipeline stage to the browser over the existing SSE channel as a
   // 'tldr' event. The frontend renders a transient, local-only status bubble in
-  // the open thread (fetching -> summarizing -> retrying -> done/failed); nothing
-  // here is ever sent into the Signal chat. Harmless no-op when no tab is open.
+  // the open thread (fetching -> summarizing -> researching -> retrying ->
+  // done/failed; a done WITH a reason means the TLDR was sent minus its context
+  // block); nothing here is ever sent into the Signal chat. Harmless no-op when
+  // no tab is open.
   onStage: (e) => broadcast('signal', { type: 'tldr', ...e }),
 });
 tldr.start();

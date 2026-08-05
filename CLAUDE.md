@@ -356,12 +356,19 @@ evaluate must target the isolated context's id.
   status bubble pinned below the open thread (`#tldrStatus`, kept outside
   `#messagesInner` so message refreshes don't wipe it) - a spinner + label while
   working; on failure it stays put with the friendly `reason`, a **Retry** button,
-  and a dismiss "x". It is **never** a Signal message. Retry POSTs to
+  and a dismiss "x". A `done` event can carry a `reason` too: it means the TLDR was
+  **sent but its "For context" block was lost to a failure** (a clean `done` has no
+  reason and just clears the bubble), and the UI renders a quieter dismiss-only
+  notice for it - no Retry, since the summary is already in the chat and a retry
+  would send a duplicate. What each stage renders (label/icon/buttons) is the pure
+  `tldrBubble` in [public/ui-logic.js](public/ui-logic.js); app.js only paints it.
+  It is **never** a Signal message. Retry POSTs to
   `/api/conversations/:id/tldr/retry {url}` -> `tldr.retry(id, url)`, which re-runs
   the summary **bypassing the dedup/`since`-floor guards**, so it works even after
   the automatic retries are spent (the point on a bad day). `reason`
-  is sanitized server-side (`friendlyReason` in [src/tldr.js](src/tldr.js)): it returns only
-  fixed phrases derived from our own `claude-*` error tags, so raw stdout/stderr -- which can
+  is sanitized server-side (`friendlyReason` / `friendlyContextReason` in
+  [src/tldr.js](src/tldr.js)): both return only fixed phrases derived from our own `claude-*`
+  error tags, so raw stdout/stderr -- which can
   carry transcript text or a timedtext URL -- never reaches the browser. The bubble shows the open
   conversation's status, but app.js keeps status **per conversation** in an
   in-memory `Map` (`tldrByConv`) so it survives switching chats and re-hydrates

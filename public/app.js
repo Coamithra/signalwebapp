@@ -8,7 +8,7 @@ import {
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
-  jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
+  tldrBubble, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -1556,30 +1556,25 @@ function clearTldrFor(convId) {
 }
 
 // Render/replace the bubble for a pipeline stage. `url` is the link in flight; it
-// rides into the Retry handler so a manual retry knows what to re-run.
+// rides into the Retry handler so a manual retry knows what to re-run. What to
+// show (label, icon, which buttons) is decided in ui-logic.js (tldrBubble);
+// this only paints it.
 function renderTldrStatus(stage, reason, url) {
   const host = $('#tldrStatus');
   if (!host) return;
-  const failed = stage === 'failed';
-  const label =
-    stage === 'fetching' ? 'Fetching transcript…'
-    : stage === 'summarizing' ? 'Summarizing…'
-    : stage === 'researching' ? 'Researching the channel…'
-    : stage === 'retrying' ? `Retrying${reason ? ` (${reason})` : ''}…`
-    : failed ? `Auto-TLDR failed${reason ? `: ${reason}` : ''}`
-    : 'Working…';
-
-  const children = [
-    failed ? el('span', { class: 'tldr-icon', text: '⚠' }) : el('span', { class: 'tldr-spinner' }),
-    el('span', { class: 'tldr-text', text: label }),
-  ];
-  if (failed) {
-    children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
+  const b = tldrBubble(stage, reason);
+  const children = [];
+  if (b.tone === 'warn') children.push(el('span', { class: 'tldr-icon', text: '⚠' }));
+  else if (b.tone === 'work') children.push(el('span', { class: 'tldr-spinner' }));
+  children.push(el('span', { class: 'tldr-text', text: b.label }));
+  if (b.retry) children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
+  if (b.dismiss) {
     children.push(el('button', {
       class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: () => clearTldrFor(state.activeId),
     }));
   }
-  host.replaceChildren(el('div', { class: 'tldr-bubble' + (failed ? ' failed' : '') }, children));
+  const cls = 'tldr-bubble' + (b.tone === 'warn' ? ' failed' : b.tone === 'info' ? ' info' : '');
+  host.replaceChildren(el('div', { class: cls }, children));
   host.classList.remove('hidden');
   scrollToBottom(); // follow it into view only if already near the bottom
 }
@@ -1594,8 +1589,13 @@ function handleTldrStage(e) {
     // finishing link can't wipe a different one that's still in progress.
     const cur = tldrByConv.get(convId);
     if (cur && cur.url !== e.url) return;
-    clearTldrFor(convId);
-    return;
+    // A clean done clears the bubble; a done WITH a reason means the TLDR was
+    // sent but its "For context" block failed, so fall through and show the
+    // dismissible notice instead of vanishing silently.
+    if (!e.reason) {
+      clearTldrFor(convId);
+      return;
+    }
   }
   setTldrFor(convId, { stage: e.state, reason: e.reason, url: e.url });
   if (convId === state.activeId) renderActiveTldr();

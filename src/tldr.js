@@ -123,6 +123,21 @@ export function friendlyReason(e) {
   return 'summary failed';
 }
 
+// Same contract, for the context pass: the 'done' stage event carries this when
+// the summary went out but its "For context" block was lost to a failure, so
+// the UI can say so instead of the silence that once cost a whole debugging
+// session. Only the tags a context run can actually hit get their own phrase;
+// everything else is a generic 'research failed' rather than borrowing
+// friendlyReason's 'summary failed', which would read as the summary dying.
+export function friendlyContextReason(e) {
+  const msg = (e && e.message) || '';
+  if (/^claude-timeout/.test(msg)) return 'research timed out';
+  if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
+  if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
+  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
+  return 'research failed';
+}
+
 // Build the prompt, with the untrusted half fenced off AND in its own turn.
 //
 // The instructions live in the SYSTEM prompt and the transcript in the USER
@@ -585,8 +600,13 @@ export function buildContextPrompt({ author, title, summary }) {
   return { system: CONTEXT_SYSTEM_PROMPT, user: lines.join('\n') };
 }
 
-// Same shape as parseReply, but both fields are optional: a video with nothing
-// researchable is a normal outcome, not a failure.
+// Same shape as parseReply, but null means only "the reply did not contain a
+// JSON object at all". A parsed object with both fields empty comes back as-is:
+// that is the documented "nothing worth saying" outcome, and researchContext --
+// not this parser -- decides it means no block. Collapsing the two into one null
+// is exactly what made the --allowedTools regression (a run that never searched
+// and answered in prose) indistinguishable from a music video with nothing to
+// fact-check.
 export function parseContext(text) {
   const s = String(text ?? '').trim();
   const start = s.indexOf('{');
@@ -596,10 +616,7 @@ export function parseContext(text) {
   try { obj = JSON.parse(s.slice(start, end + 1)); } catch { return null; }
   if (!obj || typeof obj !== 'object') return null;
   const str = (v) => (typeof v === 'string' ? v.trim() : '');
-  const channel = str(obj.channel);
-  const claims = str(obj.claims);
-  if (!channel && !claims) return null;
-  return { channel, claims };
+  return { channel: str(obj.channel), claims: str(obj.claims) };
 }
 
 // Run one summary at a time, process-wide.
@@ -627,7 +644,12 @@ async function researchContext({ bin, model, effort, author, title, summary }) {
     timeoutMs: CONTEXT_TIMEOUT_MS,
     tools: CONTEXT_TOOLS,
   });
-  return parseContext(text);
+  const ctx = parseContext(text);
+  // A reply with no parseable JSON object is a FAILED run, not a quiet "nothing
+  // to report" -- throw so it reaches friendlyContextReason and the done-notice.
+  // Only a schema-compliant reply with both fields empty stays silent.
+  if (!ctx) throw new Error('claude-bad-output');
+  return (ctx.channel || ctx.claims) ? ctx : null;
 }
 
 // Ask Claude for a short TLDR of the transcript, retrying transient failures with
@@ -721,6 +743,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     // goes out with no context block rather than not at all.
     const parsed = parseReply(reply);
     let researched = null;
+    let contextReason; // set only when the context pass FAILED (not "found nothing")
     if (parsed && withContext) {
       emit(convId, 'researching', found.url);
       try {
@@ -738,6 +761,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
         }));
       } catch (e) {
         log(`context pass failed for ${found.url}: ${e.message}`);
+        contextReason = friendlyContextReason(e);
       }
     }
     const { body, bodyRanges } = formatTldr(parsed ?? reply, researched);
@@ -747,7 +771,9 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       emit(convId, 'failed', found.url, 'could not send');
     } else {
       log(`sent TLDR for ${found.url}`);
-      emit(convId, 'done', found.url);
+      // A 'done' with a reason means "the TLDR went out, but without its context
+      // block" -- the UI shows a dismissible notice instead of clearing silently.
+      emit(convId, 'done', found.url, contextReason);
     }
   }
 
