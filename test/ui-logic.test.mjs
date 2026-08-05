@@ -14,7 +14,7 @@ import {
   AVATAR_COLORS, colorFor, initials, previewText, menuActionsFor,
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
-  parseGifCommand, evictOldestTldr, retryErrorReason,
+  parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble,
   jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
@@ -284,6 +284,43 @@ test('retryErrorReason', () => {
   assert.equal(retryErrorReason('Claude usage limit reached'), 'Claude usage limit reached');
   assert.equal(retryErrorReason(''), 'retry failed');
   assert.equal(retryErrorReason(undefined), 'retry failed');
+});
+
+// ---------- auto-TLDR status bubble model ----------
+
+test('tldrBubble: working stages spin, with no buttons', () => {
+  for (const stage of ['fetching', 'summarizing', 'researching']) {
+    const b = tldrBubble(stage, undefined);
+    assert.equal(b.icon, 'spinner', stage);
+    assert.equal(b.retry, false, stage);
+    assert.equal(b.dismiss, false, stage);
+    assert.ok(b.label.length > 0, stage);
+  }
+  // An unknown stage (a newer server) still renders as generic work, not a crash.
+  assert.equal(tldrBubble('someday-a-new-stage', undefined).icon, 'spinner');
+});
+
+test('tldrBubble: retrying folds the reason into the label', () => {
+  assert.ok(tldrBubble('retrying', 'timed out').label.includes('timed out'));
+  assert.ok(!tldrBubble('retrying', undefined).label.includes('undefined'));
+});
+
+test('tldrBubble: failed warns and offers Retry + dismiss', () => {
+  const b = tldrBubble('failed', 'no transcript available');
+  assert.equal(b.icon, 'warn');
+  assert.equal(b.retry, true);
+  assert.equal(b.dismiss, true);
+  assert.ok(b.label.includes('no transcript available'));
+});
+
+test('tldrBubble: done-with-reason is the quiet sent-without-context notice', () => {
+  const b = tldrBubble('done', 'research timed out');
+  assert.equal(b.icon, null); // quieter than failed: the TLDR itself made it out
+  assert.equal(b.dismiss, true);
+  // Never a Retry: the summary is already in the chat, a retry would duplicate it.
+  assert.equal(b.retry, false);
+  assert.ok(b.label.includes('research timed out'));
+  assert.ok(b.label.includes('For context'));
 });
 
 // ---------- import guard ----------

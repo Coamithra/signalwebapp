@@ -573,6 +573,9 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
   padding: 7px 12px; font-size: 13px; line-height: 1.35;
 }
 .tldr-bubble.failed { color: var(--text); border-color: var(--danger); }
+/* The "sent without its context block" notice: deliberately quieter than
+   .failed (the TLDR itself made it out), so it keeps the muted default look. */
+.tldr-bubble.info { color: var(--text-dim); }
 .tldr-spinner {
   flex: none; width: 13px; height: 13px; border-radius: 50%;
   border: 2px solid var(--text-faint); border-top-color: var(--accent);

@@ -123,6 +123,21 @@ export function friendlyReason(e) {
   return 'summary failed';
 }
 
+// Same contract, for the context pass: the 'done' stage event carries this when
+// the summary went out but its "For context" block was lost to a failure, so
+// the UI can say so instead of the silence that once cost a whole debugging
+// session. Only the tags a context run can actually hit get their own phrase;
+// everything else is a generic 'research failed' rather than borrowing
+// friendlyReason's 'summary failed', which would read as the summary dying.
+export function friendlyContextReason(e) {
+  const msg = (e && e.message) || '';
+  if (/^claude-timeout/.test(msg)) return 'research timed out';
+  if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
+  if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
+  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
+  return 'research failed';
+}
+
 // Build the prompt, with the untrusted half fenced off AND in its own turn.
 //
 // The instructions live in the SYSTEM prompt and the transcript in the USER
@@ -721,6 +736,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     // goes out with no context block rather than not at all.
     const parsed = parseReply(reply);
     let researched = null;
+    let contextReason; // set only when the context pass FAILED (not "found nothing")
     if (parsed && withContext) {
       emit(convId, 'researching', found.url);
       try {
@@ -738,6 +754,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
         }));
       } catch (e) {
         log(`context pass failed for ${found.url}: ${e.message}`);
+        contextReason = friendlyContextReason(e);
       }
     }
     const { body, bodyRanges } = formatTldr(parsed ?? reply, researched);
@@ -747,7 +764,9 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       emit(convId, 'failed', found.url, 'could not send');
     } else {
       log(`sent TLDR for ${found.url}`);
-      emit(convId, 'done', found.url);
+      // A 'done' with a reason means "the TLDR went out, but without its context
+      // block" -- the UI shows a dismissible notice instead of clearing silently.
+      emit(convId, 'done', found.url, contextReason);
     }
   }
 

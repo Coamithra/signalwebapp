@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPrompt, SYSTEM_PROMPT, defangUrls, clampSummary, splitQuoteLine, parseReply,
-  formatTldr, friendlyReason, MAX_TRANSCRIPT_CHARS,
+  formatTldr, friendlyReason, friendlyContextReason, MAX_TRANSCRIPT_CHARS,
   buildContextPrompt, CONTEXT_SYSTEM_PROMPT, parseContext, MAX_CONTEXT_CHARS,
 } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
@@ -486,4 +486,24 @@ test('an unexpected error never leaks its message into the UI', () => {
   const leaky = new Error('timedtext https://youtube.com/api/timedtext?key=SECRET&v=abc');
   assert.equal(friendlyReason(leaky), 'summary failed');
   assert.equal(friendlyReason(undefined), 'summary failed');
+});
+
+// Same sanitization contract for the context pass's reason, which rides on the
+// 'done' stage event when the summary was sent but its block was lost.
+test('context failure reasons are fixed phrases, never the raw error text', () => {
+  const cases = [
+    ['claude-timeout', 'research timed out'],
+    ['claude-limit', 'Claude usage limit reached'],
+    ['claude-not-found', 'Claude Code CLI not found'],
+    ['claude-auth', 'Claude Code CLI is not logged in'],
+    ['claude-exit error_max_turns', 'research failed'],
+    ['claude-bad-output', 'research failed'],
+    ['claude-refusal', 'research failed'],
+  ];
+  for (const [msg, expected] of cases) {
+    assert.equal(friendlyContextReason(new Error(msg)), expected, msg);
+  }
+  const leaky = new Error('spawn failed at C:\\Users\\someone\\claude with transcript text');
+  assert.equal(friendlyContextReason(leaky), 'research failed');
+  assert.equal(friendlyContextReason(undefined), 'research failed');
 });
