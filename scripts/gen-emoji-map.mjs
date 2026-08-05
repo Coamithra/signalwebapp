@@ -113,10 +113,6 @@ ${body}
 });
 `;
 
-const publicDir = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../public');
-writeFileSync(path.join(publicDir, 'emoji-shortcodes.js'), out);
-console.log(`wrote emoji-shortcodes.js — ${sorted.length} shortcodes (${altCount} of them Signal's own alternates) from ${asarPath}`);
-
 // ---------------------------------------------------------------------------
 // Synonyms: Signal's localised emoji search index.
 //
@@ -199,5 +195,13 @@ ${tagBody}
 });
 `;
 
+// Both files last, once nothing is left that can fail. Loading the tag index can
+// throw (no downloaded copy and no network, a bad digest), and writing the map
+// before that would leave a freshly-regenerated emoji-shortcodes.js beside a
+// stale emoji-tags.js still claiming the previous Signal version — the exact
+// drift this script is one script to avoid.
+const publicDir = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../public');
+writeFileSync(path.join(publicDir, 'emoji-shortcodes.js'), out);
+console.log(`wrote emoji-shortcodes.js — ${sorted.length} shortcodes (${altCount} of them Signal's own alternates) from ${asarPath}`);
 writeFileSync(path.join(publicDir, 'emoji-tags.js'), tagOut);
 console.log(`wrote emoji-tags.js — ${kept} tags across ${Object.keys(tags).length} emoji from ${indexFrom}${skipped ? ` (${skipped} index entries skipped: no matching shortcode)` : ''}`);

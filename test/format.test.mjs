@@ -221,8 +221,8 @@ test('one emoji, one row — however many names and tags reach it', () => {
     const emoji = matchShortcodes(q, 100).map((m) => m.emoji);
     assert.equal(new Set(emoji).size, emoji.length, `duplicate emoji for ":${q}"`);
   }
-  // The cap counts rows, and every row is a distinct emoji.
-  assert.equal(matchShortcodes('a').length, 8);
+  // The cap counts rows, so a full list is 8 *different* emoji.
+  assert.equal(new Set(matchShortcodes('a').map((m) => m.emoji)).size, 8);
 });
 
 test('hand-edited weights cannot poison the ranking', () => {

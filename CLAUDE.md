@@ -126,7 +126,9 @@ evaluate must target the isolated context's id.
   (`sb.emojiFreq`) only breaks ties *within* a tier, so a prefix match is never buried under
   a favourite substring one. Those counts **decay** — halved every `EMOJI_FREQ_HALFLIFE`
   picks — so a phase ages out instead of ranking forever. The list is a **hard cap of 8**
-  with no scrolling (type another char to narrow).
+  with no scrolling (type another char to narrow). The popup's keys are handled at the top of
+  the composer's existing `keydown` listener, so while it's open they win over Enter→send and
+  ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
   **Synonyms** pick up where substring matching runs out: no amount of substring cleverness
   gets from "chef" to `cook`, or from "trash" to `wastebasket`. Those come from
   [public/emoji-tags.js](public/emoji-tags.js) and add three more tiers (tag exact -> prefix
@@ -137,6 +139,8 @@ evaluate must target the isolated context's id.
   show *why* it's there (`🧑‍🍳 :cook: chef`). Results are deduped **by emoji, not by name**:
   one emoji now answers to several shortcodes (`:hankey:`/`:poop:`/`:shit:`) plus its
   synonyms, and eight rows of the same glyph is a worse list than eight different ones.
+  That dedupe is also why the popup tracks its highlight **by emoji** across a keystroke:
+  the name a glyph is listed under can change as the query narrows.
   ⚠️ **The tag data is NOT in the asar.** Signal treats its localised emoji search index as an
   *optional resource*: the asar carries only `build/optional-resources.json` (url + size +
   sha512) and Signal downloads the JSON itself into its user-data dir on demand
@@ -144,9 +148,7 @@ evaluate must target the isolated context's id.
   downloaded copy and falls back to fetching the manifest's url, digest-verified - so it still
   works on an install that hasn't pulled it yet. Tags are keyed by shortName and only kept
   when the index's emoji **matches** the one we already have under that name, or synonyms
-  would hang off the wrong glyph. The popup's keys are handled at the top of
-  the composer's existing `keydown` listener, so while it's open they win over Enter→send and
-  ↑→quick-edit; it's suppressed mid-IME-composition like the inline expansion is.
+  would hang off the wrong glyph.
 - **Jumbomoji (emoji-only messages)** - a message whose text is *nothing but* emoji renders
   large and with no bubble at all. The sizes and the cap are **Signal Desktop's own**, read out
   of its bundle (`getJumboEmojiCount` + the size enum): whitespace is ignored, any non-emoji

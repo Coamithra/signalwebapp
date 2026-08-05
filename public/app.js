@@ -1211,12 +1211,16 @@ function renderEmojiPop(items, start) {
     input.setAttribute('aria-controls', 'emojiPopList');
     list.id = 'emojiPopList';
   }
-  // Keep the highlight on the same name across a keystroke where it survived,
+  // Keep the highlight on the same emoji across a keystroke where it survived,
   // so typing another character doesn't yank the selection back to the top.
+  // Tracked by emoji, not name: rows dedupe by emoji, so the name a given glyph
+  // is listed under can change as the query narrows (🌤️ is `sun_small_cloud`
+  // for ":sun" and `mostly_sunny` for ":sunn") — matching on the name would drop
+  // the highlight of a row that never actually left.
   const previous = emojiPop.items[emojiPop.index];
   emojiPop.items = items;
   emojiPop.start = start;
-  const kept = previous ? items.findIndex((i) => i.name === previous.name) : -1;
+  const kept = previous ? items.findIndex((i) => i.emoji === previous.emoji) : -1;
   emojiPop.index = kept >= 0 ? kept : 0;
 
   const frag = document.createDocumentFragment();

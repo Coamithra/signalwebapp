@@ -92,7 +92,11 @@ function weightOf(weights, name) {
   return typeof w === 'number' && Number.isFinite(w) ? w : 0;
 }
 
-const byRank = (a, b) => a.tier - b.tier || b.weight - a.weight || a.name.length - b.name.length;
+// Length last, as a stand-in for "how much of the match the query covered". For a
+// tag hit that's the tag's length, not the shortcode's — the shortcode isn't what
+// matched. Name hits carry no tag, so the term is a no-op for them.
+const byRank = (a, b) => a.tier - b.tier || b.weight - a.weight
+  || (a.tag?.length || 0) - (b.tag?.length || 0) || a.name.length - b.name.length;
 
 // Shortcode names matching `query`, best first, for the autocomplete popup.
 // Tiers (exact -> prefix -> substring) are primary and `weights` (how often the
