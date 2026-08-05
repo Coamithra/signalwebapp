@@ -1564,8 +1564,8 @@ function renderTldrStatus(stage, reason, url) {
   if (!host) return;
   const b = tldrBubble(stage, reason);
   const children = [];
-  if (b.icon === 'warn') children.push(el('span', { class: 'tldr-icon', text: '⚠' }));
-  else if (b.icon === 'spinner') children.push(el('span', { class: 'tldr-spinner' }));
+  if (b.tone === 'warn') children.push(el('span', { class: 'tldr-icon', text: '⚠' }));
+  else if (b.tone === 'work') children.push(el('span', { class: 'tldr-spinner' }));
   children.push(el('span', { class: 'tldr-text', text: b.label }));
   if (b.retry) children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
   if (b.dismiss) {
@@ -1573,7 +1573,7 @@ function renderTldrStatus(stage, reason, url) {
       class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: () => clearTldrFor(state.activeId),
     }));
   }
-  const cls = 'tldr-bubble' + (b.icon === 'warn' ? ' failed' : '') + (stage === 'done' ? ' info' : '');
+  const cls = 'tldr-bubble' + (b.tone === 'warn' ? ' failed' : b.tone === 'info' ? ' info' : '');
   host.replaceChildren(el('div', { class: cls }, children));
   host.classList.remove('hidden');
   scrollToBottom(); // follow it into view only if already near the bottom

@@ -288,16 +288,16 @@ test('retryErrorReason', () => {
 
 // ---------- auto-TLDR status bubble model ----------
 
-test('tldrBubble: working stages spin, with no buttons', () => {
+test('tldrBubble: working stages are work-toned, with no buttons', () => {
   for (const stage of ['fetching', 'summarizing', 'researching']) {
     const b = tldrBubble(stage, undefined);
-    assert.equal(b.icon, 'spinner', stage);
+    assert.equal(b.tone, 'work', stage);
     assert.equal(b.retry, false, stage);
     assert.equal(b.dismiss, false, stage);
     assert.ok(b.label.length > 0, stage);
   }
   // An unknown stage (a newer server) still renders as generic work, not a crash.
-  assert.equal(tldrBubble('someday-a-new-stage', undefined).icon, 'spinner');
+  assert.equal(tldrBubble('someday-a-new-stage', undefined).tone, 'work');
 });
 
 test('tldrBubble: retrying folds the reason into the label', () => {
@@ -307,7 +307,7 @@ test('tldrBubble: retrying folds the reason into the label', () => {
 
 test('tldrBubble: failed warns and offers Retry + dismiss', () => {
   const b = tldrBubble('failed', 'no transcript available');
-  assert.equal(b.icon, 'warn');
+  assert.equal(b.tone, 'warn');
   assert.equal(b.retry, true);
   assert.equal(b.dismiss, true);
   assert.ok(b.label.includes('no transcript available'));
@@ -315,7 +315,7 @@ test('tldrBubble: failed warns and offers Retry + dismiss', () => {
 
 test('tldrBubble: done-with-reason is the quiet sent-without-context notice', () => {
   const b = tldrBubble('done', 'research timed out');
-  assert.equal(b.icon, null); // quieter than failed: the TLDR itself made it out
+  assert.equal(b.tone, 'info'); // quieter than failed: the TLDR itself made it out
   assert.equal(b.dismiss, true);
   // Never a Retry: the summary is already in the chat, a retry would duplicate it.
   assert.equal(b.retry, false);

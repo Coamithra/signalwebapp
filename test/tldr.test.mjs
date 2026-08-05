@@ -401,16 +401,20 @@ for (const [i, evil] of splices.entries()) {
   });
 }
 
-test('parseContext accepts either field and rejects an empty pair', () => {
+test('parseContext accepts either field; null strictly means "no JSON at all"', () => {
   assert.deepEqual(parseContext('{"channel": "A channel.", "claims": "Checks out."}'),
     { channel: 'A channel.', claims: 'Checks out.' });
   assert.deepEqual(parseContext('{"channel": "A channel.", "claims": ""}'),
     { channel: 'A channel.', claims: '' });
   assert.deepEqual(parseContext('{"claims": "Disputed."}'), { channel: '', claims: 'Disputed.' });
-  // both empty is the documented "nothing worth saying" outcome, not a block
-  assert.equal(parseContext('{"channel": "", "claims": ""}'), null);
-  assert.equal(parseContext('{"channel": "   "}'), null);
+  // Both-empty parses fine and comes back as-is: "nothing worth saying" is the
+  // CALLER's verdict. Only a reply with no parseable object is null -- that is
+  // a failed run, and folding it into the empty case is what once made a
+  // never-searched run indistinguishable from a music video.
+  assert.deepEqual(parseContext('{"channel": "", "claims": ""}'), { channel: '', claims: '' });
+  assert.deepEqual(parseContext('{"channel": "   "}'), { channel: '', claims: '' });
   assert.equal(parseContext('not json'), null);
+  assert.equal(parseContext('I could not research this, sorry.'), null);
   assert.equal(parseContext(''), null);
 });
 

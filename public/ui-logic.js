@@ -246,9 +246,11 @@ export function retryErrorReason(msg) {
   return msg || 'retry failed';
 }
 
-// What the status bubble shows for a pipeline stage: the label and which
-// affordances it gets. app.js only paints this. `icon` is 'spinner' (working),
-// 'warn' (failed) or null (the muted done-notice, which needs no glyph).
+// What the status bubble shows for a pipeline stage: the label, a tone, and
+// which buttons it gets. app.js only paints this -- `tone` alone drives both
+// the glyph and the bubble class there ('work' = spinner, 'warn' = the danger
+// look with an icon, 'info' = the quieter no-glyph notice), so adding a stage
+// means touching this function, not the renderer.
 //
 // 'done' only reaches this with a reason attached -- it means the TLDR was SENT
 // but its "For context" block was lost to a failure (a clean done clears the
@@ -258,13 +260,13 @@ export function tldrBubble(stage, reason) {
   if (stage === 'done') {
     return {
       label: `Sent without its "For context" block: ${reason || 'research failed'}`,
-      icon: null, retry: false, dismiss: true,
+      tone: 'info', retry: false, dismiss: true,
     };
   }
   if (stage === 'failed') {
     return {
       label: `Auto-TLDR failed${reason ? `: ${reason}` : ''}`,
-      icon: 'warn', retry: true, dismiss: true,
+      tone: 'warn', retry: true, dismiss: true,
     };
   }
   const label =
@@ -273,5 +275,5 @@ export function tldrBubble(stage, reason) {
     : stage === 'researching' ? 'Researching the channel…'
     : stage === 'retrying' ? `Retrying${reason ? ` (${reason})` : ''}…`
     : 'Working…';
-  return { label, icon: 'spinner', retry: false, dismiss: false };
+  return { label, tone: 'work', retry: false, dismiss: false };
 }

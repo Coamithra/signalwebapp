@@ -600,8 +600,13 @@ export function buildContextPrompt({ author, title, summary }) {
   return { system: CONTEXT_SYSTEM_PROMPT, user: lines.join('\n') };
 }
 
-// Same shape as parseReply, but both fields are optional: a video with nothing
-// researchable is a normal outcome, not a failure.
+// Same shape as parseReply, but null means only "the reply did not contain a
+// JSON object at all". A parsed object with both fields empty comes back as-is:
+// that is the documented "nothing worth saying" outcome, and researchContext --
+// not this parser -- decides it means no block. Collapsing the two into one null
+// is exactly what made the --allowedTools regression (a run that never searched
+// and answered in prose) indistinguishable from a music video with nothing to
+// fact-check.
 export function parseContext(text) {
   const s = String(text ?? '').trim();
   const start = s.indexOf('{');
@@ -611,10 +616,7 @@ export function parseContext(text) {
   try { obj = JSON.parse(s.slice(start, end + 1)); } catch { return null; }
   if (!obj || typeof obj !== 'object') return null;
   const str = (v) => (typeof v === 'string' ? v.trim() : '');
-  const channel = str(obj.channel);
-  const claims = str(obj.claims);
-  if (!channel && !claims) return null;
-  return { channel, claims };
+  return { channel: str(obj.channel), claims: str(obj.claims) };
 }
 
 // Run one summary at a time, process-wide.
@@ -642,7 +644,12 @@ async function researchContext({ bin, model, effort, author, title, summary }) {
     timeoutMs: CONTEXT_TIMEOUT_MS,
     tools: CONTEXT_TOOLS,
   });
-  return parseContext(text);
+  const ctx = parseContext(text);
+  // A reply with no parseable JSON object is a FAILED run, not a quiet "nothing
+  // to report" -- throw so it reaches friendlyContextReason and the done-notice.
+  // Only a schema-compliant reply with both fields empty stays silent.
+  if (!ctx) throw new Error('claude-bad-output');
+  return (ctx.channel || ctx.claims) ? ctx : null;
 }
 
 // Ask Claude for a short TLDR of the transcript, retrying transient failures with
