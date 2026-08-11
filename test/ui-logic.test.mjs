@@ -103,9 +103,11 @@ test('kindForType / iconForKind', () => {
 
 // ---------- emoji frequency: parsing ----------
 
+// Counts are keyed by emoji, not by the shortcode picked to get there.
 const empty = (freq) => {
   assert.deepEqual({ ...freq.counts }, {});
   assert.equal(freq.picks, 0);
+  assert.equal(freq.migrated, false);
 };
 
 test('parseEmojiFreq: nothing stored', () => {
@@ -129,14 +131,73 @@ test('parseEmojiFreq: junk degrades to the empty state instead of throwing', () 
 test('parseEmojiFreq: only finite positive numeric scores survive', () => {
   const raw = JSON.stringify({
     counts: {
-      good: 3, half: 0.5,
+      '😀': 3, '👍': 0.5,
       zero: 0, negative: -2, str: '5', nan: null, obj: {}, arr: [],
     },
     picks: 7,
   });
   const { counts, picks } = parseEmojiFreq(raw);
-  assert.deepEqual({ ...counts }, { good: 3, half: 0.5 });
+  assert.deepEqual({ ...counts }, { '😀': 3, '👍': 0.5 });
   assert.equal(picks, 7);
+});
+
+// ---------- emoji frequency: migrating the old name-keyed counts ----------
+
+// Stands in for format.js's emojiForShortcode: resolves a shortcode, and
+// returns undefined for anything else (including an emoji, which is never a
+// shortcode — that invariant is what makes the migration idempotent).
+const NAMES = { hankey: '💩', poop: '💩', thumbsup: '👍' };
+const lookup = (name) => (Object.hasOwn(NAMES, name) ? NAMES[name] : undefined);
+
+// A deliberately sloppy one, to prove the parse doesn't trust what it's handed:
+// a bare lookup walks the prototype chain and answers "toString" with a function.
+const sloppyLookup = (name) => NAMES[name];
+
+test('parseEmojiFreq: old name-keyed counts are re-keyed to the emoji', () => {
+  const freq = parseEmojiFreq('{"counts":{"thumbsup":4},"picks":9}', lookup);
+  assert.deepEqual({ ...freq.counts }, { '👍': 4 });
+  assert.equal(freq.picks, 9, 'the decay counter is not disturbed');
+  assert.ok(freq.migrated);
+});
+
+test('parseEmojiFreq: names that share an emoji have their scores summed', () => {
+  // The whole point of the card: picks split across :hankey:/:poop: are one
+  // emoji's worth of favouritism, not two half-hearted ones.
+  const { counts } = parseEmojiFreq('{"counts":{"hankey":3,"poop":2}}', lookup);
+  assert.deepEqual({ ...counts }, { '💩': 5 });
+});
+
+test('parseEmojiFreq: migration is idempotent — a second pass changes nothing', () => {
+  const once = parseEmojiFreq('{"counts":{"hankey":3,"poop":2},"picks":9}', lookup);
+  const twice = parseEmojiFreq(JSON.stringify(once), lookup);
+  assert.deepEqual({ ...twice.counts }, { ...once.counts });
+  assert.equal(twice.picks, 9);
+  assert.equal(twice.migrated, false, 'nothing left to convert -> no re-write');
+});
+
+test('parseEmojiFreq: keys the lookup cannot resolve are left alone', () => {
+  // Already-emoji keys and a stale/hand-edited name both fall here: neither is
+  // dropped, and neither counts as a migration.
+  const freq = parseEmojiFreq('{"counts":{"👍":2,"no_such_shortcode":1}}', lookup);
+  assert.deepEqual({ ...freq.counts }, { '👍': 2, no_such_shortcode: 1 });
+  assert.equal(freq.migrated, false);
+});
+
+test('parseEmojiFreq: without a lookup nothing is migrated', () => {
+  const freq = parseEmojiFreq('{"counts":{"hankey":3}}');
+  assert.deepEqual({ ...freq.counts }, { hankey: 3 });
+  assert.equal(freq.migrated, false);
+});
+
+test('parseEmojiFreq: migration keeps the junk filter and the null prototype', () => {
+  const freq = parseEmojiFreq('{"counts":{"poop":"lots","hankey":2,"toString":3}}', lookup);
+  assert.equal(Object.getPrototypeOf(freq.counts), null);
+  assert.deepEqual({ ...freq.counts }, { '💩': 2, toString: 3 });
+});
+
+test('parseEmojiFreq: only a string from the lookup is used as a key', () => {
+  const freq = parseEmojiFreq('{"counts":{"hankey":2,"toString":3}}', sloppyLookup);
+  assert.deepEqual({ ...freq.counts }, { '💩': 2, toString: 3 });
 });
 
 test('parseEmojiFreq: picks is sanitized', () => {
@@ -158,21 +219,30 @@ test('parseEmojiFreq: counts has no prototype, so a stored "__proto__" key is in
 
 const freqOf = (counts, picks = 0) => ({ counts: Object.assign(Object.create(null), counts), picks });
 
-test('nextEmojiFreq: bumps the picked name and advances picks', () => {
-  const freq = freqOf({ smile: 2 }, 3);
-  const snap = nextEmojiFreq(freq, 'smile');
+test('nextEmojiFreq: bumps the picked emoji and advances picks', () => {
+  const freq = freqOf({ '😀': 2 }, 3);
+  const snap = nextEmojiFreq(freq, '😀');
   assert.equal(snap.picks, 4);
-  assert.deepEqual({ ...snap.counts }, { smile: 3 });
+  assert.deepEqual({ ...snap.counts }, { '😀': 3 });
   // counts is mutated in place: the live ranking must see the new score without
   // a reload. picks deliberately is NOT — the caller writes that back.
-  assert.equal(freq.counts.smile, 3);
+  assert.equal(freq.counts['😀'], 3);
   assert.equal(freq.picks, 3);
 });
 
-test('nextEmojiFreq: a new name starts at 1', () => {
-  const snap = nextEmojiFreq(freqOf({}), 'thumbs_up');
-  assert.deepEqual({ ...snap.counts }, { thumbs_up: 1 });
+test('nextEmojiFreq: a new emoji starts at 1', () => {
+  const snap = nextEmojiFreq(freqOf({}), '👍');
+  assert.deepEqual({ ...snap.counts }, { '👍': 1 });
   assert.equal(snap.picks, 1);
+});
+
+test('nextEmojiFreq: every shortcode for one emoji feeds the same score', () => {
+  // :hankey: then :poop: is two picks of 💩, not one each of two spellings —
+  // app.js passes the row's emoji, whichever name it happened to be listed under.
+  const freq = freqOf({});
+  nextEmojiFreq(freq, '💩');
+  const snap = nextEmojiFreq(freq, '💩');
+  assert.deepEqual({ ...snap.counts }, { '💩': 2 });
 });
 
 test('nextEmojiFreq: the snapshot counts are null-prototype, like parseEmojiFreq\'s', () => {
@@ -183,47 +253,49 @@ test('nextEmojiFreq: the snapshot counts are null-prototype, like parseEmojiFreq
 
 test('nextEmojiFreq: decays exactly on the halflife boundary, not before', () => {
   // One short of the boundary: no halving.
-  const just = nextEmojiFreq(freqOf({ a: 8 }, EMOJI_FREQ_HALFLIFE - 2), 'a');
+  const just = nextEmojiFreq(freqOf({ '😀': 8 }, EMOJI_FREQ_HALFLIFE - 2), '😀');
   assert.equal(just.picks, EMOJI_FREQ_HALFLIFE - 1);
-  assert.deepEqual({ ...just.counts }, { a: 9 });
+  assert.deepEqual({ ...just.counts }, { '😀': 9 });
 
-  // On the boundary: everything halves (including the name just bumped) and
+  // On the boundary: everything halves (including the emoji just bumped) and
   // the counter resets.
-  const hit = nextEmojiFreq(freqOf({ a: 8, b: 4 }, EMOJI_FREQ_HALFLIFE - 1), 'a');
+  const hit = nextEmojiFreq(freqOf({ '😀': 8, '👍': 4 }, EMOJI_FREQ_HALFLIFE - 1), '😀');
   assert.equal(hit.picks, 0);
-  assert.deepEqual({ ...hit.counts }, { a: 4.5, b: 2 });
+  assert.deepEqual({ ...hit.counts }, { '😀': 4.5, '👍': 2 });
 });
 
 test('nextEmojiFreq: decay prunes anything that falls under the floor', () => {
   const faint = EMOJI_FREQ_FLOOR * 1.5;      // halves to below the floor -> dropped
   const sturdy = EMOJI_FREQ_FLOOR * 2;       // halves to exactly the floor -> kept
-  const freq = freqOf({ faint, sturdy }, EMOJI_FREQ_HALFLIFE - 1);
-  const snap = nextEmojiFreq(freq, 'fresh');
-  assert.deepEqual(Object.keys(snap.counts).sort(), ['fresh', 'sturdy']);
-  assert.equal(snap.counts.sturdy, EMOJI_FREQ_FLOOR);
-  assert.equal(snap.counts.fresh, 0.5);
-  assert.ok(!('faint' in freq.counts), 'pruned from the live object too');
+  const freq = freqOf({ '😀': faint, '👍': sturdy }, EMOJI_FREQ_HALFLIFE - 1);
+  const snap = nextEmojiFreq(freq, '🎉');
+  assert.deepEqual(Object.keys(snap.counts).sort(), ['🎉', '👍'].sort());
+  assert.equal(snap.counts['👍'], EMOJI_FREQ_FLOOR);
+  assert.equal(snap.counts['🎉'], 0.5);
+  assert.ok(!('😀' in freq.counts), 'pruned from the live object too');
 });
 
 test('nextEmojiFreq: the stored snapshot keeps only the top EMOJI_FREQ_MAX, highest first', () => {
   const counts = {};
+  // Synthetic keys: the cap doesn't care what a key is, only how many there are.
   for (let i = 0; i < EMOJI_FREQ_MAX + 25; i++) counts[`e${i}`] = i + 1; // e0 weakest
   const freq = freqOf(counts);
   const snap = nextEmojiFreq(freq, 'e0');
-  const names = Object.keys(snap.counts);
-  assert.equal(names.length, EMOJI_FREQ_MAX);
-  assert.equal(names[0], `e${EMOJI_FREQ_MAX + 24}`, 'strongest first');
-  assert.ok(!names.includes('e0'), 'the weakest is dropped from the snapshot');
+  const keys = Object.keys(snap.counts);
+  assert.equal(keys.length, EMOJI_FREQ_MAX);
+  assert.equal(keys[0], `e${EMOJI_FREQ_MAX + 24}`, 'strongest first');
+  assert.ok(!keys.includes('e0'), 'the weakest is dropped from the snapshot');
   // The cap applies to what gets persisted, not to the in-memory ranking, which
   // keeps everything it had (plus nothing new — 'e0' was already present).
   assert.equal(Object.keys(freq.counts).length, EMOJI_FREQ_MAX + 25);
 });
 
 test('nextEmojiFreq: the snapshot survives a JSON round-trip back through parseEmojiFreq', () => {
-  const snap = nextEmojiFreq(freqOf({ smile: 2 }, 5), 'wave');
-  const back = parseEmojiFreq(JSON.stringify(snap));
-  assert.deepEqual({ ...back.counts }, { smile: 2, wave: 1 });
+  const snap = nextEmojiFreq(freqOf({ '😀': 2 }, 5), '👋');
+  const back = parseEmojiFreq(JSON.stringify(snap), lookup);
+  assert.deepEqual({ ...back.counts }, { '😀': 2, '👋': 1 });
   assert.equal(back.picks, 6);
+  assert.equal(back.migrated, false, 'a freshly written snapshot needs no conversion');
 });
 
 // ---------- /gif ----------

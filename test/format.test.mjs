@@ -167,16 +167,30 @@ test('matchShortcodes ranks exact, then prefix, then substring', () => {
 });
 
 test('pick weights break ties WITHIN a tier, never across one', () => {
-  // A favourite outranks its siblings...
-  assert.deepEqual(matchShortcodes('shr', 8, { shrimp: 9 }).map((m) => m.name).slice(0, 2),
+  // Weights are keyed by the EMOJI, not the shortcode. A favourite outranks its
+  // siblings...
+  assert.deepEqual(matchShortcodes('shr', 8, { '🦐': 9 }).map((m) => m.name).slice(0, 2),
     ['shrimp', 'shrug']);
 
   // ...but never jumps a whole tier: a substring match stays below every prefix
   // match no matter how often it's been picked. This is the invariant that keeps
   // the list predictable.
-  const heavy = matchShortcodes('shr', 8, { mushroom: 9999 }).map((m) => m.name);
+  const heavy = matchShortcodes('shr', 8, { '🍄': 9999 }).map((m) => m.name);
   assert.deepEqual(heavy.slice(0, 2), ['shrug', 'shrimp']);
   assert.ok(heavy.indexOf('mushroom') > heavy.indexOf('shrimp'));
+});
+
+test('a weight follows the emoji, not the spelling that earned it', () => {
+  // The card's bug: 👍 is listed as ":thumbsup:" for one query and ":thumbs_up:"
+  // for another, so counting picks per shortcode split them. One score, keyed by
+  // the glyph, lifts it under every spelling — and a shortcode key does nothing.
+  // (Still only within its tier — ":up" reaches 👍 by substring, so it climbs
+  // past the other substring hits and stops under the prefix ones.)
+  const rank = (weights) => matchShortcodes('up', 100, weights).findIndex((m) => m.emoji === '👍');
+  const flat = rank({});
+  assert.ok(flat > 0, 'needs something above it to climb past');
+  assert.ok(rank({ '👍': 9999 }) < flat, 'the emoji weight lifts it whatever name the row uses');
+  assert.equal(rank({ thumbsup: 9999, thumbs_up: 9999, '+1': 9999 }), flat, 'name keys rank nothing');
 });
 
 test('synonyms find an emoji whose name shares no letters with the query', () => {
@@ -208,7 +222,7 @@ test('a synonym never outranks a real name match', () => {
   assert.ok(firstTag > lastName, 'tags must all sort below names');
 
   // Not even a heavily-picked favourite can lift a tag over a name.
-  const weighted = matchShortcodes('cook', 100, { hocho: 9999 });
+  const weighted = matchShortcodes('cook', 100, { '🔪': 9999 });
   assert.ok(weighted.findIndex((m) => m.name === 'hocho') > weighted.map((m) => m.tag === undefined).lastIndexOf(true));
 
   // Within the tag tier the same exact -> prefix -> substring ladder applies.
@@ -229,8 +243,8 @@ test('hand-edited weights cannot poison the ranking', () => {
   // sb.emojiFreq is localStorage: a user can put anything in it.
   const clean = matchShortcodes('shr').map((m) => m.name);
   for (const junk of [
-    { __proto__: 500 }, { constructor: 500 }, { shrug: 'lots' },
-    { shrug: NaN }, { shrug: null }, { toString: 500 },
+    { __proto__: 500 }, { constructor: 500 }, { '🤷': 'lots' },
+    { '🤷': NaN }, { '🤷': null }, { toString: 500 },
   ]) {
     assert.deepEqual(matchShortcodes('shr', 8, junk).map((m) => m.name), clean);
   }

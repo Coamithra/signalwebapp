@@ -42,6 +42,10 @@ const emojiFor = (name) => {
   return Object.hasOwn(EMOJI_SHORTCODES, key) ? EMOJI_SHORTCODES[key] : undefined;
 };
 
+// The same lookup for app.js, which needs it to migrate the old name-keyed
+// pick counts (see parseEmojiFreq) — never a bare EMOJI_SHORTCODES[name].
+export { emojiFor as emojiForShortcode };
+
 // ":shrug:" -> 🤷, using Signal's own shortcode table. A backslash escapes it
 // (`\:shrug:` sends the literal text). Runs before the markdown pass so ranges
 // are measured against the final text.
@@ -84,11 +88,14 @@ const tagsFor = (name) => (Object.hasOwn(EMOJI_TAGS, name) ? EMOJI_TAGS[name] : 
 let sortedNames = null;
 let sortedTagNames = null;
 
-// `weights` comes out of localStorage, so it can carry anything a user has
-// hand-edited in — including "__proto__". hasOwn keeps a junk value from
-// ranking, and a non-number would poison the sort.
-function weightOf(weights, name) {
-  const w = Object.hasOwn(weights, name) ? weights[name] : 0;
+// How often the user has picked an emoji. Keyed by the EMOJI rather than the
+// shortcode, because one glyph answers to several names (and to its synonyms)
+// and results are deduped by emoji, so name-keyed picks would split across
+// spellings. `weights` comes out of localStorage, so it can carry anything a
+// user has hand-edited in — including "__proto__". hasOwn keeps a junk value
+// from ranking, and a non-number would poison the sort.
+function weightOf(weights, emoji) {
+  const w = Object.hasOwn(weights, emoji) ? weights[emoji] : 0;
   return typeof w === 'number' && Number.isFinite(w) ? w : 0;
 }
 
@@ -123,17 +130,19 @@ export function matchShortcodes(query, limit = 8, weights = {}) {
   for (const name of sortedNames) {
     const at = name.indexOf(q);
     if (at < 0) continue;
-    byName.push({ name, tier: name === q ? 0 : at === 0 ? 1 : 2, weight: weightOf(weights, name) });
+    // Resolved here rather than in take(), because the weight is keyed by it.
+    const emoji = emojiFor(name);
+    if (emoji === undefined) continue;
+    byName.push({ name, emoji, tier: name === q ? 0 : at === 0 ? 1 : 2, weight: weightOf(weights, emoji) });
   }
   byName.sort(byRank);
 
   const out = [];
   const seen = new Set();
   const take = (scored) => {
-    for (const { name, tag } of scored) {
+    for (const { name, emoji, tag } of scored) {
       if (out.length >= limit) return;
-      const emoji = emojiFor(name);
-      if (emoji === undefined || seen.has(emoji)) continue;
+      if (seen.has(emoji)) continue;
       seen.add(emoji);
       out.push(tag ? { name, emoji, tag } : { name, emoji });
     }
@@ -157,7 +166,10 @@ export function matchShortcodes(query, limit = 8, weights = {}) {
       // covers most of it — "chef" over "chef_hat" for the query "chef".
       if (!best || tier < best.tier || (tier === best.tier && tag.length < best.tag.length)) best = { tier, tag };
     }
-    if (best) byTag.push({ name, tier: best.tier, tag: best.tag, weight: weightOf(weights, name) });
+    if (!best) continue;
+    const emoji = emojiFor(name);
+    if (emoji === undefined) continue;
+    byTag.push({ name, emoji, tier: best.tier, tag: best.tag, weight: weightOf(weights, emoji) });
   }
   byTag.sort(byRank);
   take(byTag);

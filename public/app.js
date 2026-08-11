@@ -3,7 +3,7 @@
 
 import {
   parseFormatting, toMarkdown, renderFormatted,
-  shortcodeBefore, shortcodeQueryBefore, matchShortcodes,
+  shortcodeBefore, shortcodeQueryBefore, matchShortcodes, emojiForShortcode,
 } from './format.js';
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
@@ -1141,21 +1141,31 @@ function emojiFreq() {
   return emojiFreqCache;
 }
 
-// -> { counts: {name: score}, picks: number-since-last-decay }
-function readEmojiFreq() {
-  try {
-    return parseEmojiFreq(localStorage.getItem(EMOJI_FREQ_KEY));
-  } catch { return { counts: Object.create(null), picks: 0 }; }
+// One write shape for both callers: exactly what parseEmojiFreq reads back.
+function saveEmojiFreq({ counts, picks }) {
+  try { localStorage.setItem(EMOJI_FREQ_KEY, JSON.stringify({ counts, picks })); } catch { /* full or disabled */ }
 }
 
-function bumpEmojiFreq(name) {
+// -> { counts: {emoji: score}, picks: number-since-last-decay }
+function readEmojiFreq() {
+  let freq;
+  try {
+    freq = parseEmojiFreq(localStorage.getItem(EMOJI_FREQ_KEY), emojiForShortcode);
+  } catch { return { counts: Object.create(null), picks: 0 }; }
+  // Counts written before the switch to emoji keys were converted on the way
+  // in; persist that once so the conversion doesn't re-run on every load.
+  if (freq.migrated) saveEmojiFreq(freq);
+  return freq;
+}
+
+function bumpEmojiFreq(emoji) {
   const freq = emojiFreq();
-  const snap = nextEmojiFreq(freq, name);
+  const snap = nextEmojiFreq(freq, emoji);
   // nextEmojiFreq mutates freq.counts but deliberately not freq.picks — the
   // caller owns that. Without this the cached pick counter never advances, so
   // the decay would only ever fire on the first pick after a page load.
   freq.picks = snap.picks;
-  try { localStorage.setItem(EMOJI_FREQ_KEY, JSON.stringify(snap)); } catch { /* full or disabled */ }
+  saveEmojiFreq(snap);
 }
 
 let emojiPop = null;      // { node, list, items, index, start } while open
@@ -1283,7 +1293,7 @@ function pickEmoji(i) {
   closeEmojiPop();
   if (!q) return;
   replaceRange(input, q.start, input.selectionStart, item.emoji);
-  bumpEmojiFreq(item.name);
+  bumpEmojiFreq(item.emoji);
   autoGrow();
   updateSendEnabled();
 }
