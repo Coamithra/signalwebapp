@@ -268,6 +268,27 @@ export function retryErrorReason(msg) {
   return msg || 'retry failed';
 }
 
+// What the thread menu says under the auto-TLDR toggle.
+//
+// Returns either `{ note }` (all well) or a `{ before, code, after }` hint, the
+// one `<code>` span being the binary name. The server only ever reports the two
+// tokens it derived from its own error tags, so an unusable CLI it has not yet
+// diagnosed -- the boot state, before any run has happened -- falls back to
+// naming both requirements rather than guessing which one is missing.
+export function tldrHint(data) {
+  if (data && data.configured) {
+    return { note: 'YouTube links you post here get a short auto-summary.' };
+  }
+  const reason = data && data.reason;
+  if (reason === 'auth') {
+    return { before: 'The ', code: 'claude', after: ' CLI on the server is not logged in.' };
+  }
+  if (reason === 'not-found') {
+    return { before: 'The ', code: 'claude', after: ' CLI was not found on the server’s PATH.' };
+  }
+  return { before: 'Needs the ', code: 'claude', after: ' CLI on the server’s PATH, logged in.' };
+}
+
 // What the status bubble shows for a pipeline stage: the label, a tone, and
 // which buttons it gets. app.js only paints this -- `tone` alone drives both
 // the glyph and the bubble class there ('work' = spinner, 'warn' = the danger

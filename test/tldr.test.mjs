@@ -10,6 +10,7 @@ import {
   buildPrompt, SYSTEM_PROMPT, defangUrls, clampSummary, splitQuoteLine, parseReply,
   formatTldr, friendlyReason, friendlyContextReason, MAX_TRANSCRIPT_CHARS,
   buildContextPrompt, CONTEXT_SYSTEM_PROMPT, parseContext, MAX_CONTEXT_CHARS,
+  availabilityError, shouldAttempt, AVAILABILITY_RECHECK_MS,
 } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
 
@@ -510,4 +511,48 @@ test('context failure reasons are fixed phrases, never the raw error text', () =
   const leaky = new Error('spawn failed at C:\\Users\\someone\\claude with transcript text');
   assert.equal(friendlyContextReason(leaky), 'research failed');
   assert.equal(friendlyContextReason(undefined), 'research failed');
+});
+
+// --- CLI availability ------------------------------------------------------
+//
+// `claude --version` exits 0 for a logged-out CLI, so a boot probe alone once
+// reported "configured" while every summary died at claude-auth. Availability is
+// now driven by real runs, and these two helpers are the whole decision.
+
+test('only a broken install or a logged-out CLI flips availability', () => {
+  assert.equal(availabilityError(new Error('claude-not-found')), 'not-found');
+  assert.equal(availabilityError(new Error('claude-auth')), 'auth');
+});
+
+test('a run-specific failure says nothing about the install', () => {
+  // Flipping on any of these would hide the toggle behind a "not configured"
+  // hint over one slow or unlucky video.
+  for (const msg of [
+    'claude-timeout', 'claude-limit', 'claude-refusal', 'claude-bad-output',
+    'claude-no-text:empty', 'claude-exit 1', 'claude-exit error_max_turns',
+  ]) {
+    assert.equal(availabilityError(new Error(msg)), null, msg);
+  }
+  assert.equal(availabilityError(undefined), null);
+  assert.equal(availabilityError(new Error('')), null);
+});
+
+test('an unusable CLI is gated off, but only until the recheck window passes', () => {
+  const at = 1_000_000;
+  assert.equal(shouldAttempt({ available: true, unavailableAt: 0, now: at }), true);
+  // Latched: nothing runs while the window is open...
+  assert.equal(shouldAttempt({ available: false, unavailableAt: at, now: at }), false);
+  assert.equal(shouldAttempt({
+    available: false, unavailableAt: at, now: at + AVAILABILITY_RECHECK_MS - 1,
+  }), false);
+  // ...then exactly one attempt is allowed through, and that run re-probes for
+  // real -- which is how a CLI logged into after boot recovers with no restart.
+  assert.equal(shouldAttempt({
+    available: false, unavailableAt: at, now: at + AVAILABILITY_RECHECK_MS,
+  }), true);
+  assert.equal(shouldAttempt({
+    available: false, unavailableAt: at, now: at + AVAILABILITY_RECHECK_MS * 10,
+  }), true);
+  // An available CLI is never gated, whatever the stale timestamp says.
+  assert.equal(shouldAttempt({ available: true, unavailableAt: at, now: at }), true);
 });

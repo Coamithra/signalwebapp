@@ -555,7 +555,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, result);
     }
 
-    // /api/conversations/:id/tldr   GET -> {enabled, configured}; POST {enabled} -> set
+    // /api/conversations/:id/tldr   GET -> {enabled, configured, reason?}; POST {enabled} -> set
     // Pure server state (no bridge call), so the per-chat toggle works even when
     // Signal is unreachable.
     m = pathname.match(/^\/api\/conversations\/([^/]+)\/tldr$/);
@@ -567,7 +567,15 @@ const server = http.createServer(async (req, res) => {
         catch { return sendJson(res, 400, { error: 'invalid-body' }); }
         tldr.setEnabled(id, !!body.enabled);
       }
-      return sendJson(res, 200, { enabled: tldr.isEnabled(id), configured: tldr.configured() });
+      // `reason` is one of two fixed tokens ('not-found' / 'auth') chosen from
+      // our own error tags, never CLI output, so the hint can say which of the
+      // two things is actually wrong.
+      const reason = tldr.unavailableReason();
+      return sendJson(res, 200, {
+        enabled: tldr.isEnabled(id),
+        configured: tldr.configured(),
+        ...(reason ? { reason } : {}),
+      });
     }
 
     // /api/conversations/:id/tldr/retry   POST { url } -> re-run that link's summary

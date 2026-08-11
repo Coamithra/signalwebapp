@@ -399,6 +399,26 @@ evaluate must target the isolated context's id.
   when you reopen a chat mid-run; it's cleared on a page reload / server restart
   (no persisted log). A sidebar / cross-conversation indicator is still out of
   scope.
+- **Is the CLI usable? — `--version` can prove absence, never login.** `claude --version`
+  exits 0 for a CLI that is installed but logged **out**, so the boot probe alone once
+  reported "configured" while every summary died at `claude-auth`. Availability is therefore
+  driven by **real runs**: `noteRunOutcome` in [src/tldr.js](src/tldr.js) lowers `available`
+  when a run fails with one of the two errors that mean the *install* is broken
+  (`availabilityError` -> `'not-found'` / `'auth'`) and raises it when any run succeeds.
+  Everything else — a timeout, a usage limit, a refusal, an empty reply, a bad `TLDR_MODEL` —
+  says something about that one request and must **not** move the flag, or a single slow video
+  would hide the toggle behind a "not configured" hint. The boot `probe()` is the only other
+  writer and may only **lower**; never let it raise, because it cannot see login state.
+  Recovery needs no restart: `shouldAttempt` gates the watcher, so an unusable CLI is idle for
+  `AVAILABILITY_RECHECK_MS` (10 min) and then gets **one** attempt through — the run *is* the
+  re-probe, which is why there is no timer and no extra probe spawn. `retry()` is not gated at
+  all (it's the explicit user action, and so the natural "I just logged in" path; a still-broken
+  CLI reports itself truthfully in the bubble within seconds). The reason rides out to the UI on
+  `GET/POST /api/conversations/:id/tldr` as `{enabled, configured, reason?}`, where `reason` is
+  one of those same two fixed tokens — never CLI output, the same sanitization discipline as
+  `friendlyReason` — and `tldrHint` in [public/ui-logic.js](public/ui-logic.js) turns it into
+  the menu hint, falling back to naming both requirements when the server has not diagnosed
+  which one is missing.
 
 ## Conventions
 
