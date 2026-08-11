@@ -160,6 +160,11 @@ export function iconForKind(kind) {
 // them. Per-browser and best-effort — localStorage can be full, disabled, or
 // hand-edited, so every read is defensive and every write can fail silently.
 //
+// Counts are keyed by the EMOJI, not by the shortcode that produced it: one
+// glyph answers to several names (:hankey:/:poop:/:shit:) plus its synonyms,
+// and the row a match is listed under changes with the query, so name-keyed
+// picks would split across spellings and never accumulate.
+//
 // Counts DECAY: every EMOJI_FREQ_HALFLIFE picks, every score is halved. A
 // phase you go through fades out on its own over the next couple of hundred
 // picks instead of ranking forever, while something you still use keeps
@@ -173,23 +178,40 @@ export const EMOJI_FREQ_FLOOR = 0.05;    // decayed below this -> forgotten enti
 // state. Takes the string rather than reading storage itself, so this stays
 // browser-free; anything malformed — bad JSON, an array, a hand-edited value —
 // degrades to the empty state rather than throwing at the caller.
-// -> { counts: {name: score}, picks: number-since-last-decay }
-export function parseEmojiFreq(rawJson) {
+//
+// `emojiForName` (optional) migrates counts written before the switch to
+// emoji keys: any key it resolves is re-keyed to that emoji, summing the ones
+// that collide (:hankey: 3 + :poop: 2 -> 💩 5). It needs no version flag and is
+// safe to re-run — no emoji is itself a shortcode, so a migrated key never
+// resolves a second time. Keys it can't resolve (already-emoji ones, and any
+// stale hand-edited name) are left alone; they rank nothing and age out through
+// the usual decay. `migrated` says whether anything actually moved, so the
+// caller can write the converted state back once instead of every load.
+// -> { counts: {emoji: score}, picks: number-since-last-decay, migrated }
+export function parseEmojiFreq(rawJson, emojiForName) {
   try {
     const raw = JSON.parse(rawJson || '{}');
     const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw.counts : null;
     const counts = Object.create(null);
+    let migrated = false;
     if (src && typeof src === 'object' && !Array.isArray(src)) {
       for (const [k, v] of Object.entries(src)) {
-        if (typeof v === 'number' && Number.isFinite(v) && v > 0) counts[k] = v;
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) continue;
+        const resolved = emojiForName ? emojiForName(k) : undefined;
+        // A non-string means the lookup walked its prototype chain rather than
+        // resolving a shortcode ("toString" -> a function); key on the original.
+        const emoji = typeof resolved === 'string' && resolved ? resolved : undefined;
+        const key = emoji || k;
+        if (emoji) migrated = true;
+        counts[key] = (counts[key] || 0) + v;
       }
     }
     const picks = Number.isFinite(raw?.picks) && raw.picks >= 0 ? raw.picks : 0;
-    return { counts, picks };
-  } catch { return { counts: Object.create(null), picks: 0 }; }
+    return { counts, picks, migrated };
+  } catch { return { counts: Object.create(null), picks: 0, migrated: false }; }
 }
 
-// Record a pick: bump the name, decay everything on the halflife boundary, and
+// Record a pick: bump the emoji, decay everything on the halflife boundary, and
 // return the snapshot to persist (capped to the top EMOJI_FREQ_MAX).
 //
 // Split responsibility, so read this before adding a caller: `freq.counts` IS
@@ -197,9 +219,9 @@ export function parseEmojiFreq(rawJson) {
 // to show up without a reload — but `freq.picks` is NOT. The new pick count
 // comes back on the snapshot only, and a caller that wants the decay to keep
 // advancing within a session has to write it back itself.
-export function nextEmojiFreq(freq, name) {
+export function nextEmojiFreq(freq, emoji) {
   const counts = freq.counts;
-  counts[name] = (counts[name] || 0) + 1;
+  counts[emoji] = (counts[emoji] || 0) + 1;
 
   let picks = freq.picks + 1;
   if (picks >= EMOJI_FREQ_HALFLIFE) {

@@ -124,7 +124,10 @@ evaluate must target the isolated context's id.
   often unguessable, so `:up` has to find `thumbs_up`. Ranking tiers (exact → prefix →
   substring) are primary and stay primary; a per-browser `localStorage` pick-count
   (`sb.emojiFreq`) only breaks ties *within* a tier, so a prefix match is never buried under
-  a favourite substring one. Those counts **decay** — halved every `EMOJI_FREQ_HALFLIFE`
+  a favourite substring one. Those counts are keyed by the **emoji**, not the shortcode, so a
+  glyph's several names and synonyms all feed one score (old name-keyed data is converted on
+  read by `parseEmojiFreq`'s optional lookup, once and idempotently — no emoji is a shortcode).
+  Those counts **decay** — halved every `EMOJI_FREQ_HALFLIFE`
   picks — so a phase ages out instead of ranking forever. The list is a **hard cap of 8**
   with no scrolling (type another char to narrow). The popup's keys are handled at the top of
   the composer's existing `keydown` listener, so while it's open they win over Enter→send and
