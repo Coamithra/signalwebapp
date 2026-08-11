@@ -108,6 +108,34 @@ function isTransientClaudeError(e) {
   return /^claude-(timeout|bad-output)\b/.test(e.message);
 }
 
+// Does this failure mean the CLI itself is unusable, rather than this one run
+// going wrong? Returns the reason ('not-found' / 'auth') or null.
+//
+// Deliberately narrow, and narrow in the opposite direction to
+// isTransientClaudeError: a timeout, a usage limit, a refusal, an empty reply or
+// a bad --model all say something about the request, not about whether `claude`
+// is installed and logged in. Flipping availability on those would hide the
+// toggle behind a "not configured" hint over a single slow video.
+export function availabilityError(e) {
+  const msg = (e && e.message) || '';
+  if (/^claude-not-found/.test(msg)) return 'not-found';
+  if (/^claude-auth/.test(msg)) return 'auth';
+  return null;
+}
+
+// How long an unusable CLI stays gated off before the pipeline is allowed one
+// more go. The run IS the re-probe (see the `available` comment in createTldr),
+// so this is the cost of recovery-without-a-restart: at most one wasted
+// transcript fetch plus one failing spawn per window.
+export const AVAILABILITY_RECHECK_MS = 10 * 60_000;
+
+// The availability gate, as a pure decision: run when the CLI is believed
+// usable, or when the recheck window since the latching failure has elapsed.
+export function shouldAttempt({ available, unavailableAt, now, cooldownMs = AVAILABILITY_RECHECK_MS }) {
+  if (available) return true;
+  return now - unavailableAt >= cooldownMs;
+}
+
 // Map an internal error to a short, human reason string for the UI status bubble.
 // IMPORTANT: returns only fixed phrases derived from our own error tags -- it
 // must never echo raw stdout/stderr, which can carry transcript text or the
@@ -682,14 +710,58 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
   const processed = new Set(); // `${convId}:${msgId}` we've already handled
   const bootTs = Date.now();
 
-  // Whether the `claude` binary actually resolves. Probed once, asynchronously,
-  // so boot is never blocked on a process spawn; until it answers we assume yes,
-  // which keeps the UI from flashing a "not configured" hint during startup.
+  // Whether the `claude` CLI is actually usable: installed AND logged in.
+  //
+  // `--version` can prove absence, never login -- it exits 0 for a logged-out
+  // CLI, which is why a boot probe alone once reported "configured" while every
+  // summary died at claude-auth. So the only honest probe is a REAL run, and
+  // that is what this tracks: `noteRunOutcome` lowers the flag when a run fails
+  // with an availability error and raises it when one succeeds. The boot probe
+  // below is the single other writer, and it may only LOWER (see its comment).
+  //
+  // Starts optimistic so the UI doesn't flash a "not configured" hint during
+  // startup, and `unavailableAt` stamps the latch so shouldAttempt can let one
+  // run through per recheck window -- a CLI installed or logged into after boot
+  // recovers on its own, with no server restart.
   let available = true;
+  let unavailableAt = 0;
+  let reason = null; // 'not-found' | 'auth' | null -- why it is unusable
+
+  // The outcome of every real `claude` run passes through here. Called with no
+  // argument on success; anything that is not an availability error leaves the
+  // flag exactly as it was (one bad video says nothing about the install).
+  function noteRunOutcome(err) {
+    if (!err) {
+      if (!available) log(`\`${bin}\` is working again — auto-TLDR is live.`);
+      available = true;
+      unavailableAt = 0;
+      reason = null;
+      return;
+    }
+    const kind = availabilityError(err);
+    if (!kind) return;
+    if (available || reason !== kind) {
+      log(kind === 'auth'
+        ? `\`${bin}\` is not logged in — auto-TLDR is idle until it is (per-chat toggle still works).`
+        : `\`${bin}\` not found — auto-TLDR is idle until it is (per-chat toggle still works).`);
+    }
+    available = false;
+    unavailableAt = Date.now();
+    reason = kind;
+  }
+
+  // Boot probe. Asynchronous, so boot is never blocked on a process spawn.
+  //
+  // ⚠️ It may only LOWER `available`, never raise it: `--version` can prove
+  // absence, never login. It runs once, before any real run, so there is no
+  // auth latch for it to clobber -- the guard is there to keep that true if
+  // anyone ever calls it again.
   function probe() {
     execFile(bin, ['--version'], { timeout: 20000, windowsHide: true }, (err, stdout) => {
-      available = !err;
       if (err) {
+        available = false;
+        unavailableAt = Date.now();
+        reason = 'not-found';
         log(`\`${bin}\` not usable (${err.code || err.message}) — auto-TLDR is idle until it is (per-chat toggle still works).`);
       } else {
         log(`using ${String(stdout).trim() || bin} — model ${model}, effort ${effort}`);
@@ -731,7 +803,9 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
         bin, model, effort, transcript: transcript.text, title: transcript.title,
         onRetry: (e) => emit(convId, 'retrying', found.url, friendlyReason(e)),
       }));
+      noteRunOutcome();
     } catch (e) {
+      noteRunOutcome(e);
       log(`summary failed for ${found.url}: ${e.message}`);
       emit(convId, 'failed', found.url, friendlyReason(e));
       return;
@@ -759,7 +833,9 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
           // planted link and an outbound fetch. Make both structural.
           summary: defangUrls(clampSummary(parsed.summary)),
         }));
+        noteRunOutcome();
       } catch (e) {
+        noteRunOutcome(e);
         log(`context pass failed for ${found.url}: ${e.message}`);
         contextReason = friendlyContextReason(e);
       }
@@ -799,6 +875,9 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
 
   return {
     configured: () => available,
+    // Why it is unusable, as one of two fixed tokens the UI maps to hint text
+    // (never raw CLI output -- same discipline as friendlyReason).
+    unavailableReason: () => reason,
     isEnabled: (id) => enabled.has(String(id)),
     list: () => [...enabled],
 
@@ -820,8 +899,13 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     // after the automatic retries are spent -- the whole point on a bad day. The
     // outcome is reported through the same stage events as the automatic path;
     // this just kicks it off and returns immediately.
+    //
+    // Deliberately NOT gated on `available`: it is the explicit user action, and
+    // so the natural "I just logged the CLI in" recovery path. If the CLI really
+    // is still broken the run says so within seconds, in the bubble, with the
+    // truthful reason ("Claude Code CLI is not logged in") -- strictly better
+    // than refusing up front with a generic "not configured".
     retry(convId, url) {
-      if (!available) return { ok: false, error: 'not-configured' };
       const found = findYouTubeUrl(url);
       if (!found) return { ok: false, error: 'bad-url' };
       summarizeAndSend(String(convId), found).catch((e) => log('retry error:', e.message));
@@ -848,7 +932,9 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
           });
       };
       bridge.on('event', (e) => {
-        if (!available) return;
+        // Not a hard lockout: once the recheck window has passed, one link is
+        // allowed through and its run re-probes the CLI for real.
+        if (!shouldAttempt({ available, unavailableAt, now: Date.now() })) return;
         if (!e || e.type !== 'messages' || !e.conversationId) return;
         if (!enabled.has(e.conversationId)) return;
         schedule(e.conversationId);

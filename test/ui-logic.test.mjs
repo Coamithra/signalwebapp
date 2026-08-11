@@ -14,7 +14,7 @@ import {
   AVATAR_COLORS, colorFor, initials, previewText, menuActionsFor,
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
-  parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble,
+  parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
   jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
@@ -606,4 +606,38 @@ test('previewDomain reduces a url to the domain line on the card', () => {
   assert.equal(previewDomain('http://sub.www.example.com'), 'sub.www.example.com'); // only a LEADING www. goes
   assert.equal(previewDomain('garbage'), null);
   assert.equal(previewDomain(null), null);
+});
+
+// ---------- auto-TLDR thread-menu hint ----------
+//
+// The hint used to promise "on the server's PATH, logged in" unconditionally,
+// which was unverified: --version cannot prove login. It now names whichever of
+// the two the server actually observed failing.
+
+test('tldrHint: a working CLI gets the note, not a hint', () => {
+  const h = tldrHint({ enabled: true, configured: true });
+  assert.equal(h.note, 'YouTube links you post here get a short auto-summary.');
+  assert.equal(h.before, undefined);
+  // configured wins even if a stale reason rides along
+  assert.ok(tldrHint({ configured: true, reason: 'auth' }).note);
+});
+
+test('tldrHint: names the specific failure when the server diagnosed one', () => {
+  const auth = tldrHint({ configured: false, reason: 'auth' });
+  assert.equal(auth.code, 'claude');
+  assert.match(auth.after, /not logged in/);
+  assert.equal(auth.note, undefined);
+  const missing = tldrHint({ configured: false, reason: 'not-found' });
+  assert.equal(missing.code, 'claude');
+  assert.match(missing.after, /not found/);
+});
+
+test('tldrHint: undiagnosed falls back to naming both requirements', () => {
+  // The boot state (probe failed before any run) and the fetch-failed fallback
+  // in app.js both land here, so neither may guess at a specific cause.
+  for (const data of [{ configured: false }, { configured: false, reason: null }, {}, undefined]) {
+    const h = tldrHint(data);
+    assert.equal(h.code, 'claude');
+    assert.match(h.after, /PATH, logged in/);
+  }
 });

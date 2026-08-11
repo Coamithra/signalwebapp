@@ -8,7 +8,7 @@ import {
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
-  tldrBubble, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
+  tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -1512,13 +1512,10 @@ function buildThreadMenu(id, data) {
     el('span', { class: 'menu-label', text: 'Auto-TLDR YouTube links' }),
   ]);
   const children = [toggle];
-  if (!data.configured) {
-    children.push(el('div', { class: 'menu-hint' }, [
-      'Needs the ', el('code', { text: 'claude' }), ' CLI on the server’s PATH, logged in.',
-    ]));
-  } else {
-    children.push(el('div', { class: 'menu-note', text: 'YouTube links you post here get a short auto-summary.' }));
-  }
+  const hint = tldrHint(data);
+  children.push(hint.note
+    ? el('div', { class: 'menu-note', text: hint.note })
+    : el('div', { class: 'menu-hint' }, [hint.before, el('code', { text: hint.code }), hint.after]));
   $('#threadMenu').replaceChildren(...children);
 }
 
