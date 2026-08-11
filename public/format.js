@@ -312,18 +312,28 @@ const TAG_FOR = {
   [STYLE.MONOSPACE]: 'code', [STYLE.SPOILER]: 'span',
 };
 
+// Returns the element to place in the tree plus the `host` its content goes
+// into — the same node for every style but SPOILER, whose content is wrapped
+// in an inner span. CSS can't hide a bare text node (`.spoiler *` only reaches
+// elements) and colour-font emoji ignore `color: transparent`, so the wrapper
+// is what gives the blackout something to put `visibility: hidden` on — which
+// also keeps the unrevealed text out of the accessibility tree.
 function styleEl(style) {
   const node = document.createElement(TAG_FOR[style] || 'span');
-  if (style === STYLE.SPOILER) {
-    node.className = 'spoiler';
-    node.tabIndex = 0;
-    node.setAttribute('role', 'button');
-    node.title = 'Click to reveal';
-    const reveal = () => node.classList.add('revealed');
-    node.addEventListener('click', reveal);
-    node.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reveal(); } });
-  }
-  return node;
+  if (style !== STYLE.SPOILER) return { node, host: node };
+
+  node.className = 'spoiler';
+  node.tabIndex = 0;
+  node.setAttribute('role', 'button');
+  node.title = 'Click to reveal';
+  const reveal = () => node.classList.add('revealed');
+  node.addEventListener('click', reveal);
+  node.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); reveal(); } });
+
+  const host = document.createElement('span');
+  host.className = 'spoiler-body';
+  node.appendChild(host);
+  return { node, host };
 }
 
 // Nest ranges into elements over [from, to). Ranges that only partially overlap
@@ -354,8 +364,8 @@ function buildNodes(text, ranges, from, to) {
       k++;
     }
 
-    const node = styleEl(r.style);
-    for (const child of buildNodes(text, inner, start, end)) node.appendChild(child);
+    const { node, host } = styleEl(r.style);
+    for (const child of buildNodes(text, inner, start, end)) host.appendChild(child);
     nodes.push(node);
     at = end;
   }
