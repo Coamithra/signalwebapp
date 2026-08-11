@@ -255,10 +255,20 @@ evaluate must target the isolated context's id.
   To keep sends snappy the composer **warms** the slot while you type (debounced,
   `POST /api/link-preview/warm`), so `sendText` normally finds one waiting and waits 0ms; the
   in-send grab (up to 5s) is the fallback for paste-and-send. A failed preview never costs the
-  message — it's caught and the message goes out bare. **A link needs an explicit `http(s)://`
+  message — it's caught and the message goes out bare. **A link needs an explicit `https://`
   scheme** to get a card: `bodyHasLink` gates the in-send poll and `hasLink` gates the warm, and
   without that gate every link-free message would sit out the full 5s timeout waiting for a
-  preview that was never coming. Signal itself previews a bare `example.com`; we don't (yet). Media sends and the GIF path keep
+  preview that was never coming. ⚠️ **https is not our restriction, it is Signal's** (probed on
+  8.22.0): its `shouldPreviewHref` requires `protocol === 'https:'`, so `http://` never gets a
+  card either — and a *scheme-less* `example.com` fails because `findLinks` returns linkify's
+  raw matched **text**, which `new URL()` then can't parse. Signal also block-lists a set of
+  hosts by name, `example.com`/`.net`/`.org`, `localhost`, `invalid`, `test` and `onion` among
+  them, so the canonical example would get no card even fully written out. Matching the gates
+  to that is the whole point: an `http://`-only message used to pay the full 5s poll for a
+  preview that could never arrive. ⚠️ When re-probing this, note Signal **memoizes at module
+  level** (`currentlyMatchedLink` plus a list of urls excluded after a failed fetch), so
+  grabbing the *same* url twice in a row silently does nothing — a repeat probe reads as a
+  false negative unless each attempt uses a fresh url. Media sends and the GIF path keep
   `preview: []` (Signal doesn't card a message that carries attachments), and the card vetoes
   jumbomoji.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes

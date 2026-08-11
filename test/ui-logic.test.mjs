@@ -574,11 +574,20 @@ test('jumboSizeFor survives a missing or empty message', () => {
 
 test('hasLink spots a URL worth warming a preview for', () => {
   assert.equal(hasLink('look at https://example.com/x'), true);
-  assert.equal(hasLink('HTTP://EXAMPLE.COM'), true);
-  assert.equal(hasLink('http://a'), true);
+  assert.equal(hasLink('HTTPS://EXAMPLE.COM'), true);
+  assert.equal(hasLink('https://a'), true);
   assert.equal(hasLink('no link here'), false);
-  assert.equal(hasLink('example.com'), false);      // needs a scheme, like Signal's own finder
+  // https only: Signal's shouldPreviewHref rejects everything else, so warming
+  // for one of these would wait out the send's poll for nothing.
+  assert.equal(hasLink('http://a'), false);
+  assert.equal(hasLink('go to http://neverssl.com now'), false);
+  assert.equal(hasLink('example.com'), false);
   assert.equal(hasLink('https://'), false);         // scheme with nothing after it
+  // The false-positive class a bare-domain gate would have reintroduced.
+  assert.equal(hasLink('config.js'), false);
+  assert.equal(hasLink('e.g. node.js'), false);
+  assert.equal(hasLink('the file README.md is fine'), false);
+  assert.equal(hasLink('just some ordinary prose, nothing to fetch'), false);
   assert.equal(hasLink(''), false);
   assert.equal(hasLink(null), false);
   assert.equal(hasLink(undefined), false);
