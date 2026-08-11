@@ -218,18 +218,22 @@ body {
   font-size: .92em; background: rgba(0, 0, 0, .22); border-radius: 4px; padding: 0 4px;
 }
 /* Spoiler: hidden until clicked, like Signal's. Block the text out rather than
-   blurring it — blur still leaks word shapes. (The bar can't be `currentColor`:
-   `color: transparent` below would make it transparent too.) */
+   blurring it — blur still leaks word shapes. The bar is the outer span's
+   background; the content is hidden by `visibility` on the inner
+   `.spoiler-body` (format.js wraps it), never by `color: transparent` — that
+   is a no-op on colour-font emoji, which render their own glyph colours.
+   `visibility` also keeps the box size, so revealing never reflows, and drops
+   the unrevealed text from the accessibility tree. */
 .msg-text .spoiler {
-  background: var(--text); border-radius: 4px; color: transparent;
+  background: var(--text); border-radius: 4px;
   cursor: pointer; user-select: none;
 }
-.msg-text .spoiler * { visibility: hidden; }
+.msg-text .spoiler .spoiler-body { visibility: hidden; }
 .msg-text .spoiler:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .msg-text .spoiler.revealed {
-  background: transparent; color: inherit; cursor: auto; user-select: text;
+  background: transparent; cursor: auto; user-select: text;
 }
-.msg-text .spoiler.revealed * { visibility: visible; }
+.msg-text .spoiler.revealed .spoiler-body { visibility: visible; }
 
 .attachment-chip {
   display: inline-flex; align-items: center; gap: 7px;
