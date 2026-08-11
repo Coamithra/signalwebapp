@@ -290,13 +290,15 @@ export const INSTALL_SCRIPT = `(function () {
   // Does the body contain a link at all? Cheap gate, and the important one:
   // without it every ordinary text message would fire a grab and then sit out
   // the whole poll timeout waiting for a preview that was never coming.
-  // Mirrors hasLink() in public/ui-logic.js -- a scheme is required, which is
-  // also why a bare 'example.com' gets no card (see CLAUDE.md).
+  // Mirrors hasLink() in public/ui-logic.js -- https only, because that is all
+  // Signal's own shouldPreviewHref accepts: an http:// link and a bare
+  // 'example.com' both get no card, so polling for one only costs the send the
+  // whole timeout (see CLAUDE.md).
   // Written with indexOf rather than a regex: this file is a template literal,
   // where a '/' inside a regex literal silently becomes a line comment.
   function bodyHasLink(body) {
     if (typeof body !== 'string') return false;
-    return body.indexOf('http://') !== -1 || body.indexOf('https://') !== -1;
+    return body.indexOf('https://') !== -1;
   }
 
   // Reduce a url to the part worth comparing: no scheme, no trailing slash.

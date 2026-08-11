@@ -112,8 +112,12 @@ export function jumboSizeFor(msg) {
 // Cheap "is there anything here worth previewing" gate, so the composer only
 // asks Signal to warm a preview when the text actually holds a link. Signal
 // does the real link-finding itself; this only avoids pointless round-trips.
+// **https only**, matching Signal's own shouldPreviewHref (see CLAUDE.md): it
+// never previews an http:// link or a scheme-less one, so warming for either
+// would fetch nothing and leave the send waiting out its poll for a preview
+// that can't arrive.
 export function hasLink(text) {
-  return typeof text === 'string' && /https?:\/\/\S/i.test(text);
+  return typeof text === 'string' && /https:\/\/\S/i.test(text);
 }
 
 // The card's href comes off a received message, i.e. is attacker-controlled.
