@@ -23,21 +23,26 @@ export class SignalBridge extends EventEmitter {
     });
     this.cdp.on('disconnected', () => {
       this._injected = false;
-      this.status = 'disconnected';
-      this.emit('status', this.status);
+      this._setStatus('disconnected');
     });
     this.cdp.on('reconnecting', () => {
-      this.status = 'connecting';
-      this.emit('status', this.status);
+      this._setStatus('connecting');
     });
+  }
+
+  // Emits only on transition — the drain loop re-asserts 'ready' every tick, and
+  // SSE shouldn't carry a status event each 200ms for a status that didn't move.
+  _setStatus(status) {
+    if (this.status === status) return;
+    this.status = status;
+    this.emit('status', status);
   }
 
   async start() {
     this.cdp.start();
     await this.cdp.whenReady();
     await this._ensureInjected();
-    this.status = 'ready';
-    this.emit('status', this.status);
+    this._setStatus('ready');
     this._startDrainLoop();
   }
 
@@ -68,6 +73,12 @@ export class SignalBridge extends EventEmitter {
     if (!this.cdp.isConnected) return;
     if (!this._injected) {
       await this._ensureInjected();
+      // The way back up: after a reconnect (Signal restarted, context swapped)
+      // the handlers above only ever lower the status, so the first successful
+      // re-injection is what declares the bridge working again. Without this,
+      // /api/status reported 'connecting' forever while every call succeeded —
+      // and the frontend's ready-transition self-heal never re-ran.
+      this._setStatus('ready');
       return;
     }
     const res = await this.cdp.evaluate(DRAIN_SCRIPT);
