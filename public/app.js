@@ -332,6 +332,7 @@ function maybeAutoplayClip(v, att, key) {
   // the gate lets an unmuted resume through (and playClip degrades to muted on
   // the one refusal that means it didn't).
   v.muted = !(choice && choice.unmuted);
+  if (key) v.dataset.clipKey = key; // lets playClip's re-mute fallback find the stored choice
   v.loop = true;
   v.removeAttribute('controls');
   v.classList.add('att-clip');
@@ -373,6 +374,9 @@ function playClip(v) {
     // on that would silently undo the unmute on every scroll past.
     if (v.muted || err?.name !== 'NotAllowedError') return;
     v.muted = true;
+    // The stored choice has to follow, or every row rebuild would re-apply the
+    // unmute and re-run the same refused play().
+    if (v.dataset.clipKey) clipChoices.delete(v.dataset.clipKey);
     syncClipSound(v);
     v.play().catch(() => {});
   });
@@ -532,7 +536,12 @@ function quoteEl(msg) {
     box.setAttribute('role', 'button');
     box.tabIndex = 0;
     box.title = 'Go to original message';
-    box.addEventListener('click', () => jumpToQuoted(q));
+    // The quoted body renders through the same formatter as a message, so it
+    // can hold real links — a click on one should open it, not also jump.
+    box.addEventListener('click', (e) => {
+      if (e.target.closest('a')) return;
+      jumpToQuoted(q);
+    });
     box.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
       e.preventDefault(); // Space would scroll the thread
@@ -562,8 +571,13 @@ async function jumpToQuoted(quote) {
       return;
     }
     if (!state.hasOlder || page >= QUOTE_JUMP_MAX_PAGES) break;
+    const before = state.messages.length;
     await loadOlderMessages();
     if (state.activeId !== id) return; // switched threads mid-search
+    // No progress means the load was refused (one already in flight from the
+    // scroll gesture) or failed — looping would just burn the page budget
+    // no-op by no-op, with a toast per failed attempt on top.
+    if (state.messages.length === before) break;
   }
   toast("Couldn't find the original message in this chat's history.", true);
 }
@@ -572,17 +586,24 @@ async function jumpToQuoted(quote) {
 // message. Instant, not smooth: after paging in history the target can be
 // thousands of pixels up, and CSS smooth-scrolling that far reads as the thread
 // running away rather than a jump.
+let flashTimer = null;
 function flashMessageRow(mid) {
   const row = rowByMid(mid);
   if (!row) return;
   row.scrollIntoView({ block: 'center', behavior: 'instant' });
-  row.classList.remove('flash');
+  // One flash at a time: clearing every flagged row (not just this one) covers
+  // a second jump landing elsewhere while the first row's pulse is still up —
+  // its timer is about to be cancelled below, so nothing else would clear it.
+  for (const r of document.querySelectorAll('.msg-row.flash')) r.classList.remove('flash');
   void row.offsetWidth; // restart the animation when the same row is hit twice
   row.classList.add('flash');
   // A timer, not animationend: Chrome defers animation events while the tab is
-  // hidden/occluded (probed), and a class that never comes off would replay the
-  // pulse on the next repaint of that row. Slightly past the animation's 1.4s.
-  setTimeout(() => row.classList.remove('flash'), 1600);
+  // hidden/occluded (probed), and a class that never comes off would linger on
+  // the row. Slightly past the animation's 1.4s; one flash at a time, so a
+  // repeat jump cancels the old timer rather than letting it cut the restarted
+  // pulse short.
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => row.classList.remove('flash'), 1600);
 }
 
 function messageRow(msg, prev, isGroup) {

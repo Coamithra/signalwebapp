@@ -30,8 +30,7 @@ export class SignalBridge extends EventEmitter {
     });
   }
 
-  // Emits only on transition — the drain loop re-asserts 'ready' every tick, and
-  // SSE shouldn't carry a status event each 200ms for a status that didn't move.
+  // Emits only on transition, so SSE never carries a status that didn't move.
   _setStatus(status) {
     if (this.status === status) return;
     this.status = status;
@@ -41,8 +40,7 @@ export class SignalBridge extends EventEmitter {
   async start() {
     this.cdp.start();
     await this.cdp.whenReady();
-    await this._ensureInjected();
-    this._setStatus('ready');
+    await this._ensureInjected(); // raises status to 'ready'
     this._startDrainLoop();
   }
 
@@ -58,6 +56,12 @@ export class SignalBridge extends EventEmitter {
       throw new Error('Signal app not fully loaded yet');
     }
     this._injected = true;
+    // The way back up: the event handlers above only ever lower the status, so
+    // a successful injection is what declares the bridge working — HERE, not in
+    // the drain loop, because an RPC call racing the next drain tick injects
+    // first and the tick would then skip its raise, leaving /api/status on
+    // 'connecting' forever (with every call succeeding) after a reconnect.
+    this._setStatus('ready');
   }
 
   _startDrainLoop() {
@@ -72,13 +76,7 @@ export class SignalBridge extends EventEmitter {
   async _drain() {
     if (!this.cdp.isConnected) return;
     if (!this._injected) {
-      await this._ensureInjected();
-      // The way back up: after a reconnect (Signal restarted, context swapped)
-      // the handlers above only ever lower the status, so the first successful
-      // re-injection is what declares the bridge working again. Without this,
-      // /api/status reported 'connecting' forever while every call succeeded —
-      // and the frontend's ready-transition self-heal never re-ran.
-      this._setStatus('ready');
+      await this._ensureInjected(); // raises status back to 'ready'
       return;
     }
     const res = await this.cdp.evaluate(DRAIN_SCRIPT);

@@ -840,6 +840,23 @@ test('quoteTargetIndex refuses quotes with nothing to jump to', () => {
   assert.equal(quoteTargetIndex([null, { id: 'a', timestamp: 100 }], { id: 100 }), 1);
 });
 
+test('quoteTargetIndex checks the author as far as the data allows', () => {
+  // Two messages can in principle share a sent_at; the author disambiguates.
+  const messages = [
+    { id: 'a', timestamp: 100, direction: 'incoming', authorId: 'aci-bob' },
+    { id: 'b', timestamp: 100, direction: 'incoming', authorId: 'aci-eve' },
+    { id: 'c', timestamp: 100, direction: 'outgoing', authorId: null },
+  ];
+  assert.equal(quoteTargetIndex(messages, { id: 100, authorId: 'aci-eve' }), 1);
+  // A quote of our own message carries OUR aci while our own rows carry no
+  // authorId at all — isMe maps to direction instead, or every own-message
+  // jump would miss.
+  assert.equal(quoteTargetIndex(messages, { id: 100, authorId: 'aci-me', isMe: true }), 2);
+  // Either side missing an id degrades to the timestamp match, never to a miss.
+  assert.equal(quoteTargetIndex(messages, { id: 100 }), 0);
+  assert.equal(quoteTargetIndex([{ id: 'x', timestamp: 100, direction: 'incoming' }], { id: 100, authorId: 'aci-bob' }), 0);
+});
+
 // The page API's quote-* error tags and the frontend's mapping of them are
 // wired only by string; a new tag with no sentence would surface raw in a toast.
 test('every quote-* error page-api.js can return has a sentence', async () => {

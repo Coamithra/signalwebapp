@@ -179,10 +179,18 @@ export function quoteSummary(quote) {
 // "not loaded yet" (the caller may load older and retry) and "nothing to jump
 // to": a quote with no id, or one whose original was already gone when the
 // reply arrived (referencedMessageNotFound), has no target anywhere in history.
+// The author is the match's other half, checked as far as the data allows: a
+// quote of our own message carries our ACI while our own rows carry no
+// authorId at all, so isMe maps to direction there; otherwise the ids are
+// compared only when both sides have one.
 export function quoteTargetIndex(messages, quote) {
   if (!quote || !quote.id || quote.referencedMessageNotFound) return -1;
   const list = Array.isArray(messages) ? messages : [];
-  return list.findIndex((m) => m && m.timestamp === quote.id);
+  return list.findIndex((m) => {
+    if (!m || m.timestamp !== quote.id) return false;
+    if (quote.isMe) return m.direction === 'outgoing';
+    return !quote.authorId || !m.authorId || m.authorId === quote.authorId;
+  });
 }
 
 // A send refused because the message being replied to can't be quoted. Those
