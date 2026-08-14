@@ -10,6 +10,7 @@ import {
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
   tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
   quoteSummary, quoteSendFailure, shouldAutoplayClip, clipSoundIcon,
+  canReactTo, myReaction, groupReactions, reactionChoices,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -27,6 +28,7 @@ const state = {
   hasOlder: false,        // the open thread has unloaded history above (drives #loadOlder + auto-load)
   editing: null,          // { messageId, original } while editing an already-sent message
   replyTo: null,          // { messageId, quote } while composing a reply (quote = the echo's own descriptor)
+  preferredReactions: [], // Signal's own quick-reaction row, from /api/status
 };
 
 // Outbound media limits — kept in lockstep with the server (src/server.js).
@@ -541,24 +543,8 @@ function messageRow(msg, prev, isGroup) {
   applyJumbo(bubble, msg);
   appendBubble(row, msg, bubble);
 
-  if (msg.reactions && msg.reactions.length) {
-    // Group by emoji, keeping the reactor names so hovering a pill shows who reacted.
-    const byEmoji = new Map();
-    for (const r of msg.reactions) {
-      if (!byEmoji.has(r.emoji)) byEmoji.set(r.emoji, []);
-      byEmoji.get(r.emoji).push(r.from || 'Unknown');
-    }
-    const rx = el('div', { class: 'reactions' });
-    for (const [emoji, names] of byEmoji) {
-      const n = names.length;
-      rx.appendChild(el('span', {
-        class: 'reaction-pill',
-        text: n > 1 ? `${emoji} ${n}` : emoji,
-        title: [...new Set(names)].join(', '),
-      }));
-    }
-    row.appendChild(rx);
-  }
+  const pills = reactionsEl(msg);
+  if (pills) row.appendChild(pills);
 
   const meta = el('div', { class: 'msg-meta' });
   if (msg.edited) meta.appendChild(el('span', { class: 'edited-label', text: 'Edited' }));
@@ -588,6 +574,8 @@ const MENU_ACTIONS = {
   // Inert on purpose: see menuActionsFor. Carries no onClick, so openMessageMenu
   // renders it as a disabled button.
   summarized: () => ({ label: 'Already summarized', disabled: true }),
+  // The only entry that uses the anchor: its picker re-anchors on the same "⋯".
+  react: (msg) => ({ label: 'React…', onClick: (anchorBtn) => openReactionPicker(msg, anchorBtn) }),
   reply: (msg) => ({ label: 'Reply', onClick: () => startReply(msg) }),
   edit: (msg) => ({ label: 'Edit', onClick: () => startEdit(msg) }),
   deleteForEveryone: (msg) => ({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) }),
@@ -630,9 +618,55 @@ function appendBubble(row, msg, bubble) {
     msg.direction === 'outgoing' ? [btn, bubble] : [bubble, btn]));
 }
 
-let closeMessageMenu = () => {};
+// Only one of these is ever open (the reaction picker replaces the menu that
+// launched it), so they share the single close handle.
+let closeMessagePopup = () => {};
+
+// Float `node` under `anchorEl` and wire up its dismissal: outside-click,
+// Escape, or the thread scrolling out from under it. Shared by the "⋯" menu and
+// the reaction picker so the two can't drift apart on feel.
+// Under the button, right-aligned; flip above if it would overflow. Separate
+// from openAnchoredPopup because a popup can change height after it opens (the
+// picker's search results appear below the fold it was measured with), and a
+// stale flip decision leaves the new rows off-screen.
+function positionAnchored(node, anchorEl) {
+  const r = anchorEl.getBoundingClientRect();
+  const left = Math.max(6, r.right - node.offsetWidth);
+  let top = r.bottom + 4;
+  if (top + node.offsetHeight > window.innerHeight - 6) top = r.top - node.offsetHeight - 4;
+  node.style.left = `${Math.round(left)}px`;
+  node.style.top = `${Math.round(Math.max(6, top))}px`;
+}
+
+function openAnchoredPopup(node, anchorEl) {
+  closeMessagePopup();
+  document.body.appendChild(node);
+  positionAnchored(node, anchorEl);
+
+  const onDocClick = (e) => { if (!node.contains(e.target)) closeMessagePopup(); };
+  const onKey = (e) => { if (e.key === 'Escape') closeMessagePopup(); };
+  const onScroll = () => closeMessagePopup();
+  // Defer the doc-click listener so the click that opened it doesn't close it.
+  // The timer has to be cancellable: a popup can be closed before it fires (a
+  // menu item opening the reaction picker does exactly that, inside one tick),
+  // and then removeEventListener runs against a listener that isn't registered
+  // yet — leaking one that outlives its own node. A leaked listener sees every
+  // later click as "outside" (its node is detached and contains nothing), so it
+  // would shut the next popup the instant it opened.
+  const armDocClick = setTimeout(() => document.addEventListener('click', onDocClick), 0);
+  document.addEventListener('keydown', onKey);
+  $('#messages').addEventListener('scroll', onScroll, { passive: true });
+  closeMessagePopup = () => {
+    clearTimeout(armDocClick);
+    node.remove();
+    document.removeEventListener('click', onDocClick);
+    document.removeEventListener('keydown', onKey);
+    $('#messages').removeEventListener('scroll', onScroll);
+    closeMessagePopup = () => {};
+  };
+}
+
 function openMessageMenu(msg, anchorBtn) {
-  closeMessageMenu();
   const items = menuItemsFor(msg);
   if (!items.length) return;
   const menu = el('div', { class: 'msg-menu' });
@@ -641,35 +675,140 @@ function openMessageMenu(msg, anchorBtn) {
       class: 'msg-menu-item' + (it.danger ? ' danger' : ''), text: it.label,
       // A disabled entry is there to explain why the action isn't offered, so it
       // gets neither the attribute's click-swallowing nor a handler to swallow.
+      // The live ones close the menu *before* running: the reaction picker
+      // anchors on this same button, and openAnchoredPopup's own
+      // closeMessagePopup would otherwise tear down the popup it just put up.
       ...(it.disabled
         ? { disabled: '' }
-        : { onclick: () => { closeMessageMenu(); it.onClick(); } }),
+        : { onclick: () => { closeMessagePopup(); it.onClick(anchorBtn); } }),
     }));
   }
-  document.body.appendChild(menu);
+  openAnchoredPopup(menu, anchorBtn);
+}
 
-  // Anchor under the button, right-aligned; flip above if it would overflow.
-  const r = anchorBtn.getBoundingClientRect();
-  let left = Math.max(6, r.right - menu.offsetWidth);
-  let top = r.bottom + 4;
-  if (top + menu.offsetHeight > window.innerHeight - 6) top = r.top - menu.offsetHeight - 4;
-  menu.style.left = `${Math.round(left)}px`;
-  menu.style.top = `${Math.round(Math.max(6, top))}px`;
+// Bridge status plus the bits of state that can only come from Signal. Called at
+// boot and again whenever the bridge (re)becomes ready, so a tab that loaded
+// while Signal was down doesn't stay stuck on the fallbacks.
+function loadStatus() {
+  return api('/api/status').then((s) => {
+    setStatus(s.status);
+    state.me = s.me;
+    // Signal's own quick-reaction row. Left empty on failure — reactionChoices
+    // falls back to Signal's defaults rather than showing an empty picker.
+    state.preferredReactions = s.preferredReactions || [];
+  }).catch(() => setStatus('disconnected'));
+}
 
-  const onDocClick = (e) => { if (!menu.contains(e.target)) closeMessageMenu(); };
-  const onKey = (e) => { if (e.key === 'Escape') closeMessageMenu(); };
-  const onScroll = () => closeMessageMenu();
-  // Defer the doc-click listener so the click that opened the menu doesn't close it.
-  setTimeout(() => document.addEventListener('click', onDocClick), 0);
-  document.addEventListener('keydown', onKey);
-  $('#messages').addEventListener('scroll', onScroll, { passive: true });
-  closeMessageMenu = () => {
-    menu.remove();
-    document.removeEventListener('click', onDocClick);
-    document.removeEventListener('keydown', onKey);
-    $('#messages').removeEventListener('scroll', onScroll);
-    closeMessageMenu = () => {};
+// ---------- reactions ----------
+// Signal allows exactly one reaction per person per message, which is what makes
+// the pills a complete control on their own: clicking yours takes it off, and
+// clicking anyone else's moves yours onto that emoji rather than adding a second.
+// The "⋯" menu's React entry is the way in when there are no pills yet.
+
+const REACT_POP_LIMIT = 12; // search hits shown; a grid, so it affords more than the composer's list
+
+function reactionsEl(msg) {
+  const groups = groupReactions(msg.reactions);
+  if (!groups.length) return null;
+  const interactive = canReactTo(msg);
+  const rx = el('div', { class: 'reactions' });
+  for (const g of groups) {
+    const label = g.count > 1 ? `${g.emoji} ${g.count}` : g.emoji;
+    const title = g.names.join(', ');
+    if (!interactive) {
+      rx.appendChild(el('span', { class: 'reaction-pill', text: label, title }));
+      continue;
+    }
+    rx.appendChild(el('button', {
+      class: 'reaction-pill' + (g.mine ? ' mine' : ''),
+      type: 'button', text: label,
+      title: g.mine ? `${title} — click to remove your reaction` : `${title} — click to react with ${g.emoji}`,
+      'aria-pressed': String(g.mine),
+      // No stopPropagation here (unlike the kebab, where it keeps the popup it
+      // opens from being closed by the click that opened it): a pill opens
+      // nothing, so the click must reach document and dismiss whatever menu or
+      // picker is still open over another message.
+      onclick: () => sendReaction(msg, g.emoji, g.mine),
+    }));
+  }
+  return rx;
+}
+
+// remove=true retracts your reaction; otherwise this emoji becomes your one
+// reaction, replacing whatever it was. Repaint from server truth the way
+// doDelete does rather than patching the pill: the reaction has to round-trip
+// through Signal anyway, and the SSE nudge lands moments later regardless.
+async function sendReaction(msg, emoji, remove) {
+  const id = state.activeId;
+  if (!id || !msg.id) return;
+  try {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/messages/${encodeURIComponent(msg.id)}/react`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ emoji, remove: !!remove }),
+    });
+    if (!r.ok) throw new Error(r.error || 'reaction failed');
+    // One favourites store, shared with the composer's popup — but only a pick
+    // counts. Retracting 👍 is the opposite signal, and scoring it would promote
+    // the emoji the user just took back.
+    if (!remove) bumpEmojiFreq(emoji);
+    scheduleRefreshActive();
+  } catch (err) {
+    scheduleRefreshActive();
+    toast(err.message === 'reaction-failed'
+      ? 'Signal could not send that reaction.'
+      : 'Failed to react: ' + err.message, true);
+  }
+}
+
+// The picker: a row of quick reactions, plus a search box over the same ~1900
+// shortcodes (and the same learned favourites) the composer's ":" popup uses.
+function openReactionPicker(msg, anchorBtn) {
+  const mine = myReaction(msg);
+  const results = el('div', { class: 'react-pop-results' });
+  const search = el('input', {
+    class: 'react-pop-search', type: 'text', 'aria-label': 'Search emoji',
+    placeholder: 'Search emoji…',
+  });
+
+  const react = (emoji, remove) => { closeMessagePopup(); sendReaction(msg, emoji, remove); };
+
+  const quick = el('div', { class: 'react-pop-quick' });
+  for (const emoji of reactionChoices(state.preferredReactions, mine)) {
+    const on = emoji === mine;
+    quick.appendChild(el('button', {
+      class: 'react-pop-emoji' + (on ? ' on' : ''), type: 'button', text: emoji,
+      title: on ? 'Remove your reaction' : `React with ${emoji}`,
+      'aria-pressed': String(on),
+      onclick: () => react(emoji, on),
+    }));
+  }
+
+  // Same ranking as the composer, so a glyph you reach for often surfaces in
+  // both. Empty query -> no rows, rather than an arbitrary first eight.
+  const renderResults = () => {
+    const q = search.value.trim().replace(/^:+/, '');
+    const items = q ? matchShortcodes(q, REACT_POP_LIMIT, emojiFreq().counts) : [];
+    results.replaceChildren(...items.map((item) => el('button', {
+      class: 'react-pop-emoji' + (item.emoji === mine ? ' on' : ''), type: 'button',
+      text: item.emoji, title: `:${item.name}:`,
+      onclick: () => react(item.emoji, item.emoji === mine),
+    })));
+    results.classList.toggle('hidden', !items.length);
+    positionAnchored(pop, anchorBtn); // the grid just changed the popup's height
   };
+  search.addEventListener('input', renderResults);
+  // Enter picks the first match — the fast path for someone who typed a name.
+  search.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const first = results.firstElementChild;
+    if (first) first.click();
+  });
+
+  const pop = el('div', { class: 'react-pop' }, [quick, search, results]);
+  results.classList.add('hidden');
+  openAnchoredPopup(pop, anchorBtn);
+  search.focus();
 }
 
 // Find a rendered message row by its stable id (set as data-mid).
@@ -2289,6 +2428,10 @@ function connectSSE() {
     if (s === 'ready' && lastStatus !== 'ready') {
       loadConversations();
       if (state.activeId) scheduleRefreshActive();
+      // Re-read the bridge-derived bits of status too: a tab opened while Signal
+      // was down got none of them, and preferredReactions would otherwise stay
+      // empty (the picker silently on its defaults) for the life of the tab.
+      loadStatus();
     }
     lastStatus = s;
   });
@@ -2479,10 +2622,7 @@ function init() {
   loadConversations();
 
   // initial status probe
-  api('/api/status').then((s) => {
-    setStatus(s.status);
-    state.me = s.me;
-  }).catch(() => setStatus('disconnected'));
+  loadStatus();
 }
 
 init();

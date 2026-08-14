@@ -482,8 +482,17 @@ export const INSTALL_SCRIPT = `(function () {
     var authorTitle = direction === 'incoming'
       ? resolveAuthorTitle(m.sourceServiceId || m.source) : null;
     var attachments = Array.isArray(m.attachments) ? m.attachments.map(describeAttachment) : [];
-    var reactions = Array.isArray(m.reactions) ? m.reactions.map(function (r) {
-      return { emoji: r.emoji, from: resolveAuthorTitle(r.fromId) };
+    // Filtered, unlike attachments/preview above (nothing indexes into this).
+    // A reaction being *removed* sits in here as an entry with NO emoji until
+    // the send settles, alongside the one it retracts -- mapped raw that renders
+    // as an empty pill. r.fromId is a conversationId rather than a serviceId,
+    // which resolveAuthor takes either of -- and its isMe is exactly the "is this
+    // one mine" the pills need, so there's no separate self-lookup here.
+    var reactions = Array.isArray(m.reactions) ? m.reactions.filter(function (r) {
+      return r && r.emoji;
+    }).map(function (r) {
+      var who = resolveAuthor(r.fromId);
+      return { emoji: r.emoji, from: who ? who.title : null, fromMe: !!(who && who.isMe) };
     }) : [];
     var status = direction === 'outgoing' ? computeOutgoingStatus(m) : null;
     var formatted = formatBody(m.body || '', m.bodyRanges);
@@ -531,10 +540,19 @@ export const INSTALL_SCRIPT = `(function () {
         var meConv = Object.values(s.conversations.conversationLookup).find(function (c) { return c.isMe; });
         me = meConv ? { id: meConv.id, title: safeTitle(meConv) } : null;
       } catch (_) {}
+      // The six quick reactions Signal's own picker offers. It rides on the
+      // account record, so it follows the user across devices -- worth reading
+      // rather than hardcoding a row that disagrees with Signal's.
+      var preferredReactions = [];
+      try {
+        var pref = (s.items || {}).preferredReactionEmoji;
+        if (Array.isArray(pref)) preferredReactions = pref.filter(function (e) { return typeof e === 'string' && e; });
+      } catch (_) {}
       return {
         ok: true,
         conversationCount: Object.keys(s.conversations.conversationLookup).length,
         me: me,
+        preferredReactions: preferredReactions,
       };
     },
 
@@ -898,6 +916,36 @@ export const INSTALL_SCRIPT = `(function () {
         return { ok: false, error: String(e) };
       }
     },
+
+    // React to a message (remove=true retracts your own reaction). Signal allows
+    // exactly ONE reaction per person per message, so sending a second emoji
+    // replaces the first rather than adding to it -- there is no "change" call.
+    //
+    // Routes through the composer thunk, the same one Signal's own picker fires;
+    // there is no reaction method on the conversation or message model. Like
+    // deleteMessagesForEveryone it swallows its own failure and raises a toast
+    // instead of throwing -- but unlike that one it awaits the send *inside* its
+    // try, so by the time this await resolves the toast (if any) is already
+    // dispatched. One check, no polling loop.
+    sendReaction: async function (conversationId, messageId, emoji, remove) {
+      var conv = window.ConversationController.get(conversationId);
+      if (!conv) return { ok: false, error: 'conversation-not-found' };
+      if (typeof emoji !== 'string' || !emoji) return { ok: false, error: 'invalid-emoji' };
+      try {
+        var prevToast = (window.reduxStore.getState().toast || {}).toast || null;
+        var r = window.reduxActions.composer.reactToMessage(messageId, {
+          emoji: emoji, remove: !!remove,
+        });
+        if (r && typeof r.then === 'function') await r;
+        var t = (window.reduxStore.getState().toast || {}).toast || null;
+        if (t && t !== prevToast && t.toastType === 'ReactionFailed') {
+          return { ok: false, error: 'reaction-failed' };
+        }
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
   };
 
   // Realtime: watch redux and queue coalesced change events for the server.
@@ -906,6 +954,7 @@ export const INSTALL_SCRIPT = `(function () {
     window.__sbSubscribed = true;
     var prevLookup;
     var prevMBC;
+    var prevML;
     window.reduxStore.subscribe(function () {
       try {
         var conv = window.reduxStore.getState().conversations;
@@ -921,6 +970,31 @@ export const INSTALL_SCRIPT = `(function () {
             }
           }
           prevMBC = mbc;
+        }
+        // Reactions are the one message change that does NOT move
+        // messagesByConversation: adding one replaces the entry in messagesLookup
+        // and nothing else, so the loop above never sees it and a reaction from
+        // anyone (including Signal Desktop itself) would never reach the browser.
+        // Scanning the lookup is affordable because it only runs on the ticks
+        // where the lookup was actually replaced, and compares references.
+        var ml = conv.messagesLookup;
+        if (ml !== prevML) {
+          if (prevML) {
+            var touched = null;
+            for (var mid in ml) {
+              var now = ml[mid], was = prevML[mid];
+              if (!was || now === was || now.reactions === was.reactions) continue;
+              var rcid = now.conversationId;
+              if (!rcid) continue;
+              // One event per conversation per tick: a batch of reactions
+              // arriving together would otherwise queue a duplicate each.
+              if (!touched) touched = {};
+              if (touched[rcid]) continue;
+              touched[rcid] = true;
+              pushEvent({ type: 'messages', conversationId: rcid });
+            }
+          }
+          prevML = ml;
         }
       } catch (_) {}
     });

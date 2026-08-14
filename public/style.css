@@ -407,11 +407,16 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
 .tick.read { color: #6fb6ff; }
 .tick.error { color: var(--danger); }
 
-.reactions { display: flex; gap: 4px; margin-top: 2px; padding: 0 6px; }
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; padding: 0 6px; }
 .reaction-pill {
   background: var(--bg-input); border-radius: 12px; padding: 1px 7px; font-size: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border); color: var(--text); font-family: inherit; line-height: 1.5;
 }
+/* Interactive pills are <button>; the inert ones (a message you can't react to)
+   stay <span> and get none of the affordances below. */
+button.reaction-pill { cursor: pointer; transition: background .12s, border-color .12s; }
+button.reaction-pill:hover { background: var(--bg-hover); border-color: var(--text-faint); }
+.reaction-pill.mine { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg-input)); }
 
 .day-divider {
   align-self: center; margin: 14px 0 8px; font-size: 11.5px; color: var(--text-faint);
@@ -613,6 +618,33 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
    ("Already summarized"), so it stays readable but never looks clickable. */
 .msg-menu-item:disabled { color: var(--text-dim); cursor: default; }
 .msg-menu-item:disabled:hover { background: transparent; }
+
+/* Reaction picker — same floating shell as .msg-menu (they share the anchoring
+   and dismissal code), holding a quick row, a search field, and its hits. */
+.react-pop {
+  position: fixed; z-index: 1100; width: 268px;
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.45); padding: 9px;
+}
+.react-pop-quick { display: flex; flex-wrap: wrap; gap: 2px; }
+.react-pop-results {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px;
+  border-top: 1px solid var(--border); padding-top: 8px;
+}
+.react-pop-emoji {
+  border: none; background: transparent; cursor: pointer; border-radius: 8px;
+  font-size: 21px; line-height: 1; padding: 6px; aspect-ratio: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.react-pop-emoji:hover { background: var(--bg-hover); }
+.react-pop-emoji.on { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.react-pop-search {
+  width: 100%; box-sizing: border-box; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-input); color: var(--text); font-family: inherit; font-size: 13.5px;
+  padding: 7px 10px;
+}
+.react-pop-search:focus { outline: none; border-color: var(--accent); }
 
 .edited-label { font-style: italic; opacity: .85; }
 
