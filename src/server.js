@@ -433,6 +433,11 @@ const server = http.createServer(async (req, res) => {
       const id = decodeURIComponent(m[1]);
       const older = url.searchParams.get('older') === '1';
       const data = await bridge.getMessages(id, { older });
+      // Tag any message carrying a YouTube link with { url, videoId, summarized }
+      // so the frontend can offer "Summarize in chat" (and grey it out once that
+      // video has one) without a second copy of the URL parser in the browser.
+      // Same route serves ?older=1, so scrolled-back history is tagged too.
+      if (data) tldr.annotate(id, data.messages);
       return sendJson(res, 200, data);
     }
 
@@ -633,6 +638,21 @@ const server = http.createServer(async (req, res) => {
       try { body = await readBody(req, 4 * 1024); }
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const result = tldr.retry(id, String(body.url || ''));
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    // /api/conversations/:id/tldr/summarize   POST { url } -> summarize it now
+    // The message menu's "Summarize in chat". Same fire-and-forget shape as
+    // /retry (the outcome arrives over SSE), but a SEPARATE route because it is
+    // gated on "already summarized" and /retry must stay ungated — retry is the
+    // recovery path after a failure, when nothing was ever recorded.
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/tldr\/summarize$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      let body;
+      try { body = await readBody(req, 4 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const result = tldr.summarizeNow(id, String(body.url || ''));
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

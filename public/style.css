@@ -256,6 +256,27 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 }
 .att-image { cursor: zoom-in; }
 .att-video { background: #000; }
+
+/* A short clip promoted to silent autoplay (see maybeAutoplayClip in app.js).
+   It has no native controls, so the pointer advertises that clicking gives them
+   back. The wrap shrinks to the video — it's a block div, and without this the
+   sound button would pin itself to the bubble's edge instead of the clip's. */
+.att-clip { cursor: pointer; }
+.att-clip-wrap { position: relative; width: fit-content; }
+.att-clip-sound {
+  position: absolute; right: 8px; bottom: 8px;
+  width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(0,0,0,.55); color: #fff; font-size: 13px; line-height: 1;
+  cursor: pointer; opacity: 0; transition: opacity .12s ease;
+}
+.att-clip-sound:hover { background: rgba(0,0,0,.75); }
+/* Visible on hover; permanently visible once sound is ON, so you can tell that
+   it is; and always on touch, where there is no hover to reveal it with. */
+.att-clip-wrap:hover .att-clip-sound,
+.att-clip-sound:focus-visible,
+.att-clip-sound.on { opacity: 1; }
+@media (hover: none) { .att-clip-sound { opacity: 1; } }
 .att-audio-wrap { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
 .att-audio { height: 36px; max-width: 240px; }
 .view-once { font-style: italic; color: var(--text-dim); }
@@ -581,6 +602,10 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
 }
 .msg-menu-item:hover { background: var(--bg-hover); }
 .msg-menu-item.danger { color: var(--danger); }
+/* An inert entry that exists to explain why the action isn't on offer
+   ("Already summarized"), so it stays readable but never looks clickable. */
+.msg-menu-item:disabled { color: var(--text-dim); cursor: default; }
+.msg-menu-item:disabled:hover { background: transparent; }
 
 .edited-label { font-style: italic; opacity: .85; }
 
