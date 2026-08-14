@@ -191,8 +191,12 @@ function sanitizeBodyRanges(ranges, text) {
 // consumes a ZWJ family, flag, keycap or skin-toned emoji as a single match, and
 // \p{Extended_Pictographic} is the second alternative only to admit the bare
 // pre-VS16 forms RGI excludes (a `❤` with no U+FE0F), exactly as the jumbomoji
-// counter does. Rejects '', '1', 'abc', '👍👍' and anything carrying whitespace.
-const REACTION_EMOJI = /^(?:\p{RGI_Emoji}|\p{Extended_Pictographic})$/v;
+// counter does — including its deny-list of five that are typography rather than
+// emoji when written bare, or `™` would be a valid reaction. A lone skin-tone
+// modifier is subtracted from BOTH branches (RGI admits one on its own; `👍🏽`
+// is a two-char string and is unaffected). Rejects '', '1', 'abc', '👍👍' and
+// anything carrying whitespace.
+const REACTION_EMOJI = /^(?:[\p{RGI_Emoji}--[\p{Emoji_Modifier}]]|[\p{Extended_Pictographic}--[\p{Emoji_Modifier}©®™‼⁉]])$/v;
 function validReactionEmoji(emoji) {
   return typeof emoji === 'string' && REACTION_EMOJI.test(emoji);
 }

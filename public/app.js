@@ -427,17 +427,23 @@ let closeMessagePopup = () => {};
 // Float `node` under `anchorEl` and wire up its dismissal: outside-click,
 // Escape, or the thread scrolling out from under it. Shared by the "⋯" menu and
 // the reaction picker so the two can't drift apart on feel.
-function openAnchoredPopup(node, anchorEl) {
-  closeMessagePopup();
-  document.body.appendChild(node);
-
-  // Under the button, right-aligned; flip above if it would overflow.
+// Under the button, right-aligned; flip above if it would overflow. Separate
+// from openAnchoredPopup because a popup can change height after it opens (the
+// picker's search results appear below the fold it was measured with), and a
+// stale flip decision leaves the new rows off-screen.
+function positionAnchored(node, anchorEl) {
   const r = anchorEl.getBoundingClientRect();
   const left = Math.max(6, r.right - node.offsetWidth);
   let top = r.bottom + 4;
   if (top + node.offsetHeight > window.innerHeight - 6) top = r.top - node.offsetHeight - 4;
   node.style.left = `${Math.round(left)}px`;
   node.style.top = `${Math.round(Math.max(6, top))}px`;
+}
+
+function openAnchoredPopup(node, anchorEl) {
+  closeMessagePopup();
+  document.body.appendChild(node);
+  positionAnchored(node, anchorEl);
 
   const onDocClick = (e) => { if (!node.contains(e.target)) closeMessagePopup(); };
   const onKey = (e) => { if (e.key === 'Escape') closeMessagePopup(); };
@@ -478,6 +484,19 @@ function openMessageMenu(msg, anchorBtn) {
   openAnchoredPopup(menu, anchorBtn);
 }
 
+// Bridge status plus the bits of state that can only come from Signal. Called at
+// boot and again whenever the bridge (re)becomes ready, so a tab that loaded
+// while Signal was down doesn't stay stuck on the fallbacks.
+function loadStatus() {
+  return api('/api/status').then((s) => {
+    setStatus(s.status);
+    state.me = s.me;
+    // Signal's own quick-reaction row. Left empty on failure — reactionChoices
+    // falls back to Signal's defaults rather than showing an empty picker.
+    state.preferredReactions = s.preferredReactions || [];
+  }).catch(() => setStatus('disconnected'));
+}
+
 // ---------- reactions ----------
 // Signal allows exactly one reaction per person per message, which is what makes
 // the pills a complete control on their own: clicking yours takes it off, and
@@ -503,7 +522,11 @@ function reactionsEl(msg) {
       type: 'button', text: label,
       title: g.mine ? `${title} — click to remove your reaction` : `${title} — click to react with ${g.emoji}`,
       'aria-pressed': String(g.mine),
-      onclick: (e) => { e.stopPropagation(); sendReaction(msg, g.emoji, g.mine); },
+      // No stopPropagation here (unlike the kebab, where it keeps the popup it
+      // opens from being closed by the click that opened it): a pill opens
+      // nothing, so the click must reach document and dismiss whatever menu or
+      // picker is still open over another message.
+      onclick: () => sendReaction(msg, g.emoji, g.mine),
     }));
   }
   return rx;
@@ -522,7 +545,10 @@ async function sendReaction(msg, emoji, remove) {
       body: JSON.stringify({ emoji, remove: !!remove }),
     });
     if (!r.ok) throw new Error(r.error || 'reaction failed');
-    bumpEmojiFreq(emoji); // one favourites store, shared with the composer's popup
+    // One favourites store, shared with the composer's popup — but only a pick
+    // counts. Retracting 👍 is the opposite signal, and scoring it would promote
+    // the emoji the user just took back.
+    if (!remove) bumpEmojiFreq(emoji);
     scheduleRefreshActive();
   } catch (err) {
     scheduleRefreshActive();
@@ -566,6 +592,7 @@ function openReactionPicker(msg, anchorBtn) {
       onclick: () => react(item.emoji, item.emoji === mine),
     })));
     results.classList.toggle('hidden', !items.length);
+    positionAnchored(pop, anchorBtn); // the grid just changed the popup's height
   };
   search.addEventListener('input', renderResults);
   // Enter picks the first match — the fast path for someone who typed a name.
@@ -2017,6 +2044,10 @@ function connectSSE() {
     if (s === 'ready' && lastStatus !== 'ready') {
       loadConversations();
       if (state.activeId) scheduleRefreshActive();
+      // Re-read the bridge-derived bits of status too: a tab opened while Signal
+      // was down got none of them, and preferredReactions would otherwise stay
+      // empty (the picker silently on its defaults) for the life of the tab.
+      loadStatus();
     }
     lastStatus = s;
   });
@@ -2205,13 +2236,7 @@ function init() {
   loadConversations();
 
   // initial status probe
-  api('/api/status').then((s) => {
-    setStatus(s.status);
-    state.me = s.me;
-    // Signal's own quick-reaction row. Left empty on failure — reactionChoices
-    // falls back to Signal's defaults rather than showing an empty picker.
-    state.preferredReactions = s.preferredReactions || [];
-  }).catch(() => setStatus('disconnected'));
+  loadStatus();
 }
 
 init();

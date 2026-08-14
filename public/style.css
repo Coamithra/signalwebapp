@@ -550,7 +550,6 @@ button.reaction-pill:hover { background: var(--bg-hover); border-color: var(--te
   display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px;
   border-top: 1px solid var(--border); padding-top: 8px;
 }
-.react-pop-results.hidden { display: none; }
 .react-pop-emoji {
   border: none; background: transparent; cursor: pointer; border-radius: 8px;
   font-size: 21px; line-height: 1; padding: 6px; aspect-ratio: 1;
