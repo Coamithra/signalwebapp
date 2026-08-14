@@ -43,6 +43,21 @@ evaluate must target the isolated context's id.
   the isolated context. `evaluate()` waits for it and retries once on context loss.
 - After any reconnect or context swap, the injected page API must be re-installed
   ([src/bridge.js](src/bridge.js) clears its `_injected` flag on `context-changed`).
+- ⚠️ **`window.__sb` is ONE global in ONE renderer, shared by every server pointed at that
+  Signal — last injector wins.** There is a single Signal Desktop process on :9222, and each
+  server instance (each worktree's `npm start`, on whatever port) injects its own copy of
+  `page-api.js` on connect / context change / restart. Run servers from two checkouts at once
+  and an older checkout's page API silently replaces a newer one. The tell, from inside the
+  newer worktree: intermittent `Signal eval threw: TypeError: window.__sb.<newMethod> is not a
+  function` for a method that is plainly in your own `src/page-api.js` — or, worse, no error at
+  all, just `/api/status` (or any call) quietly returning the OLD response shape, so a field
+  you just added reads as empty and looks like your bug. It reappears at random because it only
+  happens when the rival server re-injects. Related: `DRAIN_SCRIPT` *clears* `window.__sbQueue`,
+  so parallel servers steal each other's realtime events — each gets a random subset. So: **only
+  one server should be bridged to Signal while testing `page-api.js` changes** — stop the other
+  worktrees' servers, or re-inject this worktree's `INSTALL_SCRIPT` immediately before
+  exercising the change (a restart of your server does that). No code guard exists yet; a
+  version stamp letting a newer install refuse a downgrade would be its own design discussion.
 
 ## File map
 
@@ -238,6 +253,11 @@ evaluate must target the isolated context's id.
   clip stops looping - but **only on `NotAllowedError`**: a `play()` rejection is far more often
   the `AbortError` from the observer pausing a clip that was still spinning up, and re-muting on
   that would silently undo the unmute on every scroll past.
+  **An unmute (and a release to manual controls) survives the row rebuilds** `renderMessages`
+  does on every thread change: `clipChoices` in [public/app.js](public/app.js), keyed
+  `messageId:attachmentIndex`, in-memory only and cleared on conversation switch —
+  `maybeAutoplayClip` re-applies a remembered unmute and skips promotion entirely for a
+  released clip. Muting again deletes the entry (back to default) rather than storing a no-op.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
@@ -275,6 +295,14 @@ evaluate must target the isolated context's id.
   `makeQuote` copies the original attachment's thumbnail, which needs the attachment-copy
   helpers current Signal no longer exposes — recipients see the attachment's type label
   instead. Everything else (text, author, ranges) is identical to a native reply.
+  **Clicking a quote box jumps to the original** (Signal Desktop behaviour): `quoteTargetIndex`
+  in [public/ui-logic.js](public/ui-logic.js) finds it in the loaded window by matching
+  `quote.id` against `msg.timestamp` (both are the original's `sent_at`); `jumpToQuoted` in
+  app.js pages older history in when it isn't loaded (bounded at `QUOTE_JUMP_MAX_PAGES`, then a
+  toast), cancels any in-flight load-older scroll settle before scrolling (its ResizeObserver
+  would yank the viewport back), and pulses the row (`.msg-row.flash`). Only real message rows
+  are clickable — the composer's reply banner reuses `quoteEl` and stays inert — and a quote
+  with no id or with `referencedMessageNotFound` gets no handler at all.
 - **Edit a message** — `window.__sb.editMessage(conversationId, targetMessageId, body, bodyRanges)` →
   `window.reduxActions.composer.sendEditedMessage(conversationId, { targetMessageId, message, bodyRanges })`.
   This is Signal's own edit path (the composer thunk); it replaces the body, **keeps
@@ -547,7 +575,13 @@ evaluate must target the isolated context's id.
   picker (whose question line is the pure `pickerLabel`), `progress` for one link
   of a picked batch, which it appends to *every* label as "(2 of 3)" rather than
   per stage: with one bubble per chat that suffix is the only thing telling the
-  second link's failure apart from the first's.
+  second link's failure apart from the first's. The payload also carries `origin`: a
+  **frontend-only** fact set by `startTldr` in app.js (`'manual'` for the message menu's
+  Summarize and for Retry clicks) and preserved across SSE repaints by `handleTldrStage` —
+  the server's stage events never carry it — so a manual run's `failed` reads "Couldn't
+  summarize" instead of "Auto-TLDR failed", which was wrong on both counts for a thing the
+  user just clicked. Same-url only: a manual origin must not bleed onto the watcher's next
+  automatic run.
   It is **never** a Signal message. Retry POSTs to
   `/api/conversations/:id/tldr/retry {url}` -> `tldr.retry(id, url)`, which re-runs
   the summary **bypassing the dedup/`since`-floor guards**, so it works even after
