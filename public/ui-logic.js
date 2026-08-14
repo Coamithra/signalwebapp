@@ -40,7 +40,7 @@ export function previewText(conv) {
 // Tombstones/incoming get just the local delete. Returns action *names* —
 // app.js maps them to labels and handlers, which is what keeps this testable.
 //
-// "Summarize in chat" leads, being the only non-destructive one, and is the one
+// "Summarize in chat" leads when it applies at all, and is the one
 // action that applies to messages you did NOT send — running the auto-TLDR
 // pipeline over someone else's video is the whole reason it exists. It rides on
 // `msg.youtube`, which the SERVER attaches (annotateYouTube in src/tldr.js), so
@@ -57,10 +57,73 @@ export function menuActionsFor(msg) {
   if (msg.youtube && !msg.deletedForEveryone) {
     actions.push(msg.youtube.summarized ? 'summarized' : 'summarize');
   }
+  // Reply is the everyday action, so it leads the ordinary entries (only the
+  // situational Summarize outranks it). Any live message can be replied to,
+  // yours or theirs, text or media; a tombstone can't — nothing left to quote.
+  if (!msg.deletedForEveryone) actions.push('reply');
   if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) actions.push('edit');
   if (isOut && !msg.deletedForEveryone) actions.push('deleteForEveryone');
   actions.push('deleteForMe');
   return actions;
+}
+
+// ---------- quoted replies ----------
+// What the quote box says. Signal copies the replied-to message onto the reply,
+// so this is all local data — no lookup of the original, which may be long gone.
+//
+// Returns { author, text, placeholder }. `placeholder: true` means the text is a
+// *description* of the original (a photo, a deleted message) rather than its
+// body, so the caller renders it dim/italic and WITHOUT the quote's bodyRanges —
+// those offsets belong to the body that isn't being shown.
+const QUOTE_KIND_LABEL = {
+  image: 'Photo', video: 'Video', voice: 'Voice message', audio: 'Audio', file: 'Attachment',
+};
+
+export function quoteSummary(quote) {
+  if (!quote) return null;
+  const author = quote.isMe ? 'You' : (quote.authorTitle || 'Unknown');
+  const described = (text) => ({ author, text, placeholder: true });
+  // Checked before the text, which a quote carries either way: this flag means
+  // the original was ALREADY gone when the reply arrived, so the copied text is
+  // whatever the sender's client had and there is nothing here to scroll to.
+  // (It says nothing about a message deleted *after* the reply landed — that
+  // quote still shows its copied body, as Signal's own does.)
+  if (quote.referencedMessageNotFound) return described('Original message not found');
+  if (quote.isViewOnce) return described('View-once media');
+  if (quote.isGiftBadge) return described('Gift badge');
+  if (quote.text && quote.text.trim()) {
+    return { author, text: quote.text, placeholder: false };
+  }
+  const att = quote.attachment;
+  if (att) {
+    // The file name is more use than "Attachment" for an actual file, but a
+    // photo/video/voice note is better named by what it is (and Signal's own
+    // quotes often carry an empty fileName for those anyway).
+    const label = QUOTE_KIND_LABEL[att.kind] || 'Attachment';
+    return described(att.kind === 'file' && att.fileName ? att.fileName : label);
+  }
+  return described('Message');
+}
+
+// A send refused because the message being replied to can't be quoted. Those
+// come back as our own fixed 'quote-*' tokens, and they are all terminal for
+// THIS reply: Signal reloading empties messagesLookup down to the newest window,
+// so a reply aimed at an older message dies here and would fail identically on
+// every retry. So the caller drops the reply target as well as saying why —
+// otherwise the user is left retrying a send that cannot succeed.
+// -> a sentence, or null when the error isn't about the quote at all.
+export function quoteSendFailure(error) {
+  switch (error) {
+    case 'quote-message-not-loaded':
+    case 'quote-message-deleted':
+      return 'That message can no longer be quoted — sent nothing. Try again to send it without the reply.';
+    case 'quote-wrong-conversation':
+      return 'That message is in another chat — sent nothing.';
+    case 'quote-no-author':
+      return "That message has no sender Signal can quote — sent nothing. Try again to send it without the reply.";
+    default:
+      return null;
+  }
 }
 
 // ---------- jumbomoji ----------
@@ -108,8 +171,7 @@ export function jumbomojiSize(text) {
 
 // The veto, kept beside the sizing so both halves of the rule are testable and
 // in one place. Signal refuses jumbomoji for a message carrying anything *other*
-// than the emoji — media, a link preview, or formatting ranges (its own
-// predicate also lists quotes, which this UI doesn't render into the bubble).
+// than the emoji — media, a link preview, a quoted reply, or formatting ranges.
 // bodyRanges matters most: a spoilered or monospaced emoji is an ordinary
 // message in Signal, and blowing it up here would out-and-out break the spoiler.
 export function jumboSizeFor(msg) {
@@ -117,6 +179,7 @@ export function jumboSizeFor(msg) {
   if (msg.isViewOnce) return null;
   if ((msg.attachments || []).length) return null;
   if ((msg.preview || []).length) return null;
+  if (msg.quote) return null; // a 👍 answering something is a reply, not a jumbomoji
   if ((msg.bodyRanges || []).length) return null;
   return jumbomojiSize(msg.text);
 }

@@ -281,6 +281,56 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
 .att-audio { height: 36px; max-width: 240px; }
 .view-once { font-style: italic; color: var(--text-dim); }
 
+/* ---------- Quoted reply ----------
+   The box at the top of a reply's bubble showing the message it answers. The
+   left bar takes the quoted author's colour (set inline as --quote-bar from the
+   same palette as the group author labels); our own quotes fall back to the
+   accent. Fixed-size thumbnail, so bytes arriving late never reflow the thread
+   — "load older" anchors on row positions. */
+.quote {
+  display: flex; gap: 8px; align-items: stretch;
+  margin: 0 0 5px; padding: 6px 9px;
+  background: rgba(0, 0, 0, .22);
+  border-left: 3px solid var(--quote-bar, var(--accent));
+  border-radius: 6px;
+  white-space: normal;
+  max-width: 100%;
+  overflow: hidden;
+}
+.outgoing .quote { background: rgba(0, 0, 0, .18); }
+.quote-body { flex: 1; min-width: 0; }
+.quote-author {
+  font-size: 12.5px; font-weight: 600; line-height: 1.3;
+  color: var(--quote-bar, var(--accent));
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Quoting yourself inside your own (blue) bubble: the accent is nearly the
+   bubble's own fill, so the bar and the "You" would all but vanish. Scoped to
+   .me because a quote of someone else keeps their palette colour here. */
+.outgoing .quote.me { border-left-color: rgba(255, 255, 255, .6); }
+.outgoing .quote.me .quote-author { color: rgba(255, 255, 255, .92); }
+
+.quote-text {
+  font-size: 13px; line-height: 1.3; margin-top: 1px; color: var(--text);
+  /* Two lines, like Signal's: the quote identifies the message, the reply is
+     the point. Kept from growing the bubble on a wall-of-text original. */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+/* "Photo", "Original message not found", … — a description of the original
+   rather than its body (see quoteSummary). */
+.quote-text.placeholder { font-style: italic; color: var(--text-dim); }
+.outgoing .quote-text.placeholder { color: rgba(255, 255, 255, .75); }
+.quote-thumb {
+  flex: none; width: 40px; height: 40px; align-self: center;
+  border-radius: 4px; object-fit: cover; background: rgba(0, 0, 0, .18);
+}
+
+/* Composer reply banner: the same box, sitting above the input. No margin of
+   its own — .composer is a column flex with its own gap, like #editBanner. */
+.reply-banner { display: flex; align-items: center; gap: 8px; }
+.reply-banner .quote { flex: 1; margin: 0; background: var(--bg-input); }
+
 /* ---------- Link preview card ---------- */
 /* The "postcard" under a message that links somewhere. Sits inside the bubble,
    so it tints itself off the bubble rather than picking a fixed colour — the

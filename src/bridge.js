@@ -120,6 +120,11 @@ export class SignalBridge extends EventEmitter {
     return this._call('getPreviewImage', messageId, index);
   }
 
+  // Thumbnail beside a quoted reply: message.quote.attachments[0].thumbnail.
+  getQuoteThumbnail(messageId) {
+    return this._call('getQuoteThumbnail', messageId);
+  }
+
   // Ask Signal to start fetching a link preview for text still being typed, so
   // sendText finds one waiting instead of blocking on the network.
   warmLinkPreview(text) {
@@ -128,16 +133,19 @@ export class SignalBridge extends EventEmitter {
 
   // bodyRanges: optional [{ start, length, style }] formatting (see page-api.js).
   // opts.linkPreview attaches a link preview card (resolved in-page; see
-  // page-api.js for why the grab can't happen out here).
+  // page-api.js for why the grab can't happen out here). opts.quoteMessageId
+  // makes the message a reply to that message (the quote is built in-page too,
+  // out of redux).
   sendText(id, body, bodyRanges, opts = {}) {
     return this._call('sendText', id, body, bodyRanges || [], opts);
   }
 
   // files: [{ fileName, contentType, base64, width?, height? }]. The base64
   // rides inside the evaluate expression (_call JSON-stringifies args), so the
-  // server caps total payload size before calling this.
-  sendMedia(id, body, files, bodyRanges) {
-    return this._call('sendMedia', id, body, files, bodyRanges || []);
+  // server caps total payload size before calling this. opts as sendText's,
+  // minus linkPreview (Signal doesn't card a message carrying media).
+  sendMedia(id, body, files, bodyRanges, opts = {}) {
+    return this._call('sendMedia', id, body, files, bodyRanges || [], opts);
   }
 
   markRead(id) {
