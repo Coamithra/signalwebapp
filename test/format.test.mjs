@@ -266,6 +266,8 @@ test('linkSpans finds schemes, www and bare domains', () => {
   assert.deepEqual(spans('example.com'), [['example.com', 'https://example.com']]);
   assert.deepEqual(spans('www.example.co.uk/x'), [['www.example.co.uk/x', 'https://www.example.co.uk/x']]);
   assert.deepEqual(spans('t.me/somechannel'), [['t.me/somechannel', 'https://t.me/somechannel']]);
+  // Every auto-TLDR posts one of these, defanged of its scheme (see tldr.js).
+  assert.deepEqual(spans('youtu.be/k_tmCRzNbhk'), [['youtu.be/k_tmCRzNbhk', 'https://youtu.be/k_tmCRzNbhk']]);
   assert.deepEqual(spans('EXAMPLE.COM/A'), [['EXAMPLE.COM/A', 'https://EXAMPLE.COM/A']]);
   assert.deepEqual(spans('a.com and b.org'), [['a.com', 'https://a.com'], ['b.org', 'https://b.org']]);
   assert.deepEqual(spans('port example.com:8080/x'), [['example.com:8080/x', 'https://example.com:8080/x']]);
@@ -296,11 +298,23 @@ test('linkSpans does not linkify things that merely look like hosts', () => {
     'see README.md and app.js',
     'version v1.2.3 shipped',
     'javascript:alert(1)',
-    'sure.it works',                     // English-word ccTLDs are off the list
+    'sure.it works',                     // English-word TLDs are off the list
     'wait.no really',
     'ping me.at home',
+    'the store.shop was closed',
     'example.company is a word',
+    'webpack.dev.js and index.co.jsx',   // a bare host can't be followed by another label
   ]) assert.deepEqual(linkSpans(t), [], `linkified ${JSON.stringify(t)}`);
+});
+
+test('linkSpans stays fast on a pathological body', () => {
+  // Message bodies are attacker-shaped and this runs per row on every render:
+  // an ambiguous host pattern attempted at every index of a long unbroken run
+  // used to cost seconds.
+  const started = process.hrtime.bigint();
+  assert.deepEqual(linkSpans('a'.repeat(50_000)), []);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 500, `50k chars took ${ms.toFixed(0)}ms`);
 });
 
 // The smallest DOM that renderFormatted needs: it only ever calls

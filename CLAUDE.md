@@ -116,7 +116,35 @@ evaluate must target the isolated context's id.
   type** in the composer and again at send time (for pasted text); the map is generated from
   Signal's own emoji table (see the file map). A marker or shortcode you meant literally is
   escaped with a backslash (`\_not italic\_`).
-- **Clickable links in message bodies** — `linkSpans(text)` in [public/format.js](public/format.js) returns `{start, length, href}` ranges, and `renderFormatted` walks them **in the same pass as Signal's style ranges** rather than post-processing the finished text. That is the whole design constraint: formatting is out-of-band, so a style range can cover only part of a URL, and a second pass would either split the anchor or lose the styling. Any style range that *crosses* a link boundary is split at it first (`splitAcrossLinks`); after that a style is always disjoint from a link, inside one, or around one, so `buildNodes` nests them and **an anchor is never split**. Anchors are `target="_blank" rel="noopener noreferrer"` — a click must never navigate the app tab away from the thread — and every href goes through **`safeHttpUrl`** (the same scheme gate the preview card uses), so `javascript:` can never become one. Detection is ours, not linkify: explicit `http(s)://`, a bare `www.`, or a bare host whose last label is in a **curated TLD list**. ⚠️ That list is deliberately not the full IANA table (zero-dep) and deliberately **omits ccTLDs that read as English words** (`.it`, `.in`, `.at`, `.be`, `.no`, `.us`) — chat is full of missing-space typos like "sure.it works". A domain on an exotic TLD needs an explicit scheme. Bare hosts get `https://`; a match glued on its left to a word char, `@`, `.`, `-`, `/`, `:` or `\` is dropped (emails, `mailto:`, Windows paths), and trailing sentence punctuation plus unbalanced closing brackets are trimmed off. **Spoilers, decided deliberately:** a spoiler *around* a link keeps its anchor — `.spoiler-body` is `visibility: hidden` until revealed and a hidden subtree takes no clicks or focus, so it is unclickable until revealed and clickable after, for free — while a spoiler that only *partly* covers a link (or hides a piece inside one) drops the anchor entirely, because a URL whose visible text is partly blacked out is a deception vector. Link spans never enter `msg.bodyRanges`, so the jumbomoji veto is untouched. This is the only DOM-touching part of `format.js`, and `test/format.test.mjs` reaches it through a small fake `document`.
+- **Clickable links in message bodies** — `linkSpans(text)` in [public/format.js](public/format.js)
+  returns `{start, length, href}` ranges and `renderFormatted` walks them **in the same pass as
+  Signal's style ranges**, not as a second pass over the finished text. That is the whole design
+  constraint: formatting is out-of-band, so a style range can cover only *part* of a URL, and a
+  second pass would either split the anchor or lose the styling. Any style range that *crosses* a
+  link boundary is split at it first (`splitAcrossLinks`); after that a style is always disjoint
+  from a link, inside one, or around one, so `buildNodes` nests them and **an anchor is never
+  split**. Anchors are `target="_blank" rel="noopener noreferrer"` — a click must never navigate
+  the app tab away from the thread — and the href goes through **`safeHttpUrl`** (the same scheme
+  gate the preview card uses) in `linkSpans` *and* again in `styleEl`, so `javascript:` can never
+  become one. Detection is ours, not linkify: explicit `http(s)://`, a bare `www.`, or a bare host
+  whose last label is in a **curated TLD list**. ⚠️ That list is a judgement call, not a standard:
+  not the full IANA table (zero-dep), and minus the entries that are ordinary English words after
+  a dot (`.it`, `.in`, `.at`, `.no`, `.us`, `.shop`, `.news`, …), because chat is full of
+  missing-space typos like "sure.it works". `me` and `be` are kept *despite* that rule, on traffic
+  (`t.me`, and the `youtu.be` every auto-TLDR posts once `defangUrls` has stripped its scheme).
+  Anything else needs an explicit scheme. Bare hosts get `https://` and may not be followed by
+  another label, so `webpack.dev.js` stays a filename; a match glued on its left to a word char,
+  `@`, `.`, `-`, `/`, `:` or `\` is rejected (emails, `mailto:`, Windows paths) — by a lookbehind
+  *inside* the pattern, because message bodies are attacker-shaped and re-attempting an ambiguous
+  host pattern at every index of a long unbroken run costs seconds on the render path. Trailing
+  sentence punctuation and unbalanced closing brackets are trimmed off.
+  **Spoilers, decided deliberately:** a spoiler *around* a link keeps its anchor — `.spoiler-body`
+  is `visibility: hidden` until revealed and a hidden subtree takes no clicks and no focus, so the
+  link is unclickable until revealed and clickable after, for free — while a spoiler that only
+  *partly* covers a link (or hides a piece inside one) drops the anchor entirely, because a URL
+  whose visible text is partly blacked out is a deception vector. Link spans never enter
+  `msg.bodyRanges`, so the jumbomoji veto is untouched. This is the only DOM-touching part of
+  `format.js`, and `test/format.test.mjs` reaches it through a small fake `document`.
 - **Emoji shortcode autocomplete** — the open half of the above: `shortcodeBefore` handles a
   *closed* `:shrug:`, `shortcodeQueryBefore` spots an *open* `:shr` at the caret and
   `matchShortcodes(query, limit, weights)` ranks candidates (both in

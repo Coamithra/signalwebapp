@@ -323,14 +323,17 @@ const escapeShortcodes = (s) => s.replace(/:([a-z0-9_+-]+):/gi,
 // Bare domains are worth linking — people type "example.com" constantly — but
 // without a TLD list every "reboot.sh", "README.md" and "v1.2.3" turns into a
 // link, and the full IANA table is ~1500 entries we have no dependency budget
-// for. So a bare host is only linkified when its last label is one of these:
-// the common generic TLDs plus the big ccTLDs, minus anything that reads as an
-// English word after a dot (.it, .in, .at, .be, .no, .us), because chat is full
-// of missing-space typos like "sure.it works". An exotic TLD needs a scheme.
+// for. So a bare host is only linkified when its last label is one of these.
+// The list is a judgement call, not a standard: the common generic TLDs plus
+// the big ccTLDs, minus the ones that are ordinary English words after a dot
+// (.it, .in, .at, .no, .us, .shop, .store, .news, .blog, .site, .online), since
+// chat is full of missing-space typos like "sure.it works". Two survive that
+// rule on traffic alone and are known misfire risks: `me` (t.me) and `be`
+// (youtu.be — every auto-TLDR posts one, defanged of its scheme). Anything not
+// here needs an explicit scheme.
 const TLDS = [
   'com', 'org', 'net', 'edu', 'gov', 'mil', 'int', 'info', 'biz',
-  'io', 'ai', 'app', 'dev', 'co', 'me', 'tv', 'fm', 'gg', 'xyz',
-  'online', 'site', 'tech', 'blog', 'news', 'shop', 'store', 'wiki',
+  'io', 'ai', 'app', 'dev', 'co', 'me', 'be', 'tv', 'fm', 'gg', 'xyz',
   'uk', 'de', 'fr', 'nl', 'es', 'se', 'dk', 'fi', 'pl', 'cz', 'pt', 'ie', 'ch',
   'ru', 'ua', 'jp', 'cn', 'kr', 'br', 'mx', 'ca', 'au', 'nz', 'za', 'tr', 'il', 'eu',
 ];
@@ -338,20 +341,29 @@ const TLDS = [
 // A host label: alphanumerics and inner hyphens. Reused for the leading label
 // and every dotted one after it.
 const LABEL = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
-const LINK_RE = new RegExp(
-  // An explicit scheme (http included — unlike the *preview* gate, which is
-  // https-only because that's what Signal will fetch), or a bare "www.".
-  `(?:https?://|www\\.)[^\\s<>]+`
-  + '|'
-  // ...or a bare host on a known TLD, with an optional path/query/port.
-  + `${LABEL}(?:\\.${LABEL})*\\.(?:${TLDS.join('|')})\\b(?:[:/?#][^\\s<>]*)?`,
-  'gi',
-);
 
 // A match glued to one of these on its left isn't a link: an email local part
 // ("foo@example.com"), another scheme ("mailto:example.com"), a Windows path
-// ("C:\\Users\\thing.com"), or the tail of a longer token.
-const GLUED_LEFT = /[\p{L}\p{N}_@.\-/:\\]/u;
+// ("C:\Users\thing.com"), or the tail of a longer token. It rides in the
+// pattern rather than being checked afterwards so a start position inside a
+// word is rejected before LABEL scans it: message bodies are attacker-shaped,
+// and LABEL is ambiguous enough that letting every index in a 50k run of
+// letters attempt a match costs seconds on the render path.
+const GLUED_LEFT = '[\\p{L}\\p{N}_@.\\-/:\\\\]';
+
+const LINK_RE = new RegExp(
+  `(?<!${GLUED_LEFT})(?:`
+  // An explicit scheme (http included — unlike the *preview* gate, which is
+  // https-only because that's what Signal will fetch), or a bare "www.".
+  + `(?:https?://|www\\.)[^\\s<>]+`
+  + '|'
+  // ...or a bare host on a known TLD, with an optional path/query/port. The
+  // lookahead is what keeps "webpack.dev.js" a filename: a bare host may end a
+  // sentence ("example.com.") but must not be followed by another label.
+  + `${LABEL}(?:\\.${LABEL})*\\.(?:${TLDS.join('|')})\\b(?!\\.[a-z0-9])(?:[:/?#][^\\s<>]*)?`
+  + ')',
+  'giu',
+);
 
 const CLOSER_FOR = { ')': '(', ']': '[', '}': '{' };
 const occurrences = (s, ch) => s.split(ch).length - 1;
@@ -381,8 +393,6 @@ export function linkSpans(text) {
   const out = [];
   LINK_RE.lastIndex = 0;
   for (let m; (m = LINK_RE.exec(body));) {
-    const prev = body[m.index - 1];
-    if (prev !== undefined && GLUED_LEFT.test(prev)) continue;
     const raw = trimTail(m[0]);
     if (!raw) continue;
     // Message bodies are attacker-influenced, so the scheme gate is the same
@@ -410,9 +420,13 @@ const TAG_FOR = {
 // A link span (carrying `href` instead of `style`) travels the same walk, so
 // formatting inside a URL nests in the anchor like anything else.
 function styleEl(r) {
-  if (r.href) {
+  // Re-gated here rather than trusted from linkSpans: a range reaches this
+  // function straight off a message, and the one place that turns an href into
+  // a live anchor is the one place worth being paranoid in.
+  const href = r.href && safeHttpUrl(r.href);
+  if (href) {
     const a = document.createElement('a');
-    a.href = r.href;
+    a.href = href;
     // New tab, always: clicking a link in a thread must never navigate the app
     // tab away from what you were reading.
     a.target = '_blank';
