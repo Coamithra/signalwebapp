@@ -9,6 +9,7 @@ import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
   tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
+  shouldAutoplayClip, clipSoundIcon,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -235,11 +236,14 @@ function attachmentEl(msg, att, i) {
     return wrapMedia(img);
   }
   if (att.kind === 'video') {
-    const v = el('video', { class: 'att-media att-video', src, controls: '', preload: 'metadata' });
+    const v = el('video', { class: 'att-media att-video', src, controls: '', preload: 'metadata', playsinline: '' });
     const vbox = mediaBox(att);
     if (vbox) { v.style.width = `${vbox.w}px`; v.style.height = `${vbox.h}px`; }
     if (att.hasThumbnail) v.setAttribute('poster', `${src}?thumb=1`);
     v.addEventListener('error', () => v.replaceWith(attachmentChip(att, "Couldn't load")));
+    // Duration isn't known until metadata arrives, so a short clip can only
+    // become an autoplaying one after the fact — not while the row is built.
+    v.addEventListener('loadedmetadata', () => maybeAutoplayClip(v, att), { once: true });
     return wrapMedia(v);
   }
   if (att.kind === 'audio' || att.kind === 'voice') {
@@ -252,6 +256,112 @@ function attachmentEl(msg, att, i) {
   }
   // files / unknown types -> downloadable chip
   return attachmentChip(att, null, src);
+}
+
+// ---------- autoplaying short clips ----------
+// A clip shorter than AUTOPLAY_MAX_SECONDS loops silently while it's on screen
+// and pauses the moment it isn't, the way short motion behaves in Signal itself.
+// Everything here only ever runs for a <video>: an animated image/gif is an
+// <img> the browser animates on its own, with nothing to start or stop.
+//
+// Nothing is swapped or re-created — we enable playback on the same element that
+// already had the ?thumb=1 poster, so the poster hands off to the first decoded
+// frame with no flash and no reflow (mediaBox() reserved the pixel box).
+
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+const CLIP_VISIBLE_RATIO = 0.4; // how much of a clip must be on screen to play
+
+// One observer for every clip in the thread, so N short clips cost one
+// callback rather than N. Off-screen clips are paused and therefore not
+// decoding, which is the whole point in a long thread.
+let clipObs = null;
+function clipObserver() {
+  if (!clipObs) {
+    clipObs = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const v = e.target;
+        if (!v.isConnected) { clipObs.unobserve(v); continue; } // removed mid-flight
+        if (e.isIntersecting && e.intersectionRatio >= CLIP_VISIBLE_RATIO) playClip(v);
+        else v.pause();
+      }
+    }, { threshold: [0, CLIP_VISIBLE_RATIO] });
+  }
+  return clipObs;
+}
+
+// renderMessages() rebuilds every row, and an IntersectionObserver keeps a
+// strong reference to what it observes — a clip that was already off screen when
+// its row was replaced never changes intersection state, so it would never be
+// reaped by the isConnected check above. Dropping the whole set on each render
+// is simpler and exact: the new rows re-register themselves on 'loadedmetadata'.
+function resetClips() {
+  if (clipObs) clipObs.disconnect();
+}
+
+// Promote a loaded <video> to an autoplaying clip, or leave it exactly as it is.
+function maybeAutoplayClip(v, att) {
+  if (!shouldAutoplayClip(att, v.duration, reducedMotion.matches)) return;
+  v.muted = true;  // the PROPERTY, not the attribute — that's what the autoplay gate reads
+  v.loop = true;
+  v.removeAttribute('controls');
+  v.classList.add('att-clip');
+  const wrap = v.parentElement;
+  if (wrap) {
+    wrap.classList.add('att-clip-wrap');
+    wrap.appendChild(clipSoundBtn(v));
+  }
+  // Autoplay has no controls, so one click hands the clip back to the user:
+  // paused, with the real controls, scrubbable like any other video.
+  v.addEventListener('click', () => releaseClip(v), { once: true });
+  clipObserver().observe(v);
+}
+
+function playClip(v) {
+  v.play().catch(() => {
+    // Chrome's autoplay policy can refuse an *unmuted* clip once it resumes.
+    // Sound is never worth a clip that stopped looping: drop back to silent.
+    if (v.muted) return;
+    v.muted = true;
+    syncClipSound(v);
+    v.play().catch(() => {});
+  });
+}
+
+function releaseClip(v) {
+  clipObserver().unobserve(v);
+  v.pause();
+  v.loop = false;
+  v.classList.remove('att-clip');
+  v.setAttribute('controls', ''); // native controls carry their own volume from here
+  const wrap = v.parentElement;
+  if (wrap) {
+    wrap.classList.remove('att-clip-wrap');
+    wrap.querySelector('.att-clip-sound')?.remove();
+  }
+}
+
+// The corner sound toggle. Autoplay is muted by definition, so this is the only
+// way to hear a short video that does carry audio. It's offered on every clip:
+// whether a video has an audio track can't be answered before it plays, and
+// withholding the control on a clip that *does* have sound is the worse miss.
+function clipSoundBtn(v) {
+  const btn = el('button', { class: 'att-clip-sound', type: 'button' });
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    v.muted = !v.muted;
+    syncClipSound(v, btn);
+  });
+  syncClipSound(v, btn); // not in the DOM yet, so it has to be passed in
+  return btn;
+}
+
+function syncClipSound(v, btn = v.parentElement?.querySelector('.att-clip-sound')) {
+  if (!btn) return;
+  const { glyph, label } = clipSoundIcon(v.muted);
+  btn.textContent = glyph;
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.classList.toggle('on', !v.muted); // sound on -> stay visible, hover or not
 }
 
 // ---------- link preview cards ----------
@@ -648,6 +758,7 @@ function renderMessages(data) {
     const row = messageRow(msg, prev, isGroup);
     if (row) { frag.appendChild(row); prev = msg; }
   }
+  resetClips(); // the rows about to be discarded own every observed clip
   inner.replaceChildren(frag);
 
   state.hasOlder = !!data.hasOlder;

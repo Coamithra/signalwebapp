@@ -12,7 +12,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AVATAR_COLORS, colorFor, initials, previewText, menuActionsFor,
-  kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
+  kindForType, iconForKind, shouldAutoplayClip, clipSoundIcon, AUTOPLAY_MAX_SECONDS,
+  parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
   jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
@@ -99,6 +100,49 @@ test('kindForType / iconForKind', () => {
   assert.equal(iconForKind('audio'), '🎵');
   assert.equal(iconForKind('file'), '📎');
   assert.equal(iconForKind('nonsense'), '📎');
+});
+
+// ---------- autoplaying short clips ----------
+
+const video = { kind: 'video', contentType: 'video/mp4' };
+
+test('shouldAutoplayClip: short videos autoplay, long ones keep their controls', () => {
+  assert.equal(shouldAutoplayClip(video, 3, false), true);
+  assert.equal(shouldAutoplayClip(video, AUTOPLAY_MAX_SECONDS, false), true);   // the threshold is inclusive
+  assert.equal(shouldAutoplayClip(video, AUTOPLAY_MAX_SECONDS + 0.1, false), false);
+  assert.equal(shouldAutoplayClip(video, 600, false), false);
+});
+
+test('shouldAutoplayClip: an unusable duration falls back to the play button', () => {
+  // Metadata not in yet, or a length the browser can't work out. Either way the
+  // safe answer is "ordinary video" — never a 20-minute clip looping forever.
+  assert.equal(shouldAutoplayClip(video, NaN, false), false);
+  assert.equal(shouldAutoplayClip(video, Infinity, false), false);
+  assert.equal(shouldAutoplayClip(video, undefined, false), false);
+  assert.equal(shouldAutoplayClip(video, 0, false), false);
+  assert.equal(shouldAutoplayClip(video, -1, false), false);
+  assert.equal(shouldAutoplayClip(video, '3', false), false); // duration is a number or it's nothing
+});
+
+test('shouldAutoplayClip: only a <video> can be driven', () => {
+  // An animated image/gif renders as <img> and animates itself — there is no
+  // API to start or stop it, so it must never reach the clip machinery.
+  assert.equal(shouldAutoplayClip({ kind: 'image', contentType: 'image/gif' }, 3, false), false);
+  assert.equal(shouldAutoplayClip({ kind: 'audio' }, 3, false), false);
+  assert.equal(shouldAutoplayClip({ kind: 'voice' }, 3, false), false);
+  assert.equal(shouldAutoplayClip({ kind: 'file' }, 3, false), false);
+  assert.equal(shouldAutoplayClip(null, 3, false), false);
+  assert.equal(shouldAutoplayClip(undefined, 3, false), false);
+});
+
+test('shouldAutoplayClip: prefers-reduced-motion vetoes everything', () => {
+  assert.equal(shouldAutoplayClip(video, 3, true), false);
+  assert.equal(shouldAutoplayClip(video, AUTOPLAY_MAX_SECONDS, true), false);
+});
+
+test('clipSoundIcon labels the action, not the state', () => {
+  assert.deepEqual(clipSoundIcon(true), { glyph: '🔇', label: 'Unmute' });
+  assert.deepEqual(clipSoundIcon(false), { glyph: '🔊', label: 'Mute' });
 });
 
 // ---------- emoji frequency: parsing ----------

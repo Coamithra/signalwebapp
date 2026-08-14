@@ -158,6 +158,38 @@ export function iconForKind(kind) {
   return kind === 'image' ? '🖼️' : kind === 'video' ? '🎬' : kind === 'audio' ? '🎵' : '📎';
 }
 
+// ---------- autoplaying short clips ----------
+// Short motion in a thread should just play, the way it does in Signal itself.
+// Over this many seconds it's a video you chose to watch, not a clip you glanced
+// at, and it keeps its ordinary controls.
+export const AUTOPLAY_MAX_SECONDS = 15;
+
+// Should this attachment loop silently while it's on screen?
+//
+// Only a <video> can be driven: an animated image/gif is an <img> that the
+// browser animates by itself with no API to start or stop it, so it is already
+// "autoplaying" and there is nothing here to decide — hence the kind check
+// before anything else. (Everything the /gif picker sends is video/mp4, so it
+// lands on this path, not that one.)
+//
+// `duration` only exists once 'loadedmetadata' has fired, and even then it can
+// be NaN or Infinity for a length the browser can't work out. Both fall through
+// to false — an unreadable duration degrades to today's play button, never to a
+// clip that turns out to be twenty minutes long and loops forever.
+export function shouldAutoplayClip(att, duration, reducedMotion) {
+  if (reducedMotion) return false;              // the OS asked for less motion; honour it
+  if (!att || att.kind !== 'video') return false;
+  return Number.isFinite(duration) && duration > 0 && duration <= AUTOPLAY_MAX_SECONDS;
+}
+
+// The corner sound toggle on a playing clip. Autoplay is always muted, so this
+// is the only way to hear a short video that does carry audio.
+export function clipSoundIcon(muted) {
+  return muted
+    ? { glyph: '🔇', label: 'Unmute' }
+    : { glyph: '🔊', label: 'Mute' };
+}
+
 // ---------- emoji pick frequency ----------
 // Picks are counted so a hard-capped list of 8 stays useful: substring matching
 // means ":up" has ~40 candidates, and the ones you actually use should be in
