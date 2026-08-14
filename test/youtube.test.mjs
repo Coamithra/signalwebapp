@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { subLangsFor, pickSubFile, parseVideoId, findYouTubeUrl } from '../src/youtube.js';
+import { subLangsFor, pickSubFile, parseVideoId, findYouTubeUrl, findYouTubeUrls } from '../src/youtube.js';
 
 test('subLangsFor: the narrow attempt is literal, never a regex', () => {
   // The whole bug: yt-dlp treats each entry as a case-insensitive full-match
@@ -64,4 +64,35 @@ test('findYouTubeUrl: picks the link out of surrounding prose', () => {
   assert.equal(found.videoId, 'Ks-_Mh1QhMc');
   assert.equal(found.url, 'https://youtu.be/Ks-_Mh1QhMc');
   assert.equal(findYouTubeUrl('no links here'), null);
+});
+
+test('findYouTubeUrls: every link in the message, in order, non-YouTube ones skipped', () => {
+  const got = findYouTubeUrls(
+    'first https://youtu.be/Ks-_Mh1QhMc then https://example.com/watch?v=nope ' +
+    'and https://www.youtube.com/watch?v=dQw4w9WgXcQ. also https://youtube.com/shorts/aaaaaaaaaaa!',
+  );
+  assert.deepEqual(got.map((l) => l.videoId), ['Ks-_Mh1QhMc', 'dQw4w9WgXcQ', 'aaaaaaaaaaa']);
+  // Trailing sentence punctuation is trimmed the same way it always was.
+  assert.equal(got[1].url, 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert.equal(got[2].url, 'https://youtube.com/shorts/aaaaaaaaaaa');
+});
+
+test('findYouTubeUrls: one video is one entry however many times it is pasted', () => {
+  // Same video as a short link, a watch url and a timestamped one: the reader
+  // sees one video, so this must be one summary, not three.
+  const got = findYouTubeUrls(
+    'https://youtu.be/Ks-_Mh1QhMc https://www.youtube.com/watch?v=Ks-_Mh1QhMc ' +
+    'https://youtu.be/Ks-_Mh1QhMc?t=90',
+  );
+  assert.equal(got.length, 1);
+  assert.equal(got[0].url, 'https://youtu.be/Ks-_Mh1QhMc'); // the first one wins
+});
+
+test('findYouTubeUrls: limit bounds the result, and the singular is the limit-1 case', () => {
+  const text = 'https://youtu.be/Ks-_Mh1QhMc https://youtu.be/dQw4w9WgXcQ https://youtu.be/aaaaaaaaaaa';
+  assert.equal(findYouTubeUrls(text, 2).length, 2);
+  assert.equal(findYouTubeUrls(text, 0).length, 0);
+  assert.deepEqual(findYouTubeUrls(text, 1)[0], findYouTubeUrl(text));
+  assert.deepEqual(findYouTubeUrls(''), []);
+  assert.deepEqual(findYouTubeUrls(null), []);
 });

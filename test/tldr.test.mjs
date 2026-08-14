@@ -11,7 +11,7 @@ import {
   formatTldr, friendlyReason, friendlyContextReason, MAX_TRANSCRIPT_CHARS,
   buildContextPrompt, CONTEXT_SYSTEM_PROMPT, parseContext, MAX_CONTEXT_CHARS,
   availabilityError, shouldAttempt, AVAILABILITY_RECHECK_MS, AVAILABILITY_TEXT,
-  annotateYouTube,
+  clampTitle, annotateYouTube,
 } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
 
@@ -569,6 +569,23 @@ test('AVAILABILITY_TEXT is the same wording a real run\'s failure produces', () 
     const kind = availabilityError(new Error(tag));
     assert.ok(AVAILABILITY_TEXT[kind], tag);
   }
+});
+
+// ---------- the multi-link picker ----------
+
+test('clampTitle: one line, bounded, never half an emoji', () => {
+  assert.equal(clampTitle('  How  to\nsleep  better '), 'How to sleep better');
+  assert.equal(clampTitle(null), '');
+  assert.equal(clampTitle(undefined), '');
+  const long = clampTitle('x'.repeat(400));
+  assert.ok(long.length <= 120, long.length);
+  assert.ok(long.endsWith('…'));
+  // A title cut exactly on a surrogate pair must drop the pair, not split it --
+  // half an emoji renders as a replacement char in the picker.
+  // 118 fillers puts the emoji's high surrogate at index 118, i.e. the LAST
+  // character of the slice(0, 119) — the branch this asserts on.
+  const emoji = clampTitle('y'.repeat(118) + '😀' + 'z'.repeat(50));
+  assert.ok(!/[\uD800-\uDBFF]$/.test(emoji.slice(0, -1)), emoji);
 });
 
 // --- "Summarize in chat" annotation ---------------------------------------

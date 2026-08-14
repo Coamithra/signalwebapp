@@ -52,8 +52,8 @@ evaluate must target the isolated context's id.
 | [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/getQuoteThumbnail/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
-| [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
-| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, the realtime watcher, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
+| [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrls` — plural and deduped by video id, with `findYouTubeUrl` a thin wrapper over it — plus `parseVideoId`), `fetchMeta` (title/channel from oEmbed, also what labels the multi-link picker) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
+| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, the realtime watcher, the multi-link picker, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`, and `linkSpans`, the link detection `renderFormatted` walks alongside the style ranges to make URLs clickable. |
@@ -372,7 +372,31 @@ evaluate must target the isolated context's id.
   outgoing* message containing a YouTube link. Only the user's own links trigger it
   (`msg.direction === 'outgoing'`), and only messages newer than a per-chat timestamp floor
   (server boot / enable time) so history is never re-summarized; a bounded `processed` set
-  dedupes. It fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
+  dedupes, keyed `${convId}:${msgId}:${videoId}` -- **per link, not per message**, since one
+  message can carry several videos.
+  **A message with SEVERAL links asks rather than guessing.** One link auto-summarizes as
+  always; two or more emit the `choose` stage instead and summarize *nothing* until the user
+  ticks boxes in the status bubble and presses Summarize. That is the cap: each summary is two
+  whole `claude` runs on the user's subscription, and there is no honest way to guess which of
+  five pasted links they meant. Candidates are labelled with their real titles via `fetchMeta`
+  (oEmbed -- public, ungated, and **not** the transcript path, so listing eight videos costs
+  eight small HTTP calls and no model runs); at most `MAX_PICK_LINKS` (8) are listed and the
+  rest are named as skipped in the question itself, never dropped in silence. The question is
+  held in memory per conversation (newest wins, TTL'd) and served on
+  `GET /api/conversations/:id/tldr` as `pending`, so a page **reload** re-hydrates it --
+  without that the SSE event carrying it would be gone and every link in the message with it.
+  Answering (`POST /api/conversations/:id/tldr/choose {urls}`) consumes it; an empty list is
+  the valid "none of these", which is also what dismissing the bubble sends. The picker is
+  deliberately **not** availability-gated (unlike the single-link path): like `retry()` it is
+  an explicit user action, so a logged-out CLI reports itself truthfully in the bubble a second
+  later instead of the links being thrown away with nothing left to re-run after logging in.
+  Picked links run **sequentially**, and every stage event of the batch carries
+  `progress: {index,total}` -- what lets one bubble per conversation say "(2 of 3)" instead of
+  three runs silently overwriting each other. ⚠️ The consequence worth knowing: a multi-link
+  message posted with no browser tab open summarizes **nothing** until someone opens the app
+  and answers. That is inherent to asking rather than guessing.
+  Once a link is actually going ahead -- the lone link of a single-link message, or one the
+  user picked -- the pipeline is the same for both: it fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
   `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks **Claude** for a summary
   of at most four sentences (~100 words) plus **one verbatim quote from the video** -- 5 to 20
   words, copied word-for-word, and omitted entirely rather than invented when nothing is worth
@@ -472,8 +496,9 @@ evaluate must target the isolated context's id.
   Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
   *YouTube* change will, and the fix is localized to `src/youtube.js`.
 - **Live UI feedback for auto-TLDR** - the pipeline emits per-stage events
-  (`fetching` -> `summarizing` -> `researching` -> `retrying` -> `done`/`failed`, keyed by
-  conversationId) through an `onStage` callback passed into `createTldr`.
+  (`choose` for the multi-link question, then `fetching` -> `summarizing` -> `researching` ->
+  `retrying` -> `done`/`failed`, keyed by conversationId) through an `onStage` callback passed
+  into `createTldr`.
   [src/server.js](src/server.js) forwards them over the **existing** SSE channel as
   `broadcast('signal', {type:'tldr', conversationId, state, url, reason?})`. The
   frontend ([public/app.js](public/app.js)) renders a transient, **local-only**
@@ -486,6 +511,11 @@ evaluate must target the isolated context's id.
   notice for it - no Retry, since the summary is already in the chat and a retry
   would send a duplicate. What each stage renders (label/icon/buttons) is the pure
   `tldrBubble` in [public/ui-logic.js](public/ui-logic.js); app.js only paints it.
+  Its 4th argument is the stage's own payload -- `links`/`skipped` for the `choose`
+  picker (whose question line is the pure `pickerLabel`), `progress` for one link
+  of a picked batch, which it appends to *every* label as "(2 of 3)" rather than
+  per stage: with one bubble per chat that suffix is the only thing telling the
+  second link's failure apart from the first's.
   It is **never** a Signal message. Retry POSTs to
   `/api/conversations/:id/tldr/retry {url}` -> `tldr.retry(id, url)`, which re-runs
   the summary **bypassing the dedup/`since`-floor guards**, so it works even after

@@ -1063,6 +1063,7 @@ async function openConversation(id) {
     state.activeId = id;
     renderConversations(); // update active highlight
     renderActiveTldr(); // re-hydrate the auto-TLDR bubble for the chat we just opened
+    hydratePendingTldr(id); // ...and an unanswered multi-link picker the server still holds
   }
   updateSendEnabled();
   $('#emptyState').classList.add('hidden');
@@ -1875,18 +1876,43 @@ function clearTldrFor(convId) {
   if (key === state.activeId) renderActiveTldr();
 }
 
-// Render/replace the bubble for a pipeline stage. `url` is the link in flight; it
-// rides into the Retry handler so a manual retry knows what to re-run. What to
-// show (label, icon, which buttons) is decided in ui-logic.js (tldrBubble);
-// this only paints it.
-function renderTldrStatus(stage, reason, url, kind) {
+// Render/replace the bubble for a stored status: `{stage, reason, url, kind}`,
+// plus `links`/`skipped` for the multi-link picker and `progress` for one link
+// of a chosen batch. `url` is the link in flight; it rides into the Retry
+// handler so a manual retry knows what to re-run. What to show (label, icon,
+// which buttons) is decided in ui-logic.js (tldrBubble); this only paints it.
+function renderTldrStatus(st) {
   const host = $('#tldrStatus');
   if (!host) return;
-  const b = tldrBubble(stage, reason, kind);
+  const { stage, reason, url, kind, links, skipped, progress } = st;
+  const b = tldrBubble(stage, reason, kind, { links, skipped, progress });
   const children = [];
   if (b.tone === 'warn') children.push(el('span', { class: 'tldr-icon', text: '⚠' }));
   else if (b.tone === 'work') children.push(el('span', { class: 'tldr-spinner' }));
   children.push(el('span', { class: 'tldr-text', text: b.label }));
+  // The multi-link picker: one checkbox per video, then Summarize. Titles are
+  // third-party text, so they go in as textContent like every other
+  // Signal-derived string — never innerHTML.
+  if (b.picker) {
+    const boxes = (links || []).map((l) => el('input', { type: 'checkbox', value: l.url }));
+    const go = el('button', {
+      class: 'tldr-retry', text: 'Summarize', disabled: 'disabled',
+      onclick: () => chooseTldr(boxes.filter((c) => c.checked).map((c) => c.value)),
+    });
+    // Answering consumes the question, and an empty answer means "none of
+    // these" — so a stray click on an untouched picker would throw the whole
+    // message's links away with no undo. Nothing to summarize, nothing to
+    // press; the × is the deliberate way to say no.
+    const sync = () => { go.disabled = !boxes.some((c) => c.checked); };
+    for (const box of boxes) box.addEventListener('change', sync);
+    children.push(el('div', { class: 'tldr-picker' }, boxes.map((box, i) => el(
+      'label', { class: 'tldr-pick' },
+      // Falls back to the url when oEmbed could not name the video: a bare link
+      // is still enough to tell two candidates apart.
+      [box, el('span', { class: 'tldr-pick-title', text: links[i].title || links[i].url })],
+    ))));
+    children.push(go);
+  }
   // The sign-in link is a real anchor, never window.open(): opened after an
   // await it would be eaten by the popup blocker, and the CLI has usually
   // opened its own tab in the server machine's default browser already — which
@@ -1901,10 +1927,15 @@ function renderTldrStatus(stage, reason, url, kind) {
   if (b.cancelLogin) children.push(el('button', { class: 'tldr-retry', text: 'Cancel', onclick: () => cancelClaudeLogin(url) }));
   if (b.dismiss) {
     children.push(el('button', {
-      class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: () => clearTldrFor(state.activeId),
+      class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss',
+      // Dismissing a picker is the "none of these" answer, so it goes to the
+      // server rather than just clearing locally — otherwise the question comes
+      // straight back the next time the chat is opened.
+      onclick: () => (b.picker ? chooseTldr([]) : clearTldrFor(state.activeId)),
     }));
   }
-  const cls = 'tldr-bubble' + (b.tone === 'warn' ? ' failed' : b.tone === 'info' ? ' info' : '');
+  const cls = 'tldr-bubble' + (b.tone === 'warn' ? ' failed' : b.tone === 'info' ? ' info' : '')
+    + (b.picker ? ' picker' : '');
   host.replaceChildren(el('div', { class: cls }, children));
   host.classList.remove('hidden');
   scrollToBottom(); // follow it into view only if already near the bottom
@@ -1931,7 +1962,12 @@ function handleTldrStage(e) {
   // `kind` is the server's fixed classification of a failure ('auth' /
   // 'not-found'); it is what decides whether the bubble offers to log in, so it
   // is never inferred from the human-readable reason text.
-  setTldrFor(convId, { stage: e.state, reason: e.reason, url: e.url, kind: e.kind });
+  setTldrFor(convId, {
+    stage: e.state, reason: e.reason, url: e.url, kind: e.kind,
+    // Only the 'choose' stage carries these, and only a batch carries progress;
+    // storing them unconditionally keeps the status one shape.
+    links: e.links, skipped: e.skipped, progress: e.progress,
+  });
   if (convId === state.activeId) renderActiveTldr();
 }
 
@@ -1945,7 +1981,44 @@ function renderActiveTldr() {
     if (host) { host.replaceChildren(); host.classList.add('hidden'); }
     return;
   }
-  renderTldrStatus(st.stage, st.reason, st.url, st.kind);
+  renderTldrStatus(st);
+}
+
+// Ask the server whether this chat has an unanswered multi-link picker.
+//
+// The picker is the one piece of TLDR status the server outlives the page for:
+// the stage event carrying it is long gone after a reload, and dropping the
+// question would throw away every link in the message with it. Only ever fills
+// an EMPTY slot — a pipeline stage this tab is already tracking is fresher than
+// anything the server can tell us about.
+async function hydratePendingTldr(id) {
+  const key = String(id);
+  if (tldrByConv.has(key)) return;
+  let data;
+  try { data = await api(`/api/conversations/${encodeURIComponent(id)}/tldr`); }
+  catch { return; }
+  if (!data || !data.pending || tldrByConv.has(key)) return;
+  setTldrFor(key, { stage: 'choose', links: data.pending.links, skipped: data.pending.skipped });
+  if (key === state.activeId) renderActiveTldr();
+}
+
+// Answer the multi-link picker with the ticked subset. An empty list is the
+// valid "none of these" answer (what dismissing means), and either way the
+// question is consumed server-side so reopening the chat doesn't re-ask.
+async function chooseTldr(urls) {
+  const id = state.activeId;
+  if (!id) return;
+  // Clear the question locally first: the first picked link's own stage events
+  // repaint the bubble a moment later, and leaving the checkboxes up until then
+  // invites a second click the server would rightly reject as already answered.
+  clearTldrFor(id);
+  try {
+    await api(`/api/conversations/${encodeURIComponent(id)}/tldr/choose`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ urls }),
+    });
+  } catch (err) {
+    if (urls.length) toast(`Could not start the summaries: ${retryErrorReason(err.message)}`);
+  }
 }
 
 // ---------- in-app `claude auth login` ----------

@@ -373,15 +373,19 @@ export function evictOldestTldr(map, cap, keepKey) {
   }
 }
 
-// Friendly text for the error tokens the retry / summarize endpoints can
-// return, so the bubble never shows a raw enum like "not-configured". The last
-// two are only reachable from the message menu's "Summarize in chat", which is
-// the one entry point gated on a video having been summarized already.
+// Friendly text for the error tokens the retry / summarize / choose endpoints
+// can return, so the bubble never shows a raw enum like "not-configured".
+// `already-summarized` and `in-progress` are only reachable from the message
+// menu's "Summarize in chat", the one entry point gated on a video having been
+// summarized already; `no-pending` only from the multi-link picker.
 export function retryErrorReason(msg) {
   if (msg === 'not-configured') return 'auto-TLDR is not configured';
   if (msg === 'bad-url') return 'not a recognized YouTube link';
   if (msg === 'already-summarized') return 'that video already has a TLDR in this chat';
   if (msg === 'in-progress') return 'that video is already being summarized';
+  // The picker's question was already answered, or aged out of the server's
+  // memory.
+  if (msg === 'no-pending') return 'that question has already been answered';
   return msg || 'retry failed';
 }
 
@@ -429,7 +433,29 @@ export function tldrHint(data) {
 // 'not-found'), and only 'auth' earns the Log in button: a missing binary is
 // not something a browser flow can install, so offering one would be a button
 // that cannot work.
-export function tldrBubble(stage, reason, kind) {
+//
+// `extra` carries the stage's own payload: `links`/`skipped` for the picker, and
+// `progress` ({index,total}) for a link the user picked out of a multi-link
+// message. The progress suffix is appended to every label rather than handled
+// per stage -- with one bubble per conversation, "(2 of 3)" is the only thing
+// distinguishing the second link's failure from the first one's.
+export function tldrBubble(stage, reason, kind, extra = {}) {
+  const b = bubbleFor(stage, reason, kind, extra);
+  const p = extra && extra.progress;
+  if (p && p.total > 1) b.label = `${b.label} (${p.index} of ${p.total})`;
+  return b;
+}
+
+function bubbleFor(stage, reason, kind, extra) {
+  if (stage === 'choose') {
+    // The only stage that asks a question rather than reporting. No Retry (there
+    // is no single link in flight yet) and no spinner: nothing is running, and
+    // nothing will until the user answers.
+    return {
+      label: pickerLabel(extra.links, extra.skipped),
+      tone: 'info', retry: false, dismiss: true, picker: true,
+    };
+  }
   if (stage === 'done') {
     return {
       label: `Sent without its "For context" block: ${reason || 'research failed'}`,
@@ -489,4 +515,17 @@ export function tldrBubble(stage, reason, kind) {
     : stage === 'retrying' ? `Retrying${reason ? ` (${reason})` : ''}…`
     : 'Working…';
   return { label, tone: 'work', retry: false, dismiss: false };
+}
+
+// The picker's question line. `links` are the candidates listed and `skipped`
+// the ones past the server's cap -- said out loud, because a link dropped in
+// silence is the whole bug this feature exists to fix.
+export function pickerLabel(links, skipped) {
+  const n = Array.isArray(links) ? links.length : 0;
+  const extra = skipped > 0 ? skipped : 0;
+  // The count is the REAL total, not the listed subset: "8 links (2 more were
+  // not listed)" reads as a contradiction, and the whole point of saying
+  // anything is that the reader learns nothing was quietly dropped.
+  const head = `Which of these ${n + extra} YouTube links should I summarize?`;
+  return extra ? `${head} Only the first ${n} are listed.` : head;
 }
