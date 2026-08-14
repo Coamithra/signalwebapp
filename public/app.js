@@ -9,6 +9,7 @@ import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
   tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
+  shouldAutoplayClip, clipSoundIcon,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -235,11 +236,19 @@ function attachmentEl(msg, att, i) {
     return wrapMedia(img);
   }
   if (att.kind === 'video') {
-    const v = el('video', { class: 'att-media att-video', src, controls: '', preload: 'metadata' });
+    const v = el('video', { class: 'att-media att-video', src, controls: '', preload: 'metadata', playsinline: '' });
     const vbox = mediaBox(att);
     if (vbox) { v.style.width = `${vbox.w}px`; v.style.height = `${vbox.h}px`; }
     if (att.hasThumbnail) v.setAttribute('poster', `${src}?thumb=1`);
-    v.addEventListener('error', () => v.replaceWith(attachmentChip(att, "Couldn't load")));
+    v.addEventListener('error', () => {
+      // replaceWith swaps the <video> alone; the clip's sound button lives on
+      // the wrap and would be left pinned to the corner of the error chip.
+      if (v.classList.contains('att-clip')) releaseClip(v);
+      v.replaceWith(attachmentChip(att, "Couldn't load"));
+    });
+    // Duration isn't known until metadata arrives, so a short clip can only
+    // become an autoplaying one after the fact — not while the row is built.
+    v.addEventListener('loadedmetadata', () => maybeAutoplayClip(v, att), { once: true });
     return wrapMedia(v);
   }
   if (att.kind === 'audio' || att.kind === 'voice') {
@@ -252,6 +261,134 @@ function attachmentEl(msg, att, i) {
   }
   // files / unknown types -> downloadable chip
   return attachmentChip(att, null, src);
+}
+
+// ---------- autoplaying short clips ----------
+// A clip shorter than AUTOPLAY_MAX_SECONDS loops silently while it's on screen
+// and pauses the moment it isn't, the way short motion behaves in Signal itself.
+// Everything here only ever runs for a <video>: an animated image/gif is an
+// <img> the browser animates on its own, with nothing to start or stop.
+//
+// Nothing is swapped or re-created — we enable playback on the same element that
+// already had the ?thumb=1 poster, so the poster hands off to the first decoded
+// frame with no flash and no reflow (mediaBox() reserved the pixel box).
+
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+const CLIP_VISIBLE_RATIO = 0.4; // how much of a clip must be on screen to play
+
+// One observer for every clip in the thread, so N short clips cost one
+// callback rather than N. Off-screen clips are paused and therefore not
+// decoding, which is the whole point in a long thread.
+let clipObs = null;
+function clipObserver() {
+  if (!clipObs) {
+    clipObs = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const v = e.target;
+        if (!v.isConnected) { clipObs.unobserve(v); continue; } // removed mid-flight
+        if (e.isIntersecting && e.intersectionRatio >= CLIP_VISIBLE_RATIO) playClip(v);
+        else v.pause();
+      }
+    }, { threshold: [0, CLIP_VISIBLE_RATIO] });
+  }
+  return clipObs;
+}
+
+// renderMessages() rebuilds every row, and an IntersectionObserver keeps a
+// strong reference to what it observes — a clip that was already off screen when
+// its row was replaced never changes intersection state, so it would never be
+// reaped by the isConnected check above. Dropping the whole set on each render
+// is simpler and exact: the new rows re-register themselves on 'loadedmetadata'.
+function resetClips() {
+  if (clipObs) clipObs.disconnect();
+}
+
+// Promote a loaded <video> to an autoplaying clip, or leave it exactly as it is.
+function maybeAutoplayClip(v, att) {
+  if (!shouldAutoplayClip(att, v.duration, reducedMotion.matches)) return;
+  v.muted = true;  // the PROPERTY, not the attribute — that's what the autoplay gate reads
+  v.loop = true;
+  v.removeAttribute('controls');
+  v.classList.add('att-clip');
+  const wrap = v.parentElement;
+  if (wrap) {
+    wrap.classList.add('att-clip-wrap');
+    wrap.appendChild(clipSoundBtn(v));
+  }
+  // Autoplay has no controls, so one click hands the clip back to the user:
+  // paused, with the real controls, scrubbable like any other video. Dropping
+  // `controls` also drops the element out of the tab order, so the promoted clip
+  // carries its own tabindex + Enter/Space — a keyboard user has to be able to
+  // reach the same escape hatch the mouse has.
+  const onKey = (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault(); // Space would scroll the thread out from under them
+    release();
+  };
+  const release = () => {
+    // Both listeners go, or a later click on the restored native controls would
+    // pause whatever the user had just started playing.
+    v.removeEventListener('click', release);
+    v.removeEventListener('keydown', onKey);
+    releaseClip(v);
+  };
+  v.tabIndex = 0;
+  v.addEventListener('click', release);
+  v.addEventListener('keydown', onKey);
+  clipObserver().observe(v);
+}
+
+function playClip(v) {
+  v.play().catch((err) => {
+    // Chrome's autoplay policy can refuse an *unmuted* clip once it resumes.
+    // Sound is never worth a clip that stopped looping: drop back to silent.
+    // Only that refusal, though — a rejection is far more often the AbortError
+    // from the observer pausing a clip that was still spinning up, and re-muting
+    // on that would silently undo the unmute on every scroll past.
+    if (v.muted || err?.name !== 'NotAllowedError') return;
+    v.muted = true;
+    syncClipSound(v);
+    v.play().catch(() => {});
+  });
+}
+
+function releaseClip(v) {
+  clipObserver().unobserve(v);
+  v.pause();
+  v.loop = false;
+  v.muted = false; // an ordinary video in this thread has sound; a 14s one shouldn't differ
+  v.classList.remove('att-clip');
+  v.removeAttribute('tabindex'); // <video controls> is focusable on its own again
+  v.setAttribute('controls', '');
+  const wrap = v.parentElement;
+  if (wrap) {
+    wrap.classList.remove('att-clip-wrap');
+    wrap.querySelector('.att-clip-sound')?.remove();
+  }
+}
+
+// The corner sound toggle. Autoplay is muted by definition, so this is the only
+// way to hear a short video that does carry audio. It's offered on every clip:
+// whether a video has an audio track can't be answered before it plays, and
+// withholding the control on a clip that *does* have sound is the worse miss.
+function clipSoundBtn(v) {
+  const btn = el('button', { class: 'att-clip-sound', type: 'button' });
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    v.muted = !v.muted;
+    syncClipSound(v, btn);
+  });
+  syncClipSound(v, btn); // not in the DOM yet, so it has to be passed in
+  return btn;
+}
+
+function syncClipSound(v, btn = v.parentElement?.querySelector('.att-clip-sound')) {
+  if (!btn) return;
+  const { glyph, label } = clipSoundIcon(v.muted);
+  btn.textContent = glyph;
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.classList.toggle('on', !v.muted); // sound on -> stay visible, hover or not
 }
 
 // ---------- link preview cards ----------
@@ -388,9 +525,14 @@ function messageRow(msg, prev, isGroup) {
 // Which actions apply to a given message. Edit only makes sense for your own
 // text messages; "Delete for everyone" only for your own (Signal's unsend);
 // "Delete for me" (local) is always available. Tombstones/incoming get just the
-// local delete. The eligibility rules live in ui-logic.js (testable); this only
-// binds the action names to labels and handlers.
+// local delete. "Summarize in chat" appears on any message the server tagged with
+// a YouTube link, whoever sent it. The eligibility rules live in ui-logic.js
+// (testable); this only binds the action names to labels and handlers.
 const MENU_ACTIONS = {
+  summarize: (msg) => ({ label: 'Summarize in chat', onClick: () => startTldr(msg.youtube.url, 'summarize') }),
+  // Inert on purpose: see menuActionsFor. Carries no onClick, so openMessageMenu
+  // renders it as a disabled button.
+  summarized: () => ({ label: 'Already summarized', disabled: true }),
   edit: (msg) => ({ label: 'Edit', onClick: () => startEdit(msg) }),
   deleteForEveryone: (msg) => ({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) }),
   deleteForMe: (msg) => ({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) }),
@@ -441,7 +583,11 @@ function openMessageMenu(msg, anchorBtn) {
   for (const it of items) {
     menu.appendChild(el('button', {
       class: 'msg-menu-item' + (it.danger ? ' danger' : ''), text: it.label,
-      onclick: () => { closeMessageMenu(); it.onClick(); },
+      // A disabled entry is there to explain why the action isn't offered, so it
+      // gets neither the attribute's click-swallowing nor a handler to swallow.
+      ...(it.disabled
+        ? { disabled: '' }
+        : { onclick: () => { closeMessageMenu(); it.onClick(); } }),
     }));
   }
   document.body.appendChild(menu);
@@ -648,6 +794,7 @@ function renderMessages(data) {
     const row = messageRow(msg, prev, isGroup);
     if (row) { frag.appendChild(row); prev = msg; }
   }
+  resetClips(); // the rows about to be discarded own every observed clip
   inner.replaceChildren(frag);
 
   state.hasOlder = !!data.hasOlder;
@@ -1913,17 +2060,21 @@ async function refreshThreadMenuIfOpen(id) {
   } catch { /* leave the menu as it is */ }
 }
 
-// Manual retry: ask the server to re-run this link's summary. Optimistically store
-// the first real stage ('fetching', what the server emits first) so the label
-// doesn't visibly run backwards; the rest stream back over SSE.
-async function retryTldr(url) {
+// Ask the server to run one link's summary now, and follow it in the status
+// bubble. `kind` picks the endpoint: 'retry' re-runs a link whose summary failed
+// (ungated server-side — it's the recovery path), 'summarize' is the message
+// menu's explicit action, which the server refuses once that video has a summary
+// in this chat. Optimistically store the first real stage ('fetching', what the
+// server emits first) so the label doesn't visibly run backwards; the rest stream
+// back over SSE, identically for both.
+async function startTldr(url, kind) {
   const id = state.activeId;
   if (!id || !url) return;
   const key = String(id);
   setTldrFor(key, { stage: 'fetching', reason: null, url });
   renderActiveTldr();
   try {
-    const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/retry`, {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/${kind}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }),
     });
     if (!r.ok) throw new Error(r.error || 'retry failed');
@@ -1931,11 +2082,22 @@ async function retryTldr(url) {
     // Only show the failure if we're still tracking this same link for that chat.
     const cur = tldrByConv.get(key);
     if (cur && cur.url === url) {
-      setTldrFor(key, { stage: 'failed', reason: retryErrorReason(err.message), url });
+      // A refusal is not a failure: nothing ran, and the 'failed' bubble's Retry
+      // goes to the ungated /tldr/retry, which would send the duplicate the
+      // refusal just prevented. 'refused' is the dismiss-only notice instead.
+      const stage = REFUSALS.has(err.message) ? 'refused' : 'failed';
+      setTldrFor(key, { stage, reason: retryErrorReason(err.message), url });
       renderActiveTldr();
     }
   }
 }
+
+// The server's two "I declined to start" tokens, as opposed to "a run failed".
+const REFUSALS = new Set(['already-summarized', 'in-progress']);
+
+// The bubble's Retry button, which only ever re-runs a link the pipeline already
+// had in hand.
+const retryTldr = (url) => startTldr(url, 'retry');
 
 // ---------- status + toast ----------
 function setStatus(status) {

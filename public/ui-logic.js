@@ -39,10 +39,24 @@ export function previewText(conv) {
 // your own (Signal's unsend); "Delete for me" (local) is always available.
 // Tombstones/incoming get just the local delete. Returns action *names* —
 // app.js maps them to labels and handlers, which is what keeps this testable.
+//
+// "Summarize in chat" leads, being the only non-destructive one, and is the one
+// action that applies to messages you did NOT send — running the auto-TLDR
+// pipeline over someone else's video is the whole reason it exists. It rides on
+// `msg.youtube`, which the SERVER attaches (annotateYouTube in src/tldr.js), so
+// the URL parser stays in one place instead of being shipped to the browser too.
+// Once that video has a summary in this chat it becomes 'summarized', a disabled
+// entry: an option that silently vanishes reads as a bug, where a greyed-out one
+// answers the question the user was about to ask.
 export function menuActionsFor(msg) {
   const actions = [];
   const isOut = msg.direction === 'outgoing';
   const hasText = !!(msg.text && msg.text.trim());
+  // A tombstone has no body left to hold a link, so this is belt-and-braces —
+  // but summarizing a message whose text is gone would be nonsense either way.
+  if (msg.youtube && !msg.deletedForEveryone) {
+    actions.push(msg.youtube.summarized ? 'summarized' : 'summarize');
+  }
   if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) actions.push('edit');
   if (isOut && !msg.deletedForEveryone) actions.push('deleteForEveryone');
   actions.push('deleteForMe');
@@ -158,6 +172,38 @@ export function iconForKind(kind) {
   return kind === 'image' ? '🖼️' : kind === 'video' ? '🎬' : kind === 'audio' ? '🎵' : '📎';
 }
 
+// ---------- autoplaying short clips ----------
+// Short motion in a thread should just play, the way it does in Signal itself.
+// Over this many seconds it's a video you chose to watch, not a clip you glanced
+// at, and it keeps its ordinary controls.
+export const AUTOPLAY_MAX_SECONDS = 15;
+
+// Should this attachment loop silently while it's on screen?
+//
+// Only a <video> can be driven: an animated image/gif is an <img> that the
+// browser animates by itself with no API to start or stop it, so it is already
+// "autoplaying" and there is nothing here to decide — hence the kind check
+// before anything else. (Everything the /gif picker sends is video/mp4, so it
+// lands on this path, not that one.)
+//
+// `duration` only exists once 'loadedmetadata' has fired, and even then it can
+// be NaN or Infinity for a length the browser can't work out. Both fall through
+// to false — an unreadable duration degrades to today's play button, never to a
+// clip that turns out to be twenty minutes long and loops forever.
+export function shouldAutoplayClip(att, duration, reducedMotion) {
+  if (reducedMotion) return false;              // the OS asked for less motion; honour it
+  if (!att || att.kind !== 'video') return false;
+  return Number.isFinite(duration) && duration > 0 && duration <= AUTOPLAY_MAX_SECONDS;
+}
+
+// The corner sound toggle on a playing clip. Autoplay is always muted, so this
+// is the only way to hear a short video that does carry audio.
+export function clipSoundIcon(muted) {
+  return muted
+    ? { glyph: '🔇', label: 'Unmute' }
+    : { glyph: '🔊', label: 'Mute' };
+}
+
 // ---------- emoji pick frequency ----------
 // Picks are counted so a hard-capped list of 8 stays useful: substring matching
 // means ":up" has ~40 candidates, and the ones you actually use should be in
@@ -264,13 +310,18 @@ export function evictOldestTldr(map, cap, keepKey) {
   }
 }
 
-// Friendly text for the error tokens the retry and choose endpoints can return,
-// so the bubble never shows a raw enum like "not-configured".
+// Friendly text for the error tokens the retry / summarize / choose endpoints
+// can return, so the bubble never shows a raw enum like "not-configured".
+// `already-summarized` and `in-progress` are only reachable from the message
+// menu's "Summarize in chat", the one entry point gated on a video having been
+// summarized already; `no-pending` only from the multi-link picker.
 export function retryErrorReason(msg) {
   if (msg === 'not-configured') return 'auto-TLDR is not configured';
   if (msg === 'bad-url') return 'not a recognized YouTube link';
+  if (msg === 'already-summarized') return 'that video already has a TLDR in this chat';
+  if (msg === 'in-progress') return 'that video is already being summarized';
   // The picker's question was already answered, or aged out of the server's
-  // memory — the one token the choose route adds to this list.
+  // memory.
   if (msg === 'no-pending') return 'that question has already been answered';
   return msg || 'retry failed';
 }
@@ -352,6 +403,16 @@ function bubbleFor(stage, reason, kind, extra) {
     return {
       label: `Auto-TLDR failed${reason ? `: ${reason}` : ''}`,
       tone: 'warn', retry: true, dismiss: true, login: kind === 'auth',
+    };
+  }
+  if (stage === 'refused') {
+    // The server declined to start a run at all — that video already has a TLDR
+    // here, or one is in flight. NOT 'failed': that stage always offers Retry,
+    // and Retry posts to the deliberately ungated /tldr/retry, so one more click
+    // would send the very duplicate the refusal just prevented.
+    return {
+      label: `Not summarized: ${reason || 'already done'}`,
+      tone: 'info', retry: false, dismiss: true,
     };
   }
   if (stage === 'login') {
