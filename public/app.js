@@ -1599,16 +1599,23 @@ function renderTldrStatus(st) {
   // Signal-derived string — never innerHTML.
   if (b.picker) {
     const boxes = (links || []).map((l) => el('input', { type: 'checkbox', value: l.url }));
+    const go = el('button', {
+      class: 'tldr-retry', text: 'Summarize', disabled: 'disabled',
+      onclick: () => chooseTldr(boxes.filter((c) => c.checked).map((c) => c.value)),
+    });
+    // Answering consumes the question, and an empty answer means "none of
+    // these" — so a stray click on an untouched picker would throw the whole
+    // message's links away with no undo. Nothing to summarize, nothing to
+    // press; the × is the deliberate way to say no.
+    const sync = () => { go.disabled = !boxes.some((c) => c.checked); };
+    for (const box of boxes) box.addEventListener('change', sync);
     children.push(el('div', { class: 'tldr-picker' }, boxes.map((box, i) => el(
       'label', { class: 'tldr-pick' },
       // Falls back to the url when oEmbed could not name the video: a bare link
       // is still enough to tell two candidates apart.
       [box, el('span', { class: 'tldr-pick-title', text: links[i].title || links[i].url })],
     ))));
-    children.push(el('button', {
-      class: 'tldr-retry', text: 'Summarize',
-      onclick: () => chooseTldr(boxes.filter((b2) => b2.checked).map((b2) => b2.value)),
-    }));
+    children.push(go);
   }
   // The sign-in link is a real anchor, never window.open(): opened after an
   // await it would be eaten by the popup blocker, and the CLI has usually
@@ -1714,7 +1721,7 @@ async function chooseTldr(urls) {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ urls }),
     });
   } catch (err) {
-    if (urls.length) toast(`Could not start the summaries: ${err.message}`);
+    if (urls.length) toast(`Could not start the summaries: ${retryErrorReason(err.message)}`);
   }
 }
 

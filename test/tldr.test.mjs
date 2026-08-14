@@ -582,6 +582,8 @@ test('clampTitle: one line, bounded, never half an emoji', () => {
   assert.ok(long.endsWith('…'));
   // A title cut exactly on a surrogate pair must drop the pair, not split it --
   // half an emoji renders as a replacement char in the picker.
-  const emoji = clampTitle('y'.repeat(119) + '😀' + 'z'.repeat(50));
+  // 118 fillers puts the emoji's high surrogate at index 118, i.e. the LAST
+  // character of the slice(0, 119) — the branch this asserts on.
+  const emoji = clampTitle('y'.repeat(118) + '😀' + 'z'.repeat(50));
   assert.ok(!/[\uD800-\uDBFF]$/.test(emoji.slice(0, -1)), emoji);
 });

@@ -927,10 +927,11 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     }
   }
 
-  // A message carrying several videos: ask which ones, rather than guessing at
+  // Several videos to choose between: ask which ones, rather than guessing at
   // the first (what this used to do, silently) or firing all of them (two
   // `claude` runs each, on the user's subscription, for links they may have been
-  // forwarding rather than recommending).
+  // forwarding rather than recommending). Normally these are one message's
+  // links; a scan that saw two multi-link messages hands over the union.
   //
   // Each candidate is labelled with its real title from oEmbed -- cheap,
   // unauthenticated and ungated, and crucially NOT the transcript path, so
@@ -949,7 +950,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       title: clampTitle(meta[i] && meta[i].title),
     }));
     setPending(convId, { links: candidates, skipped, ts: Date.now() });
-    log(`${links.length} links in one message — asking which to summarize` +
+    log(`${links.length} links to choose between — asking which to summarize` +
         (skipped ? ` (${skipped} beyond the cap of ${MAX_PICK_LINKS})` : ''));
     // No `url`: the question is about the whole message, and a url here would
     // reach the bubble's Retry/Log-in handlers as "the link in flight".
@@ -974,6 +975,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     if (!data || !Array.isArray(data.messages)) return;
     const floor = since.has(convId) ? since.get(convId) : bootTs;
     let maxTs = floor;
+    const ask = []; // multi-link candidates found in this scan (see below)
     for (const msg of data.messages) {
       const ts = msg.timestamp || 0;
       if (ts > maxTs) maxTs = ts;
@@ -989,11 +991,13 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       for (const l of links) markProcessed(`${convId}:${msg.id}:${l.videoId}`);
 
       if (links.length > 1) {
-        // Deliberately NOT availability-gated. Picking is an explicit user
-        // action, like retry(): if the CLI is broken the chosen run says so in
-        // the bubble within seconds, whereas gating here would throw the links
-        // away and leave nothing to re-run after the user logs in.
-        await offerPicker(convId, links);
+        // Held until the scan is done rather than offered here: one scan can
+        // contain two multi-link messages (a reconnect, or two quick sends),
+        // and a second picker would replace the first question while its links
+        // stayed marked processed -- losing them for good. They go into ONE
+        // question instead, which is also all the single per-chat bubble can
+        // ask.
+        for (const l of links) if (!ask.some((p) => p.videoId === l.videoId)) ask.push(l);
         continue;
       }
 
@@ -1014,6 +1018,11 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       summarizeAndSend(convId, found).catch((e) => log('unexpected:', e.message));
     }
     since.set(convId, maxTs); // advance the floor so we don't re-scan handled messages
+    // Deliberately NOT availability-gated. Picking is an explicit user action,
+    // like retry(): if the CLI is broken the chosen run says so in the bubble
+    // within seconds, whereas gating here would throw the links away and leave
+    // nothing to re-run after the user logs in.
+    if (ask.length) await offerPicker(convId, ask);
   }
 
   return {
@@ -1038,6 +1047,10 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
         since.set(id, Date.now()); // only links posted from now on get summarized
       } else {
         enabled.delete(id);
+        // Drop any unanswered question with it. Otherwise the GET route keeps
+        // serving a picker for a chat the feature is switched off in, and
+        // answering it would spawn runs the user just said they didn't want.
+        pending.delete(id);
       }
       saveEnabled(settingsPath, enabled);
       return enabled.has(id);

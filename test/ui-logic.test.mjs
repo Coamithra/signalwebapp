@@ -417,16 +417,16 @@ test('tldrBubble: the picker asks rather than reports', () => {
   assert.equal(b.tone, 'info');   // nothing is running yet, so no spinner
   assert.equal(b.retry, false);   // and no single link to re-run
   assert.equal(b.dismiss, true);
-  assert.match(b.label, /2 YouTube links/);
+  assert.match(b.label, /these 2 YouTube links/);
 });
 
 test('pickerLabel: links past the cap are said out loud, not swallowed', () => {
   const links = [{ url: 'a' }, { url: 'b' }];
-  assert.match(pickerLabel(links, 0), /^2 YouTube links/);
+  assert.match(pickerLabel(links, 0), /these 2 YouTube links/);
   assert.doesNotMatch(pickerLabel(links, 0), /listed/);
-  // The count is the message's real total, so it can't contradict the note --
-  // "8 links (2 more were not listed)" is nonsense to read.
-  assert.match(pickerLabel(links, 3), /^5 YouTube links/);
+  // The count is the real total, so it can't contradict the note -- "8 links
+  // (2 more were not listed)" is nonsense to read.
+  assert.match(pickerLabel(links, 3), /these 5 YouTube links/);
   assert.match(pickerLabel(links, 3), /Only the first 2 are listed\./);
 });
 

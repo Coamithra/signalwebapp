@@ -264,11 +264,14 @@ export function evictOldestTldr(map, cap, keepKey) {
   }
 }
 
-// Friendly text for the error tokens the retry endpoint can return, so the
-// bubble never shows a raw enum like "not-configured".
+// Friendly text for the error tokens the retry and choose endpoints can return,
+// so the bubble never shows a raw enum like "not-configured".
 export function retryErrorReason(msg) {
   if (msg === 'not-configured') return 'auto-TLDR is not configured';
   if (msg === 'bad-url') return 'not a recognized YouTube link';
+  // The picker's question was already answered, or aged out of the server's
+  // memory — the one token the choose route adds to this list.
+  if (msg === 'no-pending') return 'that question has already been answered';
   return msg || 'retry failed';
 }
 
@@ -316,20 +319,7 @@ export function tldrHint(data) {
 // 'not-found'), and only 'auth' earns the Log in button: a missing binary is
 // not something a browser flow can install, so offering one would be a button
 // that cannot work.
-// The picker's question line. `links` are the candidates the server listed and
-// `skipped` the ones past its cap -- said out loud, because a link dropped in
-// silence is the whole bug this feature exists to fix.
-export function pickerLabel(links, skipped) {
-  const n = Array.isArray(links) ? links.length : 0;
-  const extra = skipped > 0 ? skipped : 0;
-  // The count is the message's REAL total, not the listed subset: "8 links in
-  // that message (2 more were not listed)" reads as a contradiction, and the
-  // whole point of saying anything is that the reader learns nothing was
-  // quietly dropped.
-  const head = `${n + extra} YouTube links in that message. Which should I summarize?`;
-  return extra ? `${head} Only the first ${n} are listed.` : head;
-}
-
+//
 // `extra` carries the stage's own payload: `links`/`skipped` for the picker, and
 // `progress` ({index,total}) for a link the user picked out of a multi-link
 // message. The progress suffix is appended to every label rather than handled
@@ -401,4 +391,17 @@ function bubbleFor(stage, reason, kind, extra) {
     : stage === 'retrying' ? `Retrying${reason ? ` (${reason})` : ''}…`
     : 'Working…';
   return { label, tone: 'work', retry: false, dismiss: false };
+}
+
+// The picker's question line. `links` are the candidates listed and `skipped`
+// the ones past the server's cap -- said out loud, because a link dropped in
+// silence is the whole bug this feature exists to fix.
+export function pickerLabel(links, skipped) {
+  const n = Array.isArray(links) ? links.length : 0;
+  const extra = skipped > 0 ? skipped : 0;
+  // The count is the REAL total, not the listed subset: "8 links (2 more were
+  // not listed)" reads as a contradiction, and the whole point of saying
+  // anything is that the reader learns nothing was quietly dropped.
+  const head = `Which of these ${n + extra} YouTube links should I summarize?`;
+  return extra ? `${head} Only the first ${n} are listed.` : head;
 }

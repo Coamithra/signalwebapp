@@ -609,8 +609,8 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
    it is allowed to wrap rather than squeezing the code field to nothing. */
 .tldr-bubble:has(.tldr-code) { flex-wrap: wrap; max-width: 92%; }
 /* The multi-link picker. Every other stage is one line of status; this one asks
-   a question with a list under it, so it stacks instead — the buttons sit on the
-   right of the question line, which is why the list spans the full width. */
+   a question with a list under it and its buttons under that, so the bubble is
+   allowed to wrap and the list claims a whole row of its own. */
 .tldr-bubble.picker { flex-wrap: wrap; max-width: 92%; }
 .tldr-bubble.picker .tldr-text { flex: 1 1 200px; }
 .tldr-picker { flex: 1 0 100%; display: flex; flex-direction: column; gap: 4px; margin: 2px 0; }
