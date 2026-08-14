@@ -49,15 +49,15 @@ evaluate must target the isolated context's id.
 | File | Role |
 |------|------|
 | [src/cdp.js](src/cdp.js) | Generic CDP client over the built-in `WebSocket`. Probes `127.0.0.1` then `::1` (override with `SIGNAL_CDP_HOST`) for the host actually exposing `background.html`, connects to that page target, tracks the isolated context, auto-reconnects with backoff. |
-| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
+| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/getQuoteThumbnail/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
-| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
+| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, the realtime watcher, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`, and `linkSpans`, the link detection `renderFormatted` walks alongside the style ranges to make URLs clickable. |
-| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
+| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder, the short-clip autoplay threshold, what a quoted reply’s box says). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). Carries Signal's own `shortNameAlts` too, so `:poop:` works as well as `:hankey:`. |
 | [public/emoji-tags.js](public/emoji-tags.js) | **Generated** shortcode -> synonyms (~7800 tags over ~1800 emoji), the search terms behind `:chef` finding `:cook:`. Same script, but a different Signal source: its **downloaded** emoji search index, not the asar (see the autocomplete bullet). Search terms only, never shortcodes - they rank in `matchShortcodes` and never expand. |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `reboot.mjs` (free port 7700 and restart -- `npm run reboot`; runs the server from *its own* checkout, so it starts a worktree's code when called inside one). ⚠️ Node, not shell, and `reboot.sh` is a one-line wrapper around it: an npm script pointing at a `.sh` resolves `bash` through npm's PATH, which on Windows can find **WSL's** `bash.exe` in System32 rather than Git's and die with `execvpe(/bin/bash) failed`, `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
@@ -189,8 +189,8 @@ evaluate must target the isolated context's id.
   5=32px**; 6+ or mixed text falls back to the ordinary 14.5px bubble. Signal's veto clauses
   come with it - **attachments** (a caption beside a photo is still a caption), **link preview
   cards**, and **any `bodyRanges`**, so a spoilered or monospaced emoji stays an ordinary
-  message. (Signal's predicate also lists quotes; this UI doesn't render those into the bubble,
-  so there is nothing to veto on there.) Where we *do* diverge from Signal knowingly: Signal filters
+  message. (Signal's predicate also lists **quotes**, and so does ours now that a reply renders
+  a quote box.) Where we *do* diverge from Signal knowingly: Signal filters
   its matches through its own emoji table, we go by Unicode properties, so a handful of bare
   pre-VS16 pictographs (`☝`, `⬆`) jumbo here and don't there.
   `jumboSizeFor` in [public/ui-logic.js](public/ui-logic.js) is the whole decision;
@@ -205,6 +205,39 @@ evaluate must target the isolated context's id.
   because an in-place edit reuses the same bubble node and can cross the emoji-only line in
   either direction; both optimistic send echoes re-apply it after they inject their media,
   since `messageRow` built those rows with an empty `attachments` array.
+- **Autoplaying short clips** - a video attachment of `AUTOPLAY_MAX_SECONDS` (15s) or less loops
+  silently while it is scrolled into view and pauses the moment it is not, the way short motion
+  behaves in Signal itself. `shouldAutoplayClip` in [public/ui-logic.js](public/ui-logic.js) is the
+  whole decision; `maybeAutoplayClip` and friends in [public/app.js](public/app.js) only drive it.
+  Four things about it are load-bearing:
+  (1) **the decision cannot happen when the row is built** - `duration` does not exist until
+  `loadedmetadata` fires, so the `<video>` is created exactly as before and *promoted* afterwards.
+  Nothing is swapped or re-created, which is also why the `?thumb=1` poster hands off to the first
+  decoded frame with no flash and no reflow;
+  (2) an **unreadable duration means no autoplay**. `NaN` (metadata not in) and `Infinity` (a length
+  the browser can't work out) both fall through to the ordinary play button - the failure mode of
+  guessing wrong is a twenty-minute video looping forever;
+  (3) a **real `image/gif` attachment is out of reach and must stay out of it**. It renders as an
+  `<img>` that the browser animates by itself with no API to start or stop it, so the `kind`
+  check comes first and the clip machinery never touches one. (Everything the `/gif` picker sends
+  is `video/mp4`, so it lands on the clip path, not that one - check which of the two an
+  attachment actually is before writing any pause logic.) `prefers-reduced-motion` is honoured for
+  the clips we *can* drive, and read at decision time so it applies to new rows without a reload;
+  (4) **`renderMessages` calls `resetClips()`** before its `replaceChildren`. One shared
+  `IntersectionObserver` drives every clip, and an observer holds a strong reference to its
+  targets - a clip that was already off screen when its row was replaced never changes
+  intersection state, so it would never be reaped by the callback's `isConnected` check. The
+  rebuilt rows re-register themselves on their own `loadedmetadata`.
+  Autoplay is **muted by definition** (browsers block it otherwise), so a playing clip carries a
+  corner sound toggle - offered on every clip, because whether a video has an audio track cannot
+  be answered before it plays and withholding the control on one that *does* is the worse miss -
+  and one click on the clip itself releases it: paused, unmuted, with its native `controls` back
+  (dropping `controls` also drops the element out of the tab order, so a promoted clip carries its
+  own `tabindex` and Enter/Space to the same escape hatch). If a resumed `play()` is refused
+  because the user unmuted it, `playClip` re-mutes and retries once - sound is never the reason a
+  clip stops looping - but **only on `NotAllowedError`**: a `play()` rejection is far more often
+  the `AbortError` from the observer pausing a clip that was still spinning up, and re-muting on
+  that would silently undo the unmute on every scroll past.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
@@ -215,6 +248,33 @@ evaluate must target the isolated context's id.
   `sendMedia` path** as any attachment, so there's no `page-api.js`/`bridge.js`
   change. The browser only ever passes a Giphy id, so the proxy can't be aimed at
   arbitrary hosts. Optional `GIPHY_RATING` (default `g`) caps the content rating.
+- **Quoted replies** — Signal copies the message being replied to *onto* the reply as
+  `message.quote`, so a quote renders with no lookup of the original (which may be long
+  scrolled away, or deleted). Probed shape (8.23): `{ id, authorAci, text, bodyRanges,
+  attachments: [{contentType, fileName, thumbnail}], referencedMessageNotFound, isViewOnce,
+  isGiftBadge }`, where **`id` is the original's `sent_at`**, not a message id — that plus the
+  author is how Signal identifies it across clients. `describeQuote` in
+  [src/page-api.js](src/page-api.js) puts it on every message as `quote`, running the text
+  through the same `formatBody` as a body so mentions and formatting are inlined and realigned
+  identically. The thumbnail is an ordinary v2 encrypted attachment, so `getQuoteThumbnail`
+  reuses `fetchDecrypted` and the route `GET /api/quote-thumbnails/:messageId` reuses the
+  attachment byte cache (key `quote:<id>` — same no-colon argument as `prev:`). What the box
+  *says* is `quoteSummary` in [public/ui-logic.js](public/ui-logic.js): "You" vs the author
+  title, and the body or a `Photo`/`Voice message`/`Original message not found` description —
+  a description sets `placeholder`, which is why app.js renders it dim and **without** the
+  quote's `bodyRanges` (those index into text that isn't on screen). A quote also vetoes
+  jumbomoji, like media and link cards.
+  **Sending** one goes through the *same* `enqueueMessageForSend`: it takes a `quote` and
+  stores it **verbatim** on the message (probed), so `buildQuote` constructs Signal's own
+  stored shape out of redux. ⚠️ **Signal's redux composer route is unusable here**, as with
+  attachments: `reduxActions.composer.setQuoteByMessageId(cid, id)` left
+  `composer.conversations[cid]` with no `quotedMessage` at all when driven headlessly — it
+  needs the conversation selected in Signal's own window. The routes take a
+  `quoteMessageId` (`/send`, `/send-gif`); only the *id* crosses the wire, because Signal
+  already has the message. ⚠️ **An outgoing reply carries no thumbnail**: Signal's own
+  `makeQuote` copies the original attachment's thumbnail, which needs the attachment-copy
+  helpers current Signal no longer exposes — recipients see the attachment's type label
+  instead. Everything else (text, author, ranges) is identical to a native reply.
 - **Edit a message** — `window.__sb.editMessage(conversationId, targetMessageId, body, bodyRanges)` →
   `window.reduxActions.composer.sendEditedMessage(conversationId, { targetMessageId, message, bodyRanges })`.
   This is Signal's own edit path (the composer thunk); it replaces the body, **keeps
@@ -439,6 +499,39 @@ evaluate must target the isolated context's id.
   when you reopen a chat mid-run; it's cleared on a page reload / server restart
   (no persisted log). A sidebar / cross-conversation indicator is still out of
   scope.
+- **"Summarize in chat" — the manual TLDR, from a message's `⋯` menu.** The watcher only ever
+  fires on **your own outgoing** links, in an **enabled** chat, **newer than the per-chat floor**,
+  which leaves the two cases people actually want unreachable: a video *someone else* posted, and
+  one of your own with auto-TLDR off. `summarizeNow(convId, url)` in [src/tldr.js](src/tldr.js)
+  is that entry point (`POST /api/conversations/:id/tldr/summarize {url}`) and ignores all three
+  gates by design. It is a **separate route from `tldr/retry`** — retry is the recovery path after
+  a failure and must stay ungated, while this one is refused for a video that already has a
+  summary here. Both share `summarizeAndSend`, so the status bubble, its stage events and its
+  Retry button work identically for either.
+  ⚠️ **YouTube-link detection stays server-side.** The browser has no `parseVideoId` and must not
+  grow one: `annotateYouTube` tags each message on its way out of
+  `GET /api/conversations/:id/messages` (the same route `?older=1` uses, so scrolled-back history
+  is tagged too) with `youtube: { url, videoId, summarized }`, and `menuActionsFor` in
+  [public/ui-logic.js](public/ui-logic.js) does nothing more than read that field. Two parsers
+  that disagree about what counts as a YouTube link is exactly how you get a menu entry the
+  server then rejects as `bad-url`. A message with no link is left **untouched** — `msg.youtube`
+  is absent, not null.
+  **Already-summarized bookkeeping** is a set of `${convId}:${videoId}` — per conversation,
+  because the same video in two chats is two legitimate summaries — recorded **only on a
+  successful send** (a run that died at the transcript, at Claude or at the send leaves nothing to
+  read and must stay re-runnable) and **persisted next to `enabled` in `.tldr-settings.json`,
+  FIFO-bounded at `SUMMARIZED_CAP`**: a "won't let me do it twice" that quietly resets on a server
+  restart is not the promise. An `inFlight` set of the same keys covers the gap that
+  record-on-success alone leaves, and **all three entry points consult it** — `summarizeNow`,
+  `retry`, and the watcher loop, whose own `processed` set is keyed by *message* and so cannot
+  see that a manual run for that *video* is already going. The watcher is deliberately **not**
+  gated on `summarized`: that would silently stop a re-posted link from getting its usual
+  automatic TLDR, which is a change to the old feature rather than part of this one. A refusal
+  (`already-summarized` / `in-progress`) renders as the dismiss-only **`refused`** bubble, never
+  `failed` — `failed` always offers Retry, and Retry posts to the ungated `tldr/retry`, so one
+  more click would send the duplicate the refusal just prevented. The menu entry goes **disabled**
+  (`summarized` -> *Already summarized*) rather than vanishing; an option that disappears reads as
+  a bug.
 - **Is the CLI usable? — ask `claude auth status`, never `claude --version`.** `--version`
   exits 0 for a CLI that is installed but logged **out**, so a boot probe built on it once
   reported "configured" while every summary died at `claude-auth`; for a long time the rule
