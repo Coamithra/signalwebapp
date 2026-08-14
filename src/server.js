@@ -94,7 +94,12 @@ tldr.start();
 // Browser-driven `claude auth login`, so an expired CLI session can be fixed
 // from the app instead of from a terminal the user may not have open. See
 // src/claude-cli.js for the flow; the routes are near the other /tldr ones.
-const claudeLogin = createClaudeLogin({ bin: TLDR_CLAUDE_BIN });
+const claudeLogin = createClaudeLogin({
+  bin: TLDR_CLAUDE_BIN,
+  // Fires server-side the moment a login is observed to have worked, so the
+  // feature is live again even if nobody has a tab open watching for it.
+  onLogin: () => tldr.recheck(),
+});
 
 // ---- helpers ----
 const CONTENT_TYPES = {
@@ -616,15 +621,23 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, result.ok ? 200 : 502, result);
     }
 
-    // POST /api/tldr/login/code { code }   -> { ok } — finish the login.
-    // On success the TLDR availability flag is re-probed immediately, so the
-    // feature comes back without waiting out the recheck window.
+    // GET /api/tldr/login/status   -> { waiting, loggedIn }
+    // Polled by the browser while a login is in flight. `waiting` is true until
+    // the child exits; `loggedIn` is null until then and carries the verdict
+    // afterwards. THIS is the normal completion path — the sign-in page calls
+    // back and the CLI exits logged in, with no code ever shown to the user.
+    if (pathname === '/api/tldr/login/status' && req.method === 'GET') {
+      return sendJson(res, 200, claudeLogin.status());
+    }
+
+    // POST /api/tldr/login/code { code }   -> { ok } — the FALLBACK path, for
+    // the flow that really does prompt for a code ("paste code here *if
+    // prompted*"). Availability is re-probed by the onLogin hook, not here.
     if (pathname === '/api/tldr/login/code' && req.method === 'POST') {
       let body;
       try { body = await readBody(req, 4 * 1024); }
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const result = await claudeLogin.submitCode(body.code);
-      if (result.ok) await tldr.recheck();
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

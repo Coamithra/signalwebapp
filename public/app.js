@@ -1677,7 +1677,7 @@ let claudeAuthUrl = null;
 // the browser you are reading this in. An anchor works either way.
 function tldrLoginForm(url) {
   const input = el('input', {
-    class: 'tldr-code', type: 'text', placeholder: 'Paste code here',
+    class: 'tldr-code', type: 'text', placeholder: 'Code, if it asks for one',
     'aria-label': 'Sign-in code', autocomplete: 'off', spellcheck: 'false',
     onkeydown: (e) => {
       if (e.key === 'Enter') { e.preventDefault(); submitClaudeCode(input.value, url); }
@@ -1726,6 +1726,59 @@ async function beginClaudeLogin(url) {
   claudeAuthUrl = r.url;
   setTldrFor(key, { stage: 'login', url, prev });
   renderActiveTldr();
+  pollClaudeLogin(key, url, prev);
+}
+
+// Watch for the login finishing on its own, which is the NORMAL path: the
+// sign-in page calls back, the CLI exits logged in, and no code is ever shown.
+// Polling is cheap by design — the server answers from the child's exit and only
+// checks the credential store once, so this is not a spawn every two seconds.
+const LOGIN_POLL_MS = 1500;
+const LOGIN_POLL_LIMIT = 400; // ~10 min, matching the server's pending timeout
+let loginPollTimer = null;
+function stopClaudeLoginPoll() {
+  if (loginPollTimer) { clearTimeout(loginPollTimer); loginPollTimer = null; }
+}
+function pollClaudeLogin(key, url, prev, tries = 0) {
+  stopClaudeLoginPoll();
+  loginPollTimer = setTimeout(async () => {
+    // The user cancelled, switched away from the flow, or typed a code in by
+    // hand while we were waiting — whatever the bubble says now, it isn't ours.
+    if (tldrByConv.get(key)?.stage !== 'login') return;
+    let st;
+    try { st = await api('/api/tldr/login/status'); }
+    catch { st = null; } // a blip shouldn't abandon a login that may still land
+    if (tldrByConv.get(key)?.stage !== 'login') return;
+    if (st && st.loggedIn === true) return finishClaudeLogin(key, url);
+    if (st && st.loggedIn === false) {
+      claudeAuthUrl = null;
+      setTldrFor(key, { stage: 'login-failed', reason: 'sign-in did not complete', url, prev });
+      renderActiveTldr();
+      return;
+    }
+    if (tries + 1 >= LOGIN_POLL_LIMIT) {
+      setTldrFor(key, { stage: 'login-failed', reason: 'timed out waiting for sign-in', url, prev });
+      renderActiveTldr();
+      return;
+    }
+    pollClaudeLogin(key, url, prev, tries + 1);
+  }, LOGIN_POLL_MS);
+}
+
+// Shared landing point for both completion paths (the browser callback and a
+// pasted code): the server has already re-probed availability via its onLogin
+// hook, so go straight back to the link that failed.
+function finishClaudeLogin(key, url) {
+  stopClaudeLoginPoll();
+  claudeAuthUrl = null;
+  refreshThreadMenuIfOpen(key); // the toggle's "not logged in" hint is now stale
+  // Straight on with the summary that failed, rather than parking on a "signed
+  // in" notice and making the user click Retry: the link is the thing they
+  // wanted, and the login was only ever in the way of it.
+  if (url) { retryTldr(url); return; }
+  // Reached from the thread menu instead, with no link in flight: say it worked.
+  setTldrFor(key, { stage: 'logged-in', url });
+  renderActiveTldr();
 }
 
 // Hand the pasted code to the server, which writes it to the waiting CLI.
@@ -1734,6 +1787,7 @@ async function submitClaudeCode(code, url) {
   const clean = String(code || '').trim();
   if (!key || !clean) return;
   const prev = tldrByConv.get(key)?.prev;
+  stopClaudeLoginPoll(); // this hand-entered code supersedes the watcher
   setTldrFor(key, { stage: 'logging-in', url, prev });
   renderActiveTldr();
   try {
@@ -1747,16 +1801,7 @@ async function submitClaudeCode(code, url) {
     renderActiveTldr();
     return;
   }
-  claudeAuthUrl = null;
-  refreshThreadMenuIfOpen(key); // the toggle's "not logged in" hint is now stale
-  // Straight on with the summary that failed, rather than parking on a "signed
-  // in" notice and making the user click Retry: the link is the thing they
-  // wanted, and the login was only ever in the way of it. (The server's own
-  // gate is already clear -- /login/code calls tldr.recheck() before replying.)
-  if (url) { retryTldr(url); return; }
-  // Reached from the thread menu instead, with no link in flight: say it worked.
-  setTldrFor(key, { stage: 'logged-in', url });
-  renderActiveTldr();
+  finishClaudeLogin(key, url);
 }
 
 // Back out of a login: drop the server's pending child and restore whatever the
@@ -1765,6 +1810,7 @@ async function submitClaudeCode(code, url) {
 async function cancelClaudeLogin() {
   const key = state.activeId;
   if (!key) return;
+  stopClaudeLoginPoll();
   claudeAuthUrl = null;
   const prev = tldrByConv.get(key)?.prev;
   if (prev) setTldrFor(key, prev); else tldrByConv.delete(key);

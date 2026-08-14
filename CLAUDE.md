@@ -461,9 +461,13 @@ evaluate must target the isolated context's id.
   sign-in link plus a code field (stages `login` / `logging-in` / `login-failed` /
   `logged-in`, decided in `tldrBubble` like every other stage — they are **local**, no SSE
   event ever carries them).
-  ⚠️ **It is the paste-a-code flow, not a localhost callback** (`redirect_uri` is
-  `platform.claude.com/oauth/code/callback`, `code=true`), so a new tab alone cannot finish
-  it — the code field is not optional polish.
+  ⚠️ **The browser normally finishes the login by itself.** The CLI's prompt reads "Paste code
+  here *if prompted*", and that qualifier is the whole story: the sign-in page calls back, the
+  child **exits** logged in, and the user is never shown a code. So the child's exit is the
+  signal to watch (`settle()` then asks `auth status` — once, not per poll), the browser polls
+  `GET /api/tldr/login/status` -> `{waiting, loggedIn}`, and `submitCode` is the **fallback**
+  for the flow that really does prompt. Building this around the code field as the primary
+  path shipped a bubble demanding a code that does not exist. Do not "simplify" it back.
   ⚠️ **The pasted code is a credential in transit.** It crosses the loopback-only server
   straight into the child's stdin and is never logged, echoed in a response, or stored;
   `validCode` shape-checks it first, rejecting whitespace because a newline is the one
@@ -473,9 +477,11 @@ evaluate must target the isolated context's id.
   rendered as a link the user is being told to click, so anything reaching it would be a
   phishing link the app vouched for. A `claude` on PATH that isn't the CLI we think it is
   cannot turn this into a `javascript:` payload or a lookalike host.
-  The **link is a real anchor**, never `window.open()` after an await (the popup blocker eats
-  that) — and note the CLI opens its own tab in the *server machine's* default browser, which
-  need not be the browser the app is open in, which is why the anchor exists at all.
+  The **link is a real anchor**, never `window.open()` — and the app must not open a tab of its
+  own: `claude auth login` opens one as it starts, so doing both gave two sign-in windows for
+  one login, only one of which belonged to the exchange the CLI was waiting on. The anchor
+  exists because the CLI's tab opens in the *server machine's* default browser, which need not
+  be the browser the app is open in.
   Whether the button appears is decided by the stage event's `kind` — the same fixed
   `'auth'`/`'not-found'` token — and **never** by matching the human-readable `reason` text,
   which exists to be reworded.

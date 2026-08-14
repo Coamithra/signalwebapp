@@ -150,16 +150,30 @@ const CODE_TIMEOUT_MS = 60_000;
 
 // A browser-driven `claude auth login`.
 //
+// ⚠️ **The browser normally finishes the login by itself.** The CLI's prompt
+// reads "Paste code here *if prompted*", and that qualifier is the whole story:
+// the usual path is that the sign-in page calls back, the child exits logged in,
+// and the user is never shown a code at all. Building this around the code field
+// as the primary path produced a bubble demanding a code that does not exist.
+// So the child's **exit** is the signal to watch, and `submitCode` is the
+// fallback for the flow that really does prompt.
+//
 // One pending login at a time, process-wide: begin() on an already-pending login
 // returns the SAME url rather than spawning a second child, so a double-click or
 // two open tabs cannot leave an orphan holding a half-finished OAuth exchange.
 //
-// ⚠️ The code the user pastes is a credential in transit. It arrives over the
-// loopback-only HTTP server, goes straight to the child's stdin, and is never
-// logged, echoed back, or stored. Keep it that way — every log line in here is a
-// fixed string for that reason.
-export function createClaudeLogin({ bin = 'claude' } = {}) {
-  let pending = null; // { child, url, timer, settled }
+// ⚠️ A pasted code is a credential in transit. It arrives over the loopback-only
+// HTTP server, goes straight to the child's stdin, and is never logged, echoed
+// back, or stored. Keep it that way — every log line in here is a fixed string
+// for that reason.
+//
+// `onLogin` fires once, server-side, the moment a login is observed to have
+// succeeded — so the feature comes back even if no browser is watching.
+export function createClaudeLogin({ bin = 'claude', onLogin } = {}) {
+  // { child, url, timer, exited, loggedIn }. `loggedIn` is null until the
+  // post-exit auth check answers, which is what lets the UI tell "still waiting
+  // for you" apart from "finished, and here is the verdict".
+  let pending = null;
 
   function clearPending(p) {
     if (!p || pending !== p) return;
@@ -173,14 +187,47 @@ export function createClaudeLogin({ bin = 'claude' } = {}) {
     try { p.child.kill(); } catch {}
   }
 
+  // Called once the child exits, however it got there. Asks the credential store
+  // whether the login actually took — the child's exit code is not the authority
+  // on that, and this is the same ground truth submitCode uses.
+  function settle(p) {
+    if (pending !== p) return Promise.resolve();
+    // Memoized: the exit handler starts this, and submitCode awaits the same
+    // promise rather than racing a second auth check against the first.
+    if (!p.settling) {
+      p.settling = (async () => {
+        clearTimeout(p.timer);
+        const st = await authStatus(bin);
+        if (pending !== p) return; // cancelled or superseded while we asked
+        p.loggedIn = !!(st.ok && st.loggedIn);
+        log(p.loggedIn ? 'login complete.' : 'login ended without signing in.');
+        if (p.loggedIn && typeof onLogin === 'function') {
+          try { await onLogin(); } catch (e) { log('post-login hook failed:', e.message); }
+        }
+      })();
+    }
+    return p.settling;
+  }
+
   return {
-    // Is a login waiting for its code? Lets a reloaded page re-hydrate the form.
-    pending: () => (pending ? { url: pending.url } : null),
+    // Where a login got to, for the browser to poll. `waiting` means the child is
+    // still running (the user is signing in); once it exits, `loggedIn` carries
+    // the verdict. Cheap by construction: the auth check runs ONCE on exit, not
+    // per poll -- a spawn every couple of seconds for ten minutes would be an
+    // absurd way to ask a question the child already answers by exiting.
+    status() {
+      if (!pending) return { waiting: false, loggedIn: null };
+      return { waiting: !pending.exited, loggedIn: pending.loggedIn };
+    },
 
     // Spawn the CLI's login and resolve once it has told us where to send the
     // user. Resolves { ok: true, url } or { ok: false, error }.
     async begin() {
-      if (pending) return { ok: true, url: pending.url };
+      // A still-running login is reused; a finished one is cleared out of the
+      // way so "log in again" after a failed attempt actually starts a new child
+      // rather than handing back a dead URL.
+      if (pending && !pending.exited) return { ok: true, url: pending.url };
+      pending = null;
 
       let child;
       try {
@@ -194,8 +241,12 @@ export function createClaudeLogin({ bin = 'claude' } = {}) {
       // surfaces as an unhandled error event on the stream.
       child.stdin.on('error', () => {});
 
-      const p = { child, url: null, timer: null, settled: false };
+      const p = { child, url: null, timer: null, exited: false, loggedIn: null };
       pending = p;
+      // The normal completion path: the browser calls back, the CLI stores the
+      // token and exits. Nobody pastes anything, so this exit is the only signal
+      // there is.
+      child.on('exit', () => { p.exited = true; settle(p).catch(() => {}); });
 
       const url = await new Promise((resolve) => {
         let out = '';
@@ -241,6 +292,9 @@ export function createClaudeLogin({ bin = 'claude' } = {}) {
     async submitCode(code) {
       const p = pending;
       if (!p) return { ok: false, error: 'no-pending-login' };
+      // Already finished in the browser while the user was hunting for a code to
+      // paste -- report the outcome rather than writing into a dead stdin.
+      if (p.exited) return p.loggedIn ? { ok: true } : { ok: false, error: 'not-logged-in' };
       const clean = validCode(code);
       if (!clean) return { ok: false, error: 'bad-code' };
 
@@ -251,17 +305,13 @@ export function createClaudeLogin({ bin = 'claude' } = {}) {
         p.child.on('error', finish);
         setTimeout(finish, CODE_TIMEOUT_MS).unref?.();
       });
-      try { p.child.stdin.write(clean + '\n'); } catch { /* checked via auth status below */ }
+      try { p.child.stdin.write(clean + '\n'); } catch { /* the verdict below is what counts */ }
       await exited;
-      kill(p);
-
-      const st = await authStatus(bin);
-      if (st.ok && st.loggedIn) {
-        log('login complete.');
-        return { ok: true };
-      }
-      log('login did not take — the code may have expired.');
-      return { ok: false, error: st.ok ? 'not-logged-in' : st.reason };
+      // settle() is what asks the credential store, and the exit handler has
+      // already started it; wait for its answer rather than racing a second
+      // auth check against it.
+      await settle(p);
+      return p.loggedIn ? { ok: true } : { ok: false, error: 'not-logged-in' };
     },
 
     // Drop a login the user backed out of, so the next begin() starts clean.

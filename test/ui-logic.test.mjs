@@ -412,10 +412,15 @@ test('tldrBubble: only an auth failure offers the in-app login', () => {
 
 test('tldrBubble: the login stages carry their own controls', () => {
   const waiting = tldrBubble('login');
+  // The code field is the FALLBACK, not the instruction: the browser normally
+  // finishes the login itself and never shows a code, so this stage waits
+  // (spinner) rather than telling the user to paste something.
+  assert.equal(waiting.tone, 'work');
+  assert.match(waiting.label, /waiting/i);
+  assert.doesNotMatch(waiting.label, /paste/i);
   assert.equal(waiting.codeInput, true);
   assert.equal(waiting.cancelLogin, true);
   assert.equal(waiting.dismiss, false); // Cancel is the way out, not a bare ×
-  assert.equal(waiting.tone, 'info');
 
   assert.equal(tldrBubble('logging-in').tone, 'work'); // spinner while it runs
 

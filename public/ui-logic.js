@@ -330,9 +330,15 @@ export function tldrBubble(stage, reason, kind) {
     };
   }
   if (stage === 'login') {
+    // ⚠️ The browser normally finishes this by itself — the sign-in page calls
+    // back, the CLI exits logged in, and the user is never shown a code. So the
+    // label waits rather than instructing, and the code field is offered as the
+    // fallback for the flow that does prompt ("paste code here *if prompted*").
+    // Demanding a code up front produced a bubble asking for something that does
+    // not exist in the common path.
     return {
-      label: 'Sign in on the page that opened, then paste the code here:',
-      tone: 'info', retry: false, dismiss: false, codeInput: true, cancelLogin: true,
+      label: 'Waiting for you to finish signing in…',
+      tone: 'work', retry: false, dismiss: false, codeInput: true, cancelLogin: true,
     };
   }
   if (stage === 'logging-in') {
