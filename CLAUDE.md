@@ -413,7 +413,18 @@ evaluate must target the isolated context's id.
   preview that could never arrive. ⚠️ When re-probing this, note Signal **memoizes at module
   level** (`currentlyMatchedLink` plus a list of urls excluded after a failed fetch), so
   grabbing the *same* url twice in a row silently does nothing — a repeat probe reads as a
-  false negative unless each attempt uses a fresh url. Media sends and the GIF path keep
+  false negative unless each attempt uses a fresh url. ⚠️ **A YouTube card can come back
+  title-only through no fault of ours**: the watch page routinely advertises
+  `og:image = maxresdefault.jpg` for videos that never got a maxres render, the URL 404s, and
+  Signal stores the preview with no image — which reads as "the preview wasn't picked up" (the
+  `t=` param it was once blamed on was a red herring; the failure is per-video). So on
+  YouTube-link sends the server pre-fetches the video's guaranteed 480×360 `hqdefault.jpg`
+  (`fetchThumbnail` in [src/youtube.js](src/youtube.js)) and passes it as
+  `opts.fallbackImage`; `withFallbackImage` in [src/page-api.js](src/page-api.js) attaches it
+  only when the resolved preview is imageless **and** its url carries that same videoId (a
+  message can hold several links, and a thumbnail on the wrong card is worse than none). The
+  fetch is gated behind `warmLinkPreview`'s `grabbed` flag, so the privacy setting above stays
+  the whole gate — and that warm doubles as a head start on Signal's own grab. Media sends and the GIF path keep
   `preview: []` (Signal doesn't card a message that carries attachments), and the card vetoes
   jumbomoji.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes

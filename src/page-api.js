@@ -488,6 +488,36 @@ export const INSTALL_SCRIPT = `(function () {
     return null;
   }
 
+  // Signal's grab stores a title-only preview when the page's og:image can't
+  // be fetched — YouTube watch pages routinely advertise a maxresdefault.jpg
+  // that 404s. For a YouTube link the server pre-fetches the video's
+  // guaranteed hqdefault render and passes it in opts.fallbackImage; attach it
+  // only when the grabbed preview is for that same video — the message may
+  // hold several links and Signal previews whichever it chose, and a thumbnail
+  // on the wrong card would be worse than none. Copied, never mutated: the
+  // preview object belongs to the redux slot.
+  async function withFallbackImage(p, fb) {
+    if (!fb || typeof fb.base64 !== 'string' || !fb.base64) return p;
+    if (typeof fb.videoId !== 'string' || !fb.videoId) return p;
+    if (typeof p.url !== 'string' || p.url.indexOf(fb.videoId) === -1) return p;
+    try {
+      var data = await base64ToBytes(fb.base64);
+      return Object.assign({}, p, {
+        image: {
+          data: data,
+          size: data.byteLength,
+          contentType: fb.contentType || 'image/jpeg',
+          width: fb.width,
+          height: fb.height,
+        },
+      });
+    } catch (_) {
+      // The image is decoration on top of a nicety: a bad decode must cost the
+      // thumbnail, never the card.
+      return p;
+    }
+  }
+
   function formatMessage(m) {
     if (!m) return null;
     var direction = m.type === 'incoming' ? 'incoming'
@@ -740,6 +770,7 @@ export const INSTALL_SCRIPT = `(function () {
           // A preview is a nicety: a failure here must never cost the message.
           try {
             var p = await resolveLinkPreview(body, opts.timeoutMs);
+            if (p && !p.image) p = await withFallbackImage(p, opts.fallbackImage);
             if (p) preview = [p];
           } catch (_) {}
         }
