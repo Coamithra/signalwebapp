@@ -156,4 +156,10 @@ export class SignalBridge extends EventEmitter {
   deleteMessage(conversationId, messageId, forEveryone) {
     return this._call('deleteMessage', conversationId, messageId, !!forEveryone);
   }
+
+  // One reaction per person per message: sending a second emoji replaces the
+  // first, and remove=true retracts it.
+  sendReaction(conversationId, messageId, emoji, remove) {
+    return this._call('sendReaction', conversationId, messageId, emoji, !!remove);
+  }
 }

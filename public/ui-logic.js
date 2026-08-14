@@ -43,10 +43,77 @@ export function menuActionsFor(msg) {
   const actions = [];
   const isOut = msg.direction === 'outgoing';
   const hasText = !!(msg.text && msg.text.trim());
+  if (canReactTo(msg)) actions.push('react');
   if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) actions.push('edit');
   if (isOut && !msg.deletedForEveryone) actions.push('deleteForEveryone');
   actions.push('deleteForMe');
   return actions;
+}
+
+// ---------- reactions ----------
+// Signal's own canReact clause, minus the parts we can't see from a formatted
+// message (blocked/terminated conversations never reach this UI): a tombstone
+// can't be reacted to, and one of your own messages only once the send has
+// actually reached someone — reacting to a message still in flight, or one that
+// errored, is refused by Signal itself. Incoming is always fair game (view-once
+// included, which Signal also allows). Needed in two places, the "⋯" menu entry
+// and the now-clickable reaction pills, which is why it's its own function.
+export function canReactTo(msg) {
+  if (!msg || !msg.id || msg.direction === 'system') return false;
+  if (msg.deletedForEveryone) return false;
+  if (msg.direction === 'outgoing') return msg.status !== 'sending' && msg.status !== 'error';
+  return true;
+}
+
+// The emoji you have already reacted with, or null. One per person per message,
+// so the first match is the answer.
+export function myReaction(msg) {
+  const mine = (msg?.reactions || []).find((r) => r && r.fromMe && r.emoji);
+  return mine ? mine.emoji : null;
+}
+
+// Reactions -> the pills under a bubble: one entry per distinct emoji, in first-
+// seen order, carrying the deduped reactor names for the tooltip and whether
+// yours is among them (which decides both the highlight and what a click does).
+// Entries with no emoji are dropped defensively — page-api.js already filters
+// the "removal in flight" tombstones that look like that, and neither layer
+// should be the only one that does.
+export function groupReactions(reactions) {
+  const out = [];
+  const byEmoji = new Map();
+  for (const r of reactions || []) {
+    if (!r || !r.emoji) continue;
+    let group = byEmoji.get(r.emoji);
+    if (!group) {
+      group = { emoji: r.emoji, names: [], count: 0, mine: false };
+      byEmoji.set(r.emoji, group);
+      out.push(group);
+    }
+    group.count += 1;
+    group.mine = group.mine || !!r.fromMe;
+    const name = r.from || 'Unknown';
+    if (!group.names.includes(name)) group.names.push(name);
+  }
+  return out;
+}
+
+// Signal's default quick-reaction row, for when the bridge hasn't told us the
+// user's own (a status probe that failed, or an older Signal). Signal seeds the
+// account record with exactly these six.
+export const DEFAULT_REACTIONS = ['❤️', '👍', '👎', '😂', '😮', '😢'];
+
+// The picker's quick row: the user's preferred emoji, deduped, with whatever
+// they have already reacted with appended if it isn't in there — otherwise a
+// reaction picked out of the search box could never be taken off again from the
+// row that is supposed to toggle it.
+export function reactionChoices(preferred, mine) {
+  const list = (Array.isArray(preferred) ? preferred : []).filter((e) => typeof e === 'string' && e);
+  const out = [];
+  for (const emoji of list.length ? list : DEFAULT_REACTIONS) {
+    if (!out.includes(emoji)) out.push(emoji);
+  }
+  if (mine && !out.includes(mine)) out.push(mine);
+  return out;
 }
 
 // ---------- jumbomoji ----------

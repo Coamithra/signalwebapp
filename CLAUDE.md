@@ -57,7 +57,7 @@ evaluate must target the isolated context's id.
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
-| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
+| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, the reaction rules (`canReactTo`/`myReaction`/`groupReactions`/`reactionChoices`), attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). Carries Signal's own `shortNameAlts` too, so `:poop:` works as well as `:hankey:`. |
 | [public/emoji-tags.js](public/emoji-tags.js) | **Generated** shortcode -> synonyms (~7800 tags over ~1800 emoji), the search terms behind `:chef` finding `:cook:`. Same script, but a different Signal source: its **downloaded** emoji search index, not the asar (see the autocomplete bullet). Search terms only, never shortcodes - they rank in `matchShortcodes` and never expand. |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `reboot.mjs` (free port 7700 and restart -- `npm run reboot`; runs the server from *its own* checkout, so it starts a worktree's code when called inside one). ⚠️ Node, not shell, and `reboot.sh` is a one-line wrapper around it: an npm script pointing at a `.sh` resolves `bash` through npm's PATH, which on Windows can find **WSL's** `bash.exe` in System32 rather than Git's and die with `execvpe(/bin/bash) failed`, `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
@@ -222,6 +222,29 @@ evaluate must target the isolated context's id.
   reach for Signal's redux `conversations.markConversationRead` action: it no-ops unless the
   Signal window `isActive()`, which it isn't while we drive it headlessly. Route:
   `POST /api/conversations/:id/read`.
+- **React to a message** — `window.__sb.sendReaction(conversationId, messageId, emoji, remove)` →
+  `reduxActions.composer.reactToMessage(messageId, { emoji, remove })` → Signal's own
+  `enqueueReactionForSend`. As with edits, the **composer thunk is the path**: there is no
+  reaction method on the conversation *or* the message model, and nothing under
+  `reduxActions.conversations`. Verified to work with the conversation not open.
+  **Signal allows exactly ONE reaction per person per message**, so sending a second emoji
+  *replaces* the first — there is no "change" call, and that is what makes the reaction pills a
+  complete control on their own (click yours to remove, click anyone else's to move yours onto
+  it). Like `deleteMessagesForEveryone` the thunk **swallows its own failure** and raises a
+  `ReactionFailed` toast instead of throwing — but unlike that one it `await`s the send *inside*
+  its try, so by the time our await resolves the toast is already dispatched: **one check, no
+  polling loop**. ⚠️ `reaction.fromId` is a **conversationId, not a serviceId** — which is both
+  why `resolveAuthorTitle` already worked on it and how `fromMe` is derived (against
+  `state.user.ourConversationId`). ⚠️ **A reaction being removed sits in `m.reactions` as an entry
+  with NO `emoji`**, alongside the one it retracts, until the send settles; `formatMessage`
+  therefore *filters* reactions (unlike `attachments`/`preview`, which are mapped unfiltered
+  because other calls index into them) or it would render an empty pill. The picker's quick row
+  is Signal's own `items.preferredReactionEmoji` (account-record synced, `['❤️','👍','👎','😂','😮','😢']`
+  by default), surfaced through `ping` → `/api/status`. Route:
+  `POST /api/conversations/:id/messages/:messageId/react` with `{ emoji, remove? }`, where the
+  server requires **exactly one emoji** (`/^(?:\p{RGI_Emoji}|\p{Extended_Pictographic})$/v`, the
+  same alternation the jumbomoji counter uses) for the same reason `bodyRanges` are sanitized —
+  it goes straight into Signal's send path.
 - **Inline media** - attachments are stored ENCRYPTED on disk (v2, per-file `localKey`).
   Signal's renderer registers an `attachment://` protocol that decrypts on the fly, so
   `window.__sb.getAttachment(messageId, index, {thumbnail})` just fetches
@@ -275,6 +298,15 @@ evaluate must target the isolated context's id.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes
   `{type:'conversations'}` / `{type:'messages',conversationId}` into `__sbQueue`. The
   server drains every 200ms and forwards over SSE. ~instant, no polling of large state.
+  ⚠️ **`messagesByConversation` is not enough on its own: a reaction doesn't move it.**
+  Adding or removing one replaces the message in `conversations.messagesLookup` and touches
+  nothing else (verified by reference comparison), so a subscriber watching only the former
+  never sees reactions at all — from other people, or from Signal Desktop itself. The
+  subscriber therefore *also* diffs `messagesLookup`, but **only for `reactions` identity**,
+  and coalesces to one event per conversation per tick. That scan is affordable because it
+  runs only on ticks where the lookup reference actually changed, and compares references.
+  Everything else about a message already arrives via the slice above; don't widen this
+  branch into a general message differ without measuring.
 - **Auto-TLDR YouTube links** — opt-in per chat (thread header → ⋮ menu →
   `GET`/`POST /api/conversations/:id/tldr`; the set of enabled ids persists in the
   gitignored `.tldr-settings.json`). [src/tldr.js](src/tldr.js) subscribes to the bridge's

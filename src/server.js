@@ -184,6 +184,18 @@ function sanitizeBodyRanges(ranges, text) {
   }
   return out;
 }
+
+// A reaction emoji goes straight into Signal's send path, so it gets the same
+// treatment as bodyRanges above: validate rather than forward whatever arrived.
+// Exactly ONE emoji — \p{RGI_Emoji} (the `v` flag's set-of-strings property)
+// consumes a ZWJ family, flag, keycap or skin-toned emoji as a single match, and
+// \p{Extended_Pictographic} is the second alternative only to admit the bare
+// pre-VS16 forms RGI excludes (a `❤` with no U+FE0F), exactly as the jumbomoji
+// counter does. Rejects '', '1', 'abc', '👍👍' and anything carrying whitespace.
+const REACTION_EMOJI = /^(?:\p{RGI_Emoji}|\p{Extended_Pictographic})$/v;
+function validReactionEmoji(emoji) {
+  return typeof emoji === 'string' && REACTION_EMOJI.test(emoji);
+}
 // In-flight fetches, keyed identically to the cache. A <video> fires several
 // Range requests at once; without this each would do its own CDP round-trip and
 // base64 decode of the whole file. Concurrent misses share one promise instead.
@@ -401,7 +413,11 @@ const server = http.createServer(async (req, res) => {
       try {
         const p = await bridge.ping();
         me = p?.me || null;
-        return sendJson(res, 200, { status: bridge.status, me, conversationCount: p?.conversationCount });
+        return sendJson(res, 200, {
+          status: bridge.status, me, conversationCount: p?.conversationCount,
+          // Signal's own quick-reaction row, for the reaction picker.
+          preferredReactions: p?.preferredReactions || [],
+        });
       } catch (err) {
         return sendJson(res, 200, { status: bridge.status, me: null });
       }
@@ -546,6 +562,24 @@ const server = http.createServer(async (req, res) => {
       try { body = await readBody(req, 64 * 1024); }
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const result = await bridge.deleteMessage(id, messageId, !!body.forEveryone);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    // /api/conversations/:id/messages/:messageId/react   { emoji, remove? }
+    // Signal keeps one reaction per person per message, so a second emoji
+    // replaces the first — there is no separate "change" call. remove=true
+    // retracts, and must still name the emoji being retracted.
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/messages\/([^/]+)\/react$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      const messageId = decodeURIComponent(m[2]);
+      let body;
+      try { body = await readBody(req, 64 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      if (!validReactionEmoji(body.emoji)) {
+        return sendJson(res, 400, { ok: false, error: 'invalid-emoji' });
+      }
+      const result = await bridge.sendReaction(id, messageId, body.emoji, !!body.remove);
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

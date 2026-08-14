@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AVATAR_COLORS, colorFor, initials, previewText, menuActionsFor,
+  canReactTo, myReaction, groupReactions, reactionChoices, DEFAULT_REACTIONS,
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
@@ -81,6 +82,79 @@ test('menuActionsFor: edit needs your own live text message', () => {
   assert.deepEqual(menuActionsFor({ ...base, isViewOnce: true }), ['deleteForEveryone', 'deleteForMe']);
   // Already a tombstone: nothing left to edit or retract.
   assert.deepEqual(menuActionsFor({ ...base, deletedForEveryone: true }), ['deleteForMe']);
+});
+
+test('menuActionsFor: react comes first, and only for a message you can react to', () => {
+  const live = { id: 'm1', direction: 'outgoing', text: 'hi', status: 'sent' };
+  assert.deepEqual(menuActionsFor(live), ['react', 'edit', 'deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor({ id: 'm1', direction: 'incoming', text: 'hi' }), ['react', 'deleteForMe']);
+  // A send still in flight (or failed) has nothing on the wire to react to.
+  assert.ok(!menuActionsFor({ ...live, status: 'sending' }).includes('react'));
+  assert.ok(!menuActionsFor({ ...live, status: 'error' }).includes('react'));
+  // A tombstone, and an optimistic echo with no id yet.
+  assert.ok(!menuActionsFor({ ...live, deletedForEveryone: true }).includes('react'));
+  assert.ok(!menuActionsFor({ ...live, id: undefined }).includes('react'));
+});
+
+// ---------- reactions ----------
+
+test('canReactTo mirrors Signal: incoming always, outgoing once actually sent', () => {
+  assert.equal(canReactTo({ id: 'm', direction: 'incoming' }), true);
+  // View-once is reactable in Signal too — the veto list is short on purpose.
+  assert.equal(canReactTo({ id: 'm', direction: 'incoming', isViewOnce: true }), true);
+  assert.equal(canReactTo({ id: 'm', direction: 'system' }), false);
+  assert.equal(canReactTo({ id: 'm', direction: 'incoming', deletedForEveryone: true }), false);
+  for (const status of ['sent', 'delivered', 'read', undefined]) {
+    assert.equal(canReactTo({ id: 'm', direction: 'outgoing', status }), true, status);
+  }
+  for (const status of ['sending', 'error']) {
+    assert.equal(canReactTo({ id: 'm', direction: 'outgoing', status }), false, status);
+  }
+  assert.equal(canReactTo(null), false);
+});
+
+test('myReaction finds mine and ignores everyone else', () => {
+  assert.equal(myReaction({ reactions: [{ emoji: '👍', fromMe: false }, { emoji: '❤️', fromMe: true }] }), '❤️');
+  assert.equal(myReaction({ reactions: [{ emoji: '👍', fromMe: false }] }), null);
+  assert.equal(myReaction({ reactions: [] }), null);
+  assert.equal(myReaction({}), null);
+  // An emoji-less entry is never "my reaction", even flagged as mine.
+  assert.equal(myReaction({ reactions: [{ fromMe: true }] }), null);
+});
+
+test('groupReactions: groups by emoji in first-seen order, dedupes names, flags mine', () => {
+  const groups = groupReactions([
+    { emoji: '👍', from: 'Alice', fromMe: false },
+    { emoji: '❤️', from: 'Bob', fromMe: false },
+    { emoji: '👍', from: 'Me', fromMe: true },
+    { emoji: '👍', from: 'Alice', fromMe: false }, // same name twice -> one tooltip entry
+  ]);
+  assert.deepEqual(groups.map((g) => g.emoji), ['👍', '❤️']);
+  assert.equal(groups[0].count, 3);
+  assert.deepEqual(groups[0].names, ['Alice', 'Me']);
+  assert.equal(groups[0].mine, true);
+  assert.equal(groups[1].mine, false);
+});
+
+test('groupReactions drops emoji-less entries and names an unknown reactor', () => {
+  // page-api.js filters the "removal in flight" tombstone; this is the second net.
+  const groups = groupReactions([{ fromMe: true }, { emoji: '👍', from: null }, null]);
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].names, ['Unknown']);
+  assert.deepEqual(groupReactions(undefined), []);
+});
+
+test('reactionChoices: dedupes, falls back to Signal defaults, always includes mine', () => {
+  assert.deepEqual(reactionChoices(['👍', '❤️'], null), ['👍', '❤️']);
+  assert.deepEqual(reactionChoices(['👍', '👍'], null), ['👍']);
+  // Mine is appended only when the row doesn't already offer it — otherwise a
+  // reaction picked from the search box could never be toggled back off.
+  assert.deepEqual(reactionChoices(['👍'], '🎉'), ['👍', '🎉']);
+  assert.deepEqual(reactionChoices(['👍', '🎉'], '🎉'), ['👍', '🎉']);
+  // No preferences from the bridge -> Signal's own six, never an empty picker.
+  assert.deepEqual(reactionChoices([], null), DEFAULT_REACTIONS);
+  assert.deepEqual(reactionChoices(undefined, null), DEFAULT_REACTIONS);
+  assert.deepEqual(reactionChoices([null, '', 5], null), DEFAULT_REACTIONS);
 });
 
 // ---------- attachments ----------
@@ -497,11 +571,20 @@ test('every action menuActionsFor can emit has a handler in app.js', async () =>
     for (const text of ['hi', '', '   ', undefined]) {
       for (const deletedForEveryone of [true, false]) {
         for (const isViewOnce of [true, false]) {
-          for (const a of menuActionsFor({ direction, text, deletedForEveryone, isViewOnce })) emitted.add(a);
+          // id and status are in the matrix because 'react' needs them: without
+          // an id every message here would be ineligible and the react entry
+          // would slip past this check entirely.
+          for (const id of ['m1', undefined]) {
+            for (const status of ['sent', 'sending', 'error', undefined]) {
+              const msg = { id, direction, text, deletedForEveryone, isViewOnce, status };
+              for (const a of menuActionsFor(msg)) emitted.add(a);
+            }
+          }
         }
       }
     }
   }
+  assert.ok(emitted.has('react'), 'sanity: the matrix must reach an eligible message');
   assert.ok(emitted.size > 0);
   for (const action of emitted) assert.ok(handled.has(action), `MENU_ACTIONS has no entry for '${action}'`);
 });
