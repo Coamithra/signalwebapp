@@ -172,6 +172,19 @@ export function quoteSummary(quote) {
   return described('Message');
 }
 
+// Where a quote's original sits in the loaded message window, or -1. A quote
+// identifies its original by the original's sent_at (quote.id) — that plus the
+// author is how Signal matches it across clients — and formatMessage surfaces
+// sent_at as `timestamp`, so the lookup is a timestamp match. `-1` covers both
+// "not loaded yet" (the caller may load older and retry) and "nothing to jump
+// to": a quote with no id, or one whose original was already gone when the
+// reply arrived (referencedMessageNotFound), has no target anywhere in history.
+export function quoteTargetIndex(messages, quote) {
+  if (!quote || !quote.id || quote.referencedMessageNotFound) return -1;
+  const list = Array.isArray(messages) ? messages : [];
+  return list.findIndex((m) => m && m.timestamp === quote.id);
+}
+
 // A send refused because the message being replied to can't be quoted. Those
 // come back as our own fixed 'quote-*' tokens, and they are all terminal for
 // THIS reply: Signal reloading empties messagesLookup down to the newest window,
@@ -530,8 +543,14 @@ function bubbleFor(stage, reason, kind, extra) {
     };
   }
   if (stage === 'failed') {
+    // A run the user started by hand (the message menu's "Summarize in chat",
+    // or a Retry click) was not "Auto"-anything, and they are looking right at
+    // the thing they clicked — so the manual origin gets a neutral label. The
+    // origin lives on the frontend's per-conversation status (set by startTldr,
+    // preserved across SSE repaints); the server's stage events don't carry it.
+    const label = extra && extra.origin === 'manual' ? "Couldn't summarize" : 'Auto-TLDR failed';
     return {
-      label: `Auto-TLDR failed${reason ? `: ${reason}` : ''}`,
+      label: `${label}${reason ? `: ${reason}` : ''}`,
       tone: 'warn', retry: true, dismiss: true, login: kind === 'auth',
     };
   }

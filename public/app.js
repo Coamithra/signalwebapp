@@ -9,7 +9,7 @@ import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
   tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
-  quoteSummary, quoteSendFailure, shouldAutoplayClip, clipSoundIcon,
+  quoteSummary, quoteSendFailure, quoteTargetIndex, shouldAutoplayClip, clipSoundIcon,
   canReactTo, myReaction, groupReactions, reactionChoices,
 } from './ui-logic.js';
 
@@ -251,7 +251,10 @@ function attachmentEl(msg, att, i) {
     });
     // Duration isn't known until metadata arrives, so a short clip can only
     // become an autoplaying one after the fact — not while the row is built.
-    v.addEventListener('loadedmetadata', () => maybeAutoplayClip(v, att), { once: true });
+    // The key ties this element to the choices its previous incarnations
+    // recorded (renderMessages rebuilds every row); optimistic echoes have no
+    // id, but they render from local bytes and never reach this element anyway.
+    v.addEventListener('loadedmetadata', () => maybeAutoplayClip(v, att, msg.id ? `${msg.id}:${i}` : null), { once: true });
     return wrapMedia(v);
   }
   if (att.kind === 'audio' || att.kind === 'voice') {
@@ -306,17 +309,36 @@ function resetClips() {
   if (clipObs) clipObs.disconnect();
 }
 
+// Deliberate per-clip choices that must outlive the <video> element itself:
+// renderMessages() rebuilds every row on any change in the thread (an incoming
+// message, a sent → delivered tick), and losing an unmute the user just turned
+// on — the corner button silently back to the muted glyph — is the part they
+// notice. Keyed `${messageId}:${attachmentIndex}`, values { unmuted } or
+// { released }; in-memory only and dropped on conversation switch, like the
+// rest of the thread's transient state.
+const clipChoices = new Map();
+
 // Promote a loaded <video> to an autoplaying clip, or leave it exactly as it is.
-function maybeAutoplayClip(v, att) {
+function maybeAutoplayClip(v, att, key) {
   if (!shouldAutoplayClip(att, v.duration, reducedMotion.matches)) return;
-  v.muted = true;  // the PROPERTY, not the attribute — that's what the autoplay gate reads
+  const choice = key ? clipChoices.get(key) : null;
+  // Once released to manual controls, a clip stays released: re-promoting it on
+  // the next unrelated refresh would undo the same deliberate click the unmute
+  // persistence exists to protect. The row was built as an ordinary video, so
+  // there is nothing to do.
+  if (choice && choice.released) return;
+  // The property, not the attribute — that's what the autoplay gate reads. A
+  // remembered unmute is re-applied instead; the user already interacted, so
+  // the gate lets an unmuted resume through (and playClip degrades to muted on
+  // the one refusal that means it didn't).
+  v.muted = !(choice && choice.unmuted);
   v.loop = true;
   v.removeAttribute('controls');
   v.classList.add('att-clip');
   const wrap = v.parentElement;
   if (wrap) {
     wrap.classList.add('att-clip-wrap');
-    wrap.appendChild(clipSoundBtn(v));
+    wrap.appendChild(clipSoundBtn(v, key));
   }
   // Autoplay has no controls, so one click hands the clip back to the user:
   // paused, with the real controls, scrubbable like any other video. Dropping
@@ -333,6 +355,7 @@ function maybeAutoplayClip(v, att) {
     // pause whatever the user had just started playing.
     v.removeEventListener('click', release);
     v.removeEventListener('keydown', onKey);
+    if (key) clipChoices.set(key, { released: true });
     releaseClip(v);
   };
   v.tabIndex = 0;
@@ -374,11 +397,17 @@ function releaseClip(v) {
 // way to hear a short video that does carry audio. It's offered on every clip:
 // whether a video has an audio track can't be answered before it plays, and
 // withholding the control on a clip that *does* have sound is the worse miss.
-function clipSoundBtn(v) {
+function clipSoundBtn(v, key) {
   const btn = el('button', { class: 'att-clip-sound', type: 'button' });
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     v.muted = !v.muted;
+    // Remember the choice across row rebuilds. Muting again is back to the
+    // default, so the entry goes rather than storing a no-op.
+    if (key) {
+      if (v.muted) clipChoices.delete(key);
+      else clipChoices.set(key, { unmuted: true });
+    }
     syncClipSound(v, btn);
   });
   syncClipSound(v, btn); // not in the DOM yet, so it has to be passed in
@@ -490,7 +519,67 @@ function quoteEl(msg) {
     img.addEventListener('error', () => img.remove());
     box.appendChild(img);
   }
+
+  // Clicking the box jumps to the message it quotes, the way Signal Desktop
+  // does. Only on a real message row (msg.id) — the composer's reply banner
+  // reuses this element and describes a target the user is already looking at —
+  // and only when there is a target to jump to at all: a quote with no id, or
+  // one whose original was gone before the reply arrived, would be a dead
+  // button. No stopPropagation, for the reaction pills' reason: this opens
+  // nothing, so the click should still dismiss any open menu or picker.
+  if (msg.id && q.id && !q.referencedMessageNotFound) {
+    box.classList.add('quote-jump');
+    box.setAttribute('role', 'button');
+    box.tabIndex = 0;
+    box.title = 'Go to original message';
+    box.addEventListener('click', () => jumpToQuoted(q));
+    box.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault(); // Space would scroll the thread
+      jumpToQuoted(q);
+    });
+  }
   return box;
+}
+
+// ----- jump to a quote's original -----
+// The target is a lookup in the loaded window (quote.id is the original's
+// sent_at; see quoteTargetIndex). If it isn't loaded, page older history in —
+// bounded, so a quote of something ancient doesn't fetch the whole thread —
+// and give up with a toast rather than in silence.
+const QUOTE_JUMP_MAX_PAGES = 10;
+
+async function jumpToQuoted(quote) {
+  const id = state.activeId;
+  for (let page = 0; ; page++) {
+    const i = quoteTargetIndex(state.messages, quote);
+    if (i >= 0) {
+      // Stop a "load older" settle before scrolling: its ResizeObserver keeps
+      // re-pinning the pre-load anchor row and would yank the viewport straight
+      // back off the message we just jumped to.
+      if (cancelOlderPin) cancelOlderPin();
+      flashMessageRow(state.messages[i].id);
+      return;
+    }
+    if (!state.hasOlder || page >= QUOTE_JUMP_MAX_PAGES) break;
+    await loadOlderMessages();
+    if (state.activeId !== id) return; // switched threads mid-search
+  }
+  toast("Couldn't find the original message in this chat's history.", true);
+}
+
+// Scroll a rendered row into view and pulse it, so the eye lands on the right
+// message. Instant, not smooth: after paging in history the target can be
+// thousands of pixels up, and CSS smooth-scrolling that far reads as the thread
+// running away rather than a jump.
+function flashMessageRow(mid) {
+  const row = rowByMid(mid);
+  if (!row) return;
+  row.scrollIntoView({ block: 'center', behavior: 'instant' });
+  row.classList.remove('flash');
+  void row.offsetWidth; // restart the animation when the same row is hit twice
+  row.classList.add('flash');
+  row.addEventListener('animationend', () => row.classList.remove('flash'), { once: true });
 }
 
 function messageRow(msg, prev, isGroup) {
@@ -1197,6 +1286,7 @@ async function openConversation(id) {
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     resetOlderGesture(); // upward intent belongs to the thread it was built in
+    clipChoices.clear(); // a clip's unmute/release belongs to the thread it was made in
     olderBlockedUntil = 0; // ...and so does another thread's cooldown
     lastScrollTop = 0;
     state.activeId = id;
@@ -2023,8 +2113,8 @@ function clearTldrFor(convId) {
 function renderTldrStatus(st) {
   const host = $('#tldrStatus');
   if (!host) return;
-  const { stage, reason, url, kind, links, skipped, progress } = st;
-  const b = tldrBubble(stage, reason, kind, { links, skipped, progress });
+  const { stage, reason, url, kind, links, skipped, progress, origin } = st;
+  const b = tldrBubble(stage, reason, kind, { links, skipped, progress, origin });
   const children = [];
   if (b.tone === 'warn') children.push(el('span', { class: 'tldr-icon', text: '⚠' }));
   else if (b.tone === 'work') children.push(el('span', { class: 'tldr-spinner' }));
@@ -2085,10 +2175,10 @@ function renderTldrStatus(st) {
 function handleTldrStage(e) {
   if (!e || !e.conversationId) return;
   const convId = String(e.conversationId);
+  const cur = tldrByConv.get(convId);
   if (e.state === 'done') {
     // Drop the status only if this completion matches the tracked link, so a
     // finishing link can't wipe a different one that's still in progress.
-    const cur = tldrByConv.get(convId);
     if (cur && cur.url !== e.url) return;
     // A clean done clears the bubble; a done WITH a reason means the TLDR was
     // sent but its "For context" block failed, so fall through and show the
@@ -2106,6 +2196,10 @@ function handleTldrStage(e) {
     // Only the 'choose' stage carries these, and only a batch carries progress;
     // storing them unconditionally keeps the status one shape.
     links: e.links, skipped: e.skipped, progress: e.progress,
+    // The entry point is a frontend-only fact (startTldr sets it; SSE events
+    // know nothing of it), so a repaint carries it forward — for the same link
+    // only, or a manual run's origin would bleed onto the next automatic one.
+    origin: cur && cur.url === e.url ? cur.origin : undefined,
   });
   if (convId === state.activeId) renderActiveTldr();
 }
@@ -2359,7 +2453,11 @@ async function startTldr(url, kind) {
   const id = state.activeId;
   if (!id || !url) return;
   const key = String(id);
-  setTldrFor(key, { stage: 'fetching', reason: null, url });
+  // origin marks the run as user-started (vs the watcher's automatic one), so a
+  // failure can say "Couldn't summarize" instead of "Auto-TLDR failed" — wrong
+  // on both counts for a thing the user just clicked. handleTldrStage preserves
+  // it across the SSE repaints that follow.
+  setTldrFor(key, { stage: 'fetching', reason: null, url, origin: 'manual' });
   renderActiveTldr();
   try {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/${kind}`, {
@@ -2374,7 +2472,7 @@ async function startTldr(url, kind) {
       // goes to the ungated /tldr/retry, which would send the duplicate the
       // refusal just prevented. 'refused' is the dismiss-only notice instead.
       const stage = REFUSALS.has(err.message) ? 'refused' : 'failed';
-      setTldrFor(key, { stage, reason: retryErrorReason(err.message), url });
+      setTldrFor(key, { stage, reason: retryErrorReason(err.message), url, origin: 'manual' });
       renderActiveTldr();
     }
   }

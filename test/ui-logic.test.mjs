@@ -17,7 +17,7 @@ import {
   parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint, pickerLabel,
-  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI, quoteSummary, quoteSendFailure,
+  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI, quoteSummary, quoteSendFailure, quoteTargetIndex,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
 
@@ -564,6 +564,27 @@ test('tldrBubble: failed warns and offers Retry + dismiss', () => {
   assert.ok(b.label.includes('no transcript available'));
 });
 
+test('tldrBubble: a manual run\'s failure is not labelled "Auto-TLDR"', () => {
+  // A run the user started by hand (message menu / Retry) was not automatic,
+  // and they are looking at the thing they just clicked — neutral wording.
+  const b = tldrBubble('failed', 'no transcript available', undefined, { origin: 'manual' });
+  assert.match(b.label, /^Couldn't summarize: no transcript available/);
+  assert.doesNotMatch(b.label, /Auto-TLDR/);
+  // Everything else about the stage is unchanged: it still warns and retries.
+  assert.equal(b.tone, 'warn');
+  assert.equal(b.retry, true);
+  assert.equal(b.dismiss, true);
+  // The watcher's own failures keep the old label; so does an event with no
+  // recorded origin (a reload lost it — wrongly claiming "manual" is worse).
+  assert.match(tldrBubble('failed', 'x', undefined, {}).label, /^Auto-TLDR failed/);
+  assert.match(tldrBubble('failed', 'x').label, /^Auto-TLDR failed/);
+  // The batch progress suffix still lands on the manual label.
+  assert.match(
+    tldrBubble('failed', 'x', undefined, { origin: 'manual', progress: { index: 2, total: 3 } }).label,
+    /\(2 of 3\)$/,
+  );
+});
+
 test('tldrBubble: done-with-reason is the quiet sent-without-context notice', () => {
   const b = tldrBubble('done', 'research timed out');
   assert.equal(b.tone, 'info'); // quieter than failed: the TLDR itself made it out
@@ -792,6 +813,31 @@ test('quoteSendFailure explains a refused quote, and only a refused quote', () =
   for (const other of ['conversation-not-found', 'empty-body', undefined, '', 'Failed to fetch']) {
     assert.equal(quoteSendFailure(other), null, String(other));
   }
+});
+
+test('quoteTargetIndex finds the original by its sent_at timestamp', () => {
+  const messages = [
+    { id: 'a', timestamp: 100 },
+    { id: 'b', timestamp: 200 },
+    { id: 'c', timestamp: 300 },
+  ];
+  assert.equal(quoteTargetIndex(messages, { id: 200 }), 1);
+  assert.equal(quoteTargetIndex(messages, { id: 300 }), 2);
+  // Not in the loaded window: the caller may page older history in and retry.
+  assert.equal(quoteTargetIndex(messages, { id: 50 }), -1);
+});
+
+test('quoteTargetIndex refuses quotes with nothing to jump to', () => {
+  const messages = [{ id: 'a', timestamp: 100 }];
+  // No id at all — nothing identifies an original.
+  assert.equal(quoteTargetIndex(messages, { text: 'hi' }), -1);
+  assert.equal(quoteTargetIndex(messages, null), -1);
+  // The original was already gone when the reply arrived: no amount of loading
+  // older history will surface it, so don't send the caller looking.
+  assert.equal(quoteTargetIndex(messages, { id: 100, referencedMessageNotFound: true }), -1);
+  // Defensive about the list itself.
+  assert.equal(quoteTargetIndex(null, { id: 100 }), -1);
+  assert.equal(quoteTargetIndex([null, { id: 'a', timestamp: 100 }], { id: 100 }), 1);
 });
 
 // The page API's quote-* error tags and the frontend's mapping of them are

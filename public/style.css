@@ -333,6 +333,21 @@ a.attachment-chip:hover { background: rgba(255,255,255,.14); }
   border-radius: 4px; object-fit: cover; background: rgba(0, 0, 0, .18);
 }
 
+/* A quote in a message row jumps to its original on click (app.js only adds
+   the class when there is a target); the banner's copy stays inert. */
+.quote-jump { cursor: pointer; }
+.quote-jump:hover { background: rgba(0, 0, 0, .32); }
+.outgoing .quote-jump:hover { background: rgba(0, 0, 0, .28); }
+.quote-jump:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The landing pulse after a quote jump, on the row so bubble + meta flash as
+   one. box-shadow rather than background: the bubble already owns its fill. */
+.msg-row.flash .bubble { animation: quote-flash 1.4s ease-out; }
+@keyframes quote-flash {
+  0%, 45% { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
+
 /* Composer reply banner: the same box, sitting above the input. No margin of
    its own — .composer is a column flex with its own gap, like #editBanner. */
 .reply-banner { display: flex; align-items: center; gap: 8px; }
