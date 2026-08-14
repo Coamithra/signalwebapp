@@ -604,4 +604,15 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
   display: flex; align-items: center; justify-content: center;
 }
 .tldr-dismiss:hover { background: var(--bg-hover); color: var(--text); }
+/* The in-app `claude auth login` form. The bubble is inline-flex on one line for
+   every other stage; this one carries a link, a text field and two buttons, so
+   it is allowed to wrap rather than squeezing the code field to nothing. */
+.tldr-bubble:has(.tldr-code) { flex-wrap: wrap; max-width: 92%; }
+.tldr-link { color: var(--accent); text-decoration: underline; }
+.tldr-code {
+  flex: 1 1 190px; min-width: 0; border-radius: 8px; padding: 4px 9px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  font-size: 12.5px; font-family: inherit;
+}
+.tldr-code:focus { outline: none; border-color: var(--accent); }
 .dlg-btn.danger:hover { filter: brightness(1.08); }

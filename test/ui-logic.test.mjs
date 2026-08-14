@@ -395,6 +395,51 @@ test('tldrBubble: done-with-reason is the quiet sent-without-context notice', ()
   assert.ok(b.label.includes('For context'));
 });
 
+test('tldrBubble: only an auth failure offers the in-app login', () => {
+  // The decision keys off the server's fixed token, never the display text --
+  // `reason` exists to be reworded and must not carry meaning.
+  assert.equal(tldrBubble('failed', 'Claude Code CLI is not logged in', 'auth').login, true);
+  // A missing binary is not something a browser flow can install.
+  assert.equal(tldrBubble('failed', 'Claude Code CLI not found', 'not-found').login, false);
+  assert.equal(tldrBubble('failed', 'timed out').login, false);
+  // Matching on the wording alone would have lit this up.
+  assert.equal(tldrBubble('failed', 'Claude Code CLI is not logged in').login, false);
+  // The sent-without-context notice can offer it too: the block failed on auth,
+  // and logging in fixes the next one.
+  assert.equal(tldrBubble('done', 'Claude usage limit reached').login, false);
+  assert.equal(tldrBubble('done', 'Claude Code CLI is not logged in', 'auth').login, true);
+});
+
+test('tldrBubble: the login stages carry their own controls', () => {
+  const waiting = tldrBubble('login');
+  assert.equal(waiting.codeInput, true);
+  assert.equal(waiting.cancelLogin, true);
+  assert.equal(waiting.dismiss, false); // Cancel is the way out, not a bare ×
+  assert.equal(waiting.tone, 'info');
+
+  assert.equal(tldrBubble('logging-in').tone, 'work'); // spinner while it runs
+
+  const failed = tldrBubble('login-failed', 'the code was not accepted');
+  assert.equal(failed.tone, 'warn');
+  assert.equal(failed.login, true); // straight back into another attempt
+  assert.equal(failed.dismiss, true);
+  assert.ok(failed.label.includes('the code was not accepted'));
+  assert.ok(!tldrBubble('login-failed').label.includes('undefined'));
+
+  const ok = tldrBubble('logged-in');
+  assert.equal(ok.tone, 'info');
+  assert.equal(ok.retry, true); // re-runs the link that failed; app.js drops it if there is none
+  assert.equal(ok.dismiss, true);
+  assert.equal(ok.login, undefined);
+});
+
+test('tldrHint: the login button is offered for auth only', () => {
+  assert.equal(tldrHint({ configured: false, reason: 'auth' }).login, true);
+  assert.equal(tldrHint({ configured: false, reason: 'not-found' }).login, undefined);
+  assert.equal(tldrHint({ configured: false }).login, undefined);
+  assert.equal(tldrHint({ configured: true }).login, undefined);
+});
+
 // ---------- import guard ----------
 
 const PUBLIC_DIR = path.join(here, '..', 'public');

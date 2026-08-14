@@ -28,7 +28,7 @@ Card -> worktree -> PR runbook: follow `~/.claude/CONTRIBUTING.md` (the global g
 - **Board:** Signal Web App, id `6a353dfe`, **local backend** - every board command needs `--backend local`. Lists: To Do / Doing / Done. Atomic pickup (truly atomic on the local backend): `trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"`.
 - **Default branch:** `main`. **GitHub:** solo public repo (unprotected `main` -> PR + self-merge, no approval needed).
 - **Worktrees:** `.trees/<branch>` (branch-named, gitignored). **Zero-dep app** - no `.env`, no `node_modules`, no build step - so a fresh worktree is ready to run immediately (no bootstrap).
-- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free logic: [public/format.js](public/format.js) (the formatting parser and the shortcode lookups), [public/ui-logic.js](public/ui-logic.js), and the pure helpers of [src/tldr.js](src/tldr.js). Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
+- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free logic: [public/format.js](public/format.js) (the formatting parser and the shortcode lookups), [public/ui-logic.js](public/ui-logic.js), and the pure helpers of [src/tldr.js](src/tldr.js) + [src/claude-cli.js](src/claude-cli.js). Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
 
 ## The one thing you must know about the CDP layer
 
@@ -54,6 +54,7 @@ evaluate must target the isolated context's id.
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
+| [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
 | [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
@@ -409,26 +410,68 @@ evaluate must target the isolated context's id.
   when you reopen a chat mid-run; it's cleared on a page reload / server restart
   (no persisted log). A sidebar / cross-conversation indicator is still out of
   scope.
-- **Is the CLI usable? — `--version` can prove absence, never login.** `claude --version`
-  exits 0 for a CLI that is installed but logged **out**, so the boot probe alone once
-  reported "configured" while every summary died at `claude-auth`. Availability is therefore
-  driven by **real runs**: `noteRunOutcome` in [src/tldr.js](src/tldr.js) lowers `available`
-  when a run fails with one of the two errors that mean the *install* is broken
-  (`availabilityError` -> `'not-found'` / `'auth'`) and raises it when any run succeeds.
-  Everything else — a timeout, a usage limit, a refusal, an empty reply, a bad `TLDR_MODEL` —
-  says something about that one request and must **not** move the flag, or a single slow video
-  would hide the toggle behind a "not configured" hint. The boot `probe()` is the only other
-  writer and may only **lower**; never let it raise, because it cannot see login state.
+- **Is the CLI usable? — ask `claude auth status`, never `claude --version`.** `--version`
+  exits 0 for a CLI that is installed but logged **out**, so a boot probe built on it once
+  reported "configured" while every summary died at `claude-auth`; for a long time the rule
+  was therefore "the probe may only *lower* availability". `claude auth status --json` is the
+  probe that rule was missing — it prints `{"loggedIn": false, "authMethod": "none",
+  "apiProvider": "firstParty"}` and reports `false` for a credentials file whose token has
+  expired with **no refresh token** (verified against exactly that state), rather than merely
+  "there is a token on disk". So `probe()` in [src/tldr.js](src/tldr.js) may now **raise as
+  well as lower**, and the UI can name the real problem from boot instead of waiting for the
+  first link to fail. ⚠️ Two things it must keep doing: the CLI exits **1** when logged out,
+  so the exit code is not a usable signal on its own (parse stdout, consult the code only when
+  there is nothing to parse — `parseAuthStatus` in [src/claude-cli.js](src/claude-cli.js)),
+  and output it *cannot* parse must answer `null`, never `false` — an unreadable answer means
+  a CLI whose output shape changed and should degrade to finding out on the first real run,
+  not latch the feature off.
+  The other writer is still **real runs**: `noteRunOutcome` lowers `available` when a run
+  fails with one of the two errors that mean the *install* is broken (`availabilityError` ->
+  `'not-found'` / `'auth'`) and raises it when any run succeeds. Everything else — a timeout,
+  a usage limit, a refusal, an empty reply, a bad `TLDR_MODEL` — says something about that one
+  request and must **not** move the flag, or a single slow video would hide the toggle behind
+  a "not configured" hint.
   Recovery needs no restart: `shouldAttempt` gates the watcher, so an unusable CLI is idle for
   `AVAILABILITY_RECHECK_MS` (10 min) and then gets **one** attempt through — the run *is* the
   re-probe, which is why there is no timer and no extra probe spawn. `retry()` is not gated at
   all (it's the explicit user action, and so the natural "I just logged in" path; a still-broken
-  CLI reports itself truthfully in the bubble within seconds). The reason rides out to the UI on
+  CLI reports itself truthfully in the bubble within seconds), and a successful in-app login
+  calls `tldr.recheck()` so the feature comes back **immediately** rather than sitting out the
+  rest of the window. The reason rides out to the UI on
   `GET/POST /api/conversations/:id/tldr` as `{enabled, configured, reason?}`, where `reason` is
   one of those same two fixed tokens — never CLI output, the same sanitization discipline as
   `friendlyReason` — and `tldrHint` in [public/ui-logic.js](public/ui-logic.js) turns it into
   the menu hint, falling back to naming both requirements when the server has not diagnosed
   which one is missing.
+- **Logging the CLI back in, from the app.** A logged-out CLI used to be a dead end in the UI:
+  the bubble named the problem and offered a Retry that could not work until the user found a
+  terminal. [src/claude-cli.js](src/claude-cli.js) drives `claude auth login` instead, which
+  **works with no TTY** — it prints an OAuth URL on stdout and then blocks reading the code
+  from stdin. Three routes over one pending child: `POST /api/tldr/login` -> `{ok, url}`
+  (idempotent — a second call returns the same pending url rather than spawning a rival
+  child), `POST /api/tldr/login/code {code}`, `POST /api/tldr/login/cancel`. The failure
+  bubble and the thread menu both grow a **Log in** button, and the bubble then shows the
+  sign-in link plus a code field (stages `login` / `logging-in` / `login-failed` /
+  `logged-in`, decided in `tldrBubble` like every other stage — they are **local**, no SSE
+  event ever carries them).
+  ⚠️ **It is the paste-a-code flow, not a localhost callback** (`redirect_uri` is
+  `platform.claude.com/oauth/code/callback`, `code=true`), so a new tab alone cannot finish
+  it — the code field is not optional polish.
+  ⚠️ **The pasted code is a credential in transit.** It crosses the loopback-only server
+  straight into the child's stdin and is never logged, echoed in a response, or stored;
+  `validCode` shape-checks it first, rejecting whitespace because a newline is the one
+  character that would turn one stdin write into two answers. Every log line in that module is
+  a fixed string for the same reason.
+  ⚠️ **`parseAuthUrl`'s https + host allow-list is load-bearing**, not tidiness: that URL is
+  rendered as a link the user is being told to click, so anything reaching it would be a
+  phishing link the app vouched for. A `claude` on PATH that isn't the CLI we think it is
+  cannot turn this into a `javascript:` payload or a lookalike host.
+  The **link is a real anchor**, never `window.open()` after an await (the popup blocker eats
+  that) — and note the CLI opens its own tab in the *server machine's* default browser, which
+  need not be the browser the app is open in, which is why the anchor exists at all.
+  Whether the button appears is decided by the stage event's `kind` — the same fixed
+  `'auth'`/`'not-found'` token — and **never** by matching the human-readable `reason` text,
+  which exists to be reworded.
 
 ## Conventions
 
@@ -478,7 +521,7 @@ npm start               # server on http://127.0.0.1:7700
   [src/page-api.js](src/page-api.js). Re-probe with a small CDP `Runtime.evaluate` in the
   isolated context.
 - `npm test` only reaches pure, DOM-free logic ([public/format.js](public/format.js),
-  [public/ui-logic.js](public/ui-logic.js), the helpers in [src/tldr.js](src/tldr.js)). Nothing that touches
+  [public/ui-logic.js](public/ui-logic.js), the helpers in [src/tldr.js](src/tldr.js) and [src/claude-cli.js](src/claude-cli.js)). Nothing that touches
   CDP, the server, or the DOM is covered (notably the emoji popup's state machine, which
   still lives in `app.js`), so **also** run the app and exercise the change (the
   `Claude_Preview` / `claude-in-chrome` tools work well; test sends against **Note to
