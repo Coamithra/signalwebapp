@@ -13,6 +13,7 @@
 
 import { EMOJI_SHORTCODES } from './emoji-shortcodes.js';
 import { EMOJI_TAGS } from './emoji-tags.js';
+import { safeHttpUrl } from './ui-logic.js';
 
 export const STYLE = Object.freeze({
   BOLD: 1, ITALIC: 2, SPOILER: 3, STRIKETHROUGH: 4, MONOSPACE: 5,
@@ -317,6 +318,82 @@ const escapeMarkers = (s) => s.replace(/[*_~`|\\]/g, '\\$&');
 const escapeShortcodes = (s) => s.replace(/:([a-z0-9_+-]+):/gi,
   (all, name) => (emojiFor(name) ? '\\' + all : all));
 
+// ---------- links ----------
+
+// Bare domains are worth linking — people type "example.com" constantly — but
+// without a TLD list every "reboot.sh", "README.md" and "v1.2.3" turns into a
+// link, and the full IANA table is ~1500 entries we have no dependency budget
+// for. So a bare host is only linkified when its last label is one of these:
+// the common generic TLDs plus the big ccTLDs, minus anything that reads as an
+// English word after a dot (.it, .in, .at, .be, .no, .us), because chat is full
+// of missing-space typos like "sure.it works". An exotic TLD needs a scheme.
+const TLDS = [
+  'com', 'org', 'net', 'edu', 'gov', 'mil', 'int', 'info', 'biz',
+  'io', 'ai', 'app', 'dev', 'co', 'me', 'tv', 'fm', 'gg', 'xyz',
+  'online', 'site', 'tech', 'blog', 'news', 'shop', 'store', 'wiki',
+  'uk', 'de', 'fr', 'nl', 'es', 'se', 'dk', 'fi', 'pl', 'cz', 'pt', 'ie', 'ch',
+  'ru', 'ua', 'jp', 'cn', 'kr', 'br', 'mx', 'ca', 'au', 'nz', 'za', 'tr', 'il', 'eu',
+];
+
+// A host label: alphanumerics and inner hyphens. Reused for the leading label
+// and every dotted one after it.
+const LABEL = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
+const LINK_RE = new RegExp(
+  // An explicit scheme (http included — unlike the *preview* gate, which is
+  // https-only because that's what Signal will fetch), or a bare "www.".
+  `(?:https?://|www\\.)[^\\s<>]+`
+  + '|'
+  // ...or a bare host on a known TLD, with an optional path/query/port.
+  + `${LABEL}(?:\\.${LABEL})*\\.(?:${TLDS.join('|')})\\b(?:[:/?#][^\\s<>]*)?`,
+  'gi',
+);
+
+// A match glued to one of these on its left isn't a link: an email local part
+// ("foo@example.com"), another scheme ("mailto:example.com"), a Windows path
+// ("C:\\Users\\thing.com"), or the tail of a longer token.
+const GLUED_LEFT = /[\p{L}\p{N}_@.\-/:\\]/u;
+
+const CLOSER_FOR = { ')': '(', ']': '[', '}': '{' };
+const occurrences = (s, ch) => s.split(ch).length - 1;
+
+// URLs sit in prose, so the sentence punctuation after one isn't part of it.
+// A closing bracket is only trailing when it doesn't balance an opener inside
+// the match — Wikipedia's "…_(disambiguation)" keeps its paren, "(see x.com)"
+// doesn't steal one.
+function trimTail(s) {
+  while (s) {
+    const last = s[s.length - 1];
+    if ('.,;:!?…"\''.includes(last)) { s = s.slice(0, -1); continue; }
+    const opener = CLOSER_FOR[last];
+    if (opener && occurrences(s, last) > occurrences(s, opener)) { s = s.slice(0, -1); continue; }
+    break;
+  }
+  return s;
+}
+
+// The links in a plain message body, in order and non-overlapping, as ranges
+// the renderer can walk alongside Signal's style ranges.
+// Not to be confused with `hasLink` in ui-logic.js: that is the link-*preview*
+// gate and is https-only on purpose (Signal's own shouldPreviewHref decides
+// what it will fetch). Clickability has no such constraint.
+export function linkSpans(text) {
+  const body = typeof text === 'string' ? text : '';
+  const out = [];
+  LINK_RE.lastIndex = 0;
+  for (let m; (m = LINK_RE.exec(body));) {
+    const prev = body[m.index - 1];
+    if (prev !== undefined && GLUED_LEFT.test(prev)) continue;
+    const raw = trimTail(m[0]);
+    if (!raw) continue;
+    // Message bodies are attacker-influenced, so the scheme gate is the same
+    // one the preview card uses: anything that isn't plain http(s) — including
+    // a "javascript:" that slipped through the regex — never becomes an anchor.
+    const href = safeHttpUrl(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    if (href) out.push({ start: m.index, length: raw.length, href });
+  }
+  return out;
+}
+
 // ---------- rendering ----------
 
 const TAG_FOR = {
@@ -330,7 +407,19 @@ const TAG_FOR = {
 // elements) and colour-font emoji ignore `color: transparent`, so the wrapper
 // is what gives the blackout something to put `visibility: hidden` on — which
 // also keeps the unrevealed text out of the accessibility tree.
-function styleEl(style) {
+// A link span (carrying `href` instead of `style`) travels the same walk, so
+// formatting inside a URL nests in the anchor like anything else.
+function styleEl(r) {
+  if (r.href) {
+    const a = document.createElement('a');
+    a.href = r.href;
+    // New tab, always: clicking a link in a thread must never navigate the app
+    // tab away from what you were reading.
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    return { node: a, host: a };
+  }
+  const style = r.style;
   const node = document.createElement(TAG_FOR[style] || 'span');
   if (style !== STYLE.SPOILER) return { node, host: node };
 
@@ -376,7 +465,7 @@ function buildNodes(text, ranges, from, to) {
       k++;
     }
 
-    const { node, host } = styleEl(r.style);
+    const { node, host } = styleEl(r);
     for (const child of buildNodes(text, inner, start, end)) host.appendChild(child);
     nodes.push(node);
     at = end;
@@ -385,13 +474,55 @@ function buildNodes(text, ranges, from, to) {
   return nodes;
 }
 
+const overlaps = (a, b) => a.start < b.start + b.length && b.start < a.start + a.length;
+const contains = (a, b) => a.start <= b.start && a.start + a.length >= b.start + b.length;
+
+// Split any style range that *crosses* a link boundary — starts outside the
+// link and ends inside it, or the reverse — at that boundary. Ranges that are
+// disjoint from every link, contain one, or sit inside one are left as they
+// are. Afterwards containment always holds between a style and a link, which is
+// what lets buildNodes nest them without ever having to clip an anchor in half.
+function splitAcrossLinks(styles, links) {
+  let out = styles;
+  for (const l of links) {
+    const lEnd = l.start + l.length;
+    const next = [];
+    for (const r of out) {
+      const rEnd = r.start + r.length;
+      const crossesStart = r.start < l.start && rEnd > l.start && rEnd < lEnd;
+      const crossesEnd = r.start > l.start && r.start < lEnd && rEnd > lEnd;
+      if (!crossesStart && !crossesEnd) { next.push(r); continue; }
+      const cut = crossesStart ? l.start : lEnd;
+      next.push({ ...r, length: cut - r.start }, { ...r, start: cut, length: rEnd - cut });
+    }
+    out = next;
+  }
+  return out;
+}
+
 // Message text -> DOM. Built with createElement/createTextNode only: message
 // bodies are attacker-influenced, so no innerHTML anywhere on this path.
+//
+// Links are detected here and walked as ranges beside Signal's style ranges,
+// rather than as a second pass over the finished text: a style range can cover
+// part of a URL, and only one walk can nest both without either splitting the
+// anchor or dropping the styling.
 export function renderFormatted(text, bodyRanges) {
   const frag = document.createDocumentFragment();
   const body = text || '';
-  const ranges = (bodyRanges || [])
-    .filter((r) => r && TAG_FOR[r.style] && r.start >= 0 && r.length > 0 && r.start + r.length <= body.length)
+  const styles = (bodyRanges || [])
+    .filter((r) => r && TAG_FOR[r.style] && r.start >= 0 && r.length > 0 && r.start + r.length <= body.length);
+  // A spoiler *around* a link keeps its anchor: `.spoiler-body` is
+  // `visibility: hidden` until revealed, and a hidden subtree takes no clicks
+  // and no focus — so the link is genuinely unclickable until then, and
+  // clickable after, for free. A spoiler that only partly covers a link (or
+  // hides a piece in the middle of one) drops the anchor altogether: a URL
+  // whose visible text is partly blacked out is a deception vector, and there
+  // is no honest way to render it.
+  const links = linkSpans(body).filter(
+    (l) => !styles.some((r) => r.style === STYLE.SPOILER && overlaps(r, l) && !contains(r, l)),
+  );
+  const ranges = splitAcrossLinks(styles, links).concat(links)
     .sort((a, b) => a.start - b.start || b.length - a.length);
   for (const node of buildNodes(body, ranges, 0, body.length)) frag.appendChild(node);
   return frag;

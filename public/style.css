@@ -234,6 +234,11 @@ body {
   background: transparent; cursor: auto; user-select: text;
 }
 .msg-text .spoiler.revealed .spoiler-body { visibility: visible; }
+/* Links inherit the bubble's text colour rather than taking one of their own:
+   the incoming and outgoing bubbles have different backgrounds, and the
+   underline already says "link" on both. */
+.msg-text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.msg-text a:hover { opacity: .8; }
 
 .attachment-chip {
   display: inline-flex; align-items: center; gap: 7px;

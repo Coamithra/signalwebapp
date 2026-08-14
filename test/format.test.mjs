@@ -1,14 +1,15 @@
 // Tests for the composer's formatting parser (public/format.js).
 //
 // Zero-dep: node's built-in runner (`npm test`). format.js is DOM-free apart
-// from renderFormatted(), which isn't exercised here — the parse/serialize half
-// is where the sharp edges are.
+// from renderFormatted(), which the linkification tests at the bottom reach
+// through a ~30-line fake `document` — enough of the DOM to build a tree and
+// serialize it, and nothing more.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseFormatting, toMarkdown, expandShortcodes, shortcodeBefore,
-  shortcodeQueryBefore, matchShortcodes, STYLE,
+  shortcodeQueryBefore, matchShortcodes, linkSpans, renderFormatted, STYLE,
 } from '../public/format.js';
 
 const { BOLD, ITALIC, SPOILER, STRIKETHROUGH, MONOSPACE } = STYLE;
@@ -250,4 +251,140 @@ test('hand-edited weights cannot poison the ranking', () => {
   }
   // ...and no prototype key can smuggle a non-emoji into the results.
   for (const m of matchShortcodes('constructor')) assert.equal(typeof m.emoji, 'string');
+});
+
+// ---------- links ----------
+
+test('linkSpans finds schemes, www and bare domains', () => {
+  const spans = (t) => linkSpans(t).map((l) => [t.slice(l.start, l.start + l.length), l.href]);
+
+  assert.deepEqual(spans('see https://example.com/a?b=1 ok'),
+    [['https://example.com/a?b=1', 'https://example.com/a?b=1']]);
+  // http is fine for clicking, unlike the https-only *preview* gate.
+  assert.deepEqual(spans('http://example.com'), [['http://example.com', 'http://example.com']]);
+  // A bare host gets https:// — nearly everything redirects there anyway.
+  assert.deepEqual(spans('example.com'), [['example.com', 'https://example.com']]);
+  assert.deepEqual(spans('www.example.co.uk/x'), [['www.example.co.uk/x', 'https://www.example.co.uk/x']]);
+  assert.deepEqual(spans('t.me/somechannel'), [['t.me/somechannel', 'https://t.me/somechannel']]);
+  assert.deepEqual(spans('EXAMPLE.COM/A'), [['EXAMPLE.COM/A', 'https://EXAMPLE.COM/A']]);
+  assert.deepEqual(spans('a.com and b.org'), [['a.com', 'https://a.com'], ['b.org', 'https://b.org']]);
+  assert.deepEqual(spans('port example.com:8080/x'), [['example.com:8080/x', 'https://example.com:8080/x']]);
+  assert.deepEqual(spans(''), []);
+  assert.deepEqual(linkSpans(null), []);
+});
+
+test('linkSpans leaves the punctuation around a url alone', () => {
+  const text = (t) => linkSpans(t).map((l) => t.slice(l.start, l.start + l.length));
+
+  assert.deepEqual(text('go to https://example.com.'), ['https://example.com']);
+  assert.deepEqual(text('really, example.com!'), ['example.com']);
+  assert.deepEqual(text('"https://example.com"'), ['https://example.com']);
+  assert.deepEqual(text('(see https://example.com)'), ['https://example.com']);
+  // ...but a bracket the url opened itself is part of it.
+  assert.deepEqual(text('https://en.wikipedia.org/wiki/Signal_(software)'),
+    ['https://en.wikipedia.org/wiki/Signal_(software)']);
+  assert.deepEqual(text('(https://en.wikipedia.org/wiki/Signal_(software))'),
+    ['https://en.wikipedia.org/wiki/Signal_(software)']);
+});
+
+test('linkSpans does not linkify things that merely look like hosts', () => {
+  for (const t of [
+    'mail me at bob@example.com',        // email local part
+    'mailto:bob@example.com',
+    String.raw`C:\Users\bob\setup.com`, // Windows path
+    'run reboot.sh please',              // file extensions that aren't TLDs
+    'see README.md and app.js',
+    'version v1.2.3 shipped',
+    'javascript:alert(1)',
+    'sure.it works',                     // English-word ccTLDs are off the list
+    'wait.no really',
+    'ping me.at home',
+    'example.company is a word',
+  ]) assert.deepEqual(linkSpans(t), [], `linkified ${JSON.stringify(t)}`);
+});
+
+// The smallest DOM that renderFormatted needs: it only ever calls
+// createElement / createTextNode / createDocumentFragment and appendChild.
+function makeEl(tag) {
+  const node = {
+    tag, nodeType: 1, className: '', children: [], attrs: {},
+    appendChild(child) { node.children.push(child); return child; },
+    setAttribute(k, v) { node.attrs[k] = String(v); },
+    addEventListener() {},
+    classList: { add(c) { node.className = node.className ? `${node.className} ${c}` : c; } },
+  };
+  return node;
+}
+globalThis.document = {
+  createElement: makeEl,
+  createTextNode: (text) => ({ nodeType: 3, text }),
+  createDocumentFragment: () => makeEl('#fragment'),
+};
+
+function serialize(node) {
+  if (node.nodeType === 3) return node.text;
+  const kids = node.children.map(serialize).join('');
+  if (node.tag === '#fragment') return kids;
+  const attrs = [];
+  if (node.className) attrs.push(`class="${node.className}"`);
+  if (node.tag === 'a') attrs.push(`href="${node.href}"`, `target="${node.target}"`, `rel="${node.rel}"`);
+  return `<${node.tag}${attrs.map((a) => ` ${a}`).join('')}>${kids}</${node.tag}>`;
+}
+const render = (text, ranges) => serialize(renderFormatted(text, ranges));
+const A = (href, inner = href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+
+test('renderFormatted turns urls into new-tab anchors', () => {
+  assert.equal(render('go to https://example.com now'),
+    `go to ${A('https://example.com')} now`);
+  assert.equal(render('example.com'), A('https://example.com', 'example.com'));
+  // Nothing to link: the plain-text path is untouched.
+  assert.equal(render('just words'), 'just words');
+  assert.equal(render(''), '');
+  assert.equal(render('🎉🎉'), '🎉🎉');  // the jumbomoji path has no links to find
+});
+
+test('a style range around a link nests inside it, not through it', () => {
+  const url = 'https://example.com';
+  // Bold covering the whole link.
+  assert.equal(render(url, [{ start: 0, length: url.length, style: BOLD }]),
+    `<strong>${A(url)}</strong>`);
+  // Bold around a link plus surrounding words.
+  assert.equal(render(`hi ${url} yo`, [{ start: 0, length: 25, style: BOLD }]),
+    `<strong>hi ${A(url)} yo</strong>`);
+});
+
+test('a style range crossing a link boundary splits the style, never the anchor', () => {
+  const text = `see https://example.com/page here`;
+  // Bold starts before the url and stops halfway through it.
+  const out = render(text, [{ start: 0, length: 18, style: BOLD }]);
+  assert.equal(out.match(/<a /g).length, 1, 'anchor was split');
+  assert.equal(out,
+    `<strong>see </strong>${A('https://example.com/page', '<strong>https://exampl</strong>e.com/page')} here`);
+
+  // ...and the mirror image: italic starting inside the url and running past it.
+  const tail = render(text, [{ start: 18, length: 15, style: ITALIC }]);
+  assert.equal(tail.match(/<a /g).length, 1, 'anchor was split');
+  assert.equal(tail,
+    `see ${A('https://example.com/page', 'https://exampl<em>e.com/page</em>')}<em> here</em>`);
+});
+
+test('spoilers decide whether a link is clickable', () => {
+  const url = 'https://example.com';
+  // A spoiler *around* the link keeps the anchor: .spoiler-body is hidden until
+  // revealed, and a hidden subtree takes no clicks.
+  assert.equal(render(url, [{ start: 0, length: url.length, style: SPOILER }]),
+    `<span class="spoiler"><span class="spoiler-body">${A(url)}</span></span>`);
+
+  // A spoiler over only part of the link drops the anchor entirely.
+  const half = render(url, [{ start: 0, length: 11, style: SPOILER }]);
+  assert.ok(!half.includes('<a '), 'half-blacked-out url stayed clickable');
+  assert.equal(half, '<span class="spoiler"><span class="spoiler-body">https://exa</span></span>mple.com');
+
+  // Same for a spoiler hiding a piece in the middle of one.
+  const middle = render(url, [{ start: 8, length: 7, style: SPOILER }]);
+  assert.ok(!middle.includes('<a '), 'url with a hidden middle stayed clickable');
+
+  // A spoiler elsewhere in the message doesn't cost the link its anchor.
+  const other = render(`secret ${url}`, [{ start: 0, length: 6, style: SPOILER }]);
+  assert.ok(other.includes('<a '), 'unrelated spoiler suppressed the link');
 });
