@@ -1704,10 +1704,13 @@ function tldrLoginForm(url) {
 async function beginClaudeLogin(url) {
   const key = state.activeId;
   if (!key) return;
-  // Opened synchronously, inside the click, so the popup blocker allows it; the
-  // address is filled in once the server hands us one. A tab we never fill is
-  // closed again below rather than left sitting on about:blank.
-  const tab = window.open('', '_blank');
+  // We deliberately do NOT open a tab here. `claude auth login` opens one itself
+  // as it starts, so doing it too gave the user two sign-in windows for one
+  // login -- and only one of them belongs to the OAuth exchange the CLI is
+  // actually waiting on, which makes "which of these do I use?" a real question
+  // with a wrong answer in it. The anchor in the bubble covers the case the
+  // CLI's tab cannot: it opens in the *server machine's* default browser, which
+  // need not be the browser this app is open in.
   const prev = tldrByConv.get(key);
   setTldrFor(key, { stage: 'logging-in', url, prev });
   renderActiveTldr();
@@ -1716,13 +1719,11 @@ async function beginClaudeLogin(url) {
     r = await api('/api/tldr/login', { method: 'POST' });
     if (!r.ok) throw new Error(r.error || 'login failed');
   } catch (err) {
-    if (tab) tab.close();
     setTldrFor(key, { stage: 'login-failed', reason: loginErrorReason(err.message), url, prev });
     renderActiveTldr();
     return;
   }
   claudeAuthUrl = r.url;
-  if (tab) tab.location = r.url; else toast('Allow pop-ups, or use the sign-in link in the bubble');
   setTldrFor(key, { stage: 'login', url, prev });
   renderActiveTldr();
 }
