@@ -347,6 +347,16 @@ export function tldrBubble(stage, reason, kind) {
       tone: 'warn', retry: true, dismiss: true, login: kind === 'auth',
     };
   }
+  if (stage === 'refused') {
+    // The server declined to start a run at all — that video already has a TLDR
+    // here, or one is in flight. NOT 'failed': that stage always offers Retry,
+    // and Retry posts to the deliberately ungated /tldr/retry, so one more click
+    // would send the very duplicate the refusal just prevented.
+    return {
+      label: `Not summarized: ${reason || 'already done'}`,
+      tone: 'info', retry: false, dismiss: true,
+    };
+  }
   if (stage === 'login') {
     // ⚠️ The browser normally finishes this by itself — the sign-in page calls
     // back, the CLI exits logged in, and the user is never shown a code. So the

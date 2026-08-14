@@ -433,9 +433,16 @@ evaluate must target the isolated context's id.
   read and must stay re-runnable) and **persisted next to `enabled` in `.tldr-settings.json`,
   FIFO-bounded at `SUMMARIZED_CAP`**: a "won't let me do it twice" that quietly resets on a server
   restart is not the promise. An `inFlight` set of the same keys covers the gap that
-  record-on-success alone leaves — a double-click, or the watcher and a manual click racing over
-  one link. The menu entry goes **disabled** (`summarized` -> *Already summarized*) rather than
-  vanishing; an option that disappears reads as a bug.
+  record-on-success alone leaves, and **all three entry points consult it** — `summarizeNow`,
+  `retry`, and the watcher loop, whose own `processed` set is keyed by *message* and so cannot
+  see that a manual run for that *video* is already going. The watcher is deliberately **not**
+  gated on `summarized`: that would silently stop a re-posted link from getting its usual
+  automatic TLDR, which is a change to the old feature rather than part of this one. A refusal
+  (`already-summarized` / `in-progress`) renders as the dismiss-only **`refused`** bubble, never
+  `failed` — `failed` always offers Retry, and Retry posts to the ungated `tldr/retry`, so one
+  more click would send the duplicate the refusal just prevented. The menu entry goes **disabled**
+  (`summarized` -> *Already summarized*) rather than vanishing; an option that disappears reads as
+  a bug.
 - **Is the CLI usable? — ask `claude auth status`, never `claude --version`.** `--version`
   exits 0 for a CLI that is installed but logged **out**, so a boot probe built on it once
   reported "configured" while every summary died at `claude-auth`; for a long time the rule

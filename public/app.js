@@ -1871,11 +1871,18 @@ async function startTldr(url, kind) {
     // Only show the failure if we're still tracking this same link for that chat.
     const cur = tldrByConv.get(key);
     if (cur && cur.url === url) {
-      setTldrFor(key, { stage: 'failed', reason: retryErrorReason(err.message), url });
+      // A refusal is not a failure: nothing ran, and the 'failed' bubble's Retry
+      // goes to the ungated /tldr/retry, which would send the duplicate the
+      // refusal just prevented. 'refused' is the dismiss-only notice instead.
+      const stage = REFUSALS.has(err.message) ? 'refused' : 'failed';
+      setTldrFor(key, { stage, reason: retryErrorReason(err.message), url });
       renderActiveTldr();
     }
   }
 }
+
+// The server's two "I declined to start" tokens, as opposed to "a run failed".
+const REFUSALS = new Set(['already-summarized', 'in-progress']);
 
 // The bubble's Retry button, which only ever re-runs a link the pipeline already
 // had in hand.

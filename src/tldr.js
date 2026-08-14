@@ -99,7 +99,8 @@ function saveSettings(file, enabled, summarized) {
 // menu entry appear for a message the server then rejects as 'bad-url'.
 //
 // `isSummarized(videoId) -> boolean` is passed in rather than read off a closure
-// so this stays pure and unit-testable. Messages are tagged in place (they are
+// so this stays free of createTldr's state and unit-testable. Messages are
+// tagged IN PLACE (they are
 // freshly-built plain objects from the CDP round trip, not shared state), and one
 // with no YouTube link is left completely untouched — `msg.youtube` is absent
 // rather than null, so `if (msg.youtube)` is the whole test on the other side.
@@ -746,9 +747,11 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
   // the watcher, the Retry button and the manual action all end in the same send.
   const videoKey = (convId, videoId) => `${convId}:${videoId}`;
   // The same key, held only while a run is in flight. Recording on success alone
-  // leaves a window a double-click (or the watcher racing a manual click over the
-  // same link) walks straight through; this closes it without the opposite risk
-  // of latching a video as summarized on a run that then fails to send.
+  // leaves a window that a second start walks straight through — a double-click,
+  // or the watcher's first pass over a link the user has just summarized by hand
+  // — and this closes it without the opposite risk of latching a video as
+  // summarized on a run that then fails to send. Consulted by all three entry
+  // points: summarizeNow, retry, and the watcher loop in handleConversation.
   const inFlight = new Set();
 
   function markSummarized(key) {
@@ -955,6 +958,11 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       const key = `${convId}:${msg.id}`;
       if (processed.has(key)) continue;
       markProcessed(key);
+      // Someone is already summarizing this video here, by hand. `processed` is
+      // keyed by MESSAGE and cannot see that: the manual action names a video,
+      // not the message it was read off. Without this the watcher's first pass
+      // over a link the user just clicked sends a second, identical TLDR.
+      if (inFlight.has(videoKey(convId, found.videoId))) continue;
       // The CLI is known-unusable and the recheck window has not elapsed, so
       // there is no point spawning anything -- but SAY so, in the bubble, rather
       // than doing nothing. Silence is indistinguishable from the feature being
@@ -1045,10 +1053,16 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     // is still broken the run says so within seconds, in the bubble, with the
     // truthful reason ("Claude Code CLI is not logged in") -- strictly better
     // than refusing up front with a generic "not configured".
+    // The ONE guard it does keep is in-flight: a double-clicked Retry sending
+    // two identical TLDRs is a bug on any reading, and refusing a run that is
+    // already happening bypasses nothing -- unlike `summarized`, which retry
+    // must ignore for the reasons above.
     retry(convId, url) {
       const found = findYouTubeUrl(url);
       if (!found) return { ok: false, error: 'bad-url' };
-      summarizeAndSend(String(convId), found).catch((e) => log('retry error:', e.message));
+      const id = String(convId);
+      if (inFlight.has(videoKey(id, found.videoId))) return { ok: false, error: 'in-progress' };
+      summarizeAndSend(id, found).catch((e) => log('retry error:', e.message));
       return { ok: true };
     },
 

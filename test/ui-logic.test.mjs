@@ -387,6 +387,22 @@ test('retryErrorReason', () => {
 
 // ---------- auto-TLDR status bubble model ----------
 
+// A refusal must never render as 'failed': that stage always offers Retry, and
+// Retry goes to the ungated /tldr/retry — one click past the gate that just
+// refused, and the duplicate TLDR is sent.
+test('tldrBubble: a refusal is a dismiss-only notice, never retryable', () => {
+  for (const token of ['already-summarized', 'in-progress']) {
+    const b = tldrBubble('refused', retryErrorReason(token));
+    assert.equal(b.retry, false, token);
+    assert.equal(b.dismiss, true, token);
+    assert.equal(b.tone, 'info', token);
+    assert.match(b.label, /Not summarized: /, token);
+    assert.doesNotMatch(b.label, /failed/i, token);
+  }
+  // No reason (a token the server has not sent before) still reads sensibly.
+  assert.equal(tldrBubble('refused').label, 'Not summarized: already done');
+});
+
 test('tldrBubble: working stages are work-toned, with no buttons', () => {
   for (const stage of ['fetching', 'summarizing', 'researching']) {
     const b = tldrBubble(stage, undefined);
