@@ -57,7 +57,7 @@ evaluate must target the isolated context's id.
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
-| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
+| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder, the short-clip autoplay threshold). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). Carries Signal's own `shortNameAlts` too, so `:poop:` works as well as `:hankey:`. |
 | [public/emoji-tags.js](public/emoji-tags.js) | **Generated** shortcode -> synonyms (~7800 tags over ~1800 emoji), the search terms behind `:chef` finding `:cook:`. Same script, but a different Signal source: its **downloaded** emoji search index, not the asar (see the autocomplete bullet). Search terms only, never shortcodes - they rank in `matchShortcodes` and never expand. |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `reboot.mjs` (free port 7700 and restart -- `npm run reboot`; runs the server from *its own* checkout, so it starts a worktree's code when called inside one). ⚠️ Node, not shell, and `reboot.sh` is a one-line wrapper around it: an npm script pointing at a `.sh` resolves `bash` through npm's PATH, which on Windows can find **WSL's** `bash.exe` in System32 rather than Git's and die with `execvpe(/bin/bash) failed`, `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
@@ -176,6 +176,39 @@ evaluate must target the isolated context's id.
   because an in-place edit reuses the same bubble node and can cross the emoji-only line in
   either direction; both optimistic send echoes re-apply it after they inject their media,
   since `messageRow` built those rows with an empty `attachments` array.
+- **Autoplaying short clips** - a video attachment of `AUTOPLAY_MAX_SECONDS` (15s) or less loops
+  silently while it is scrolled into view and pauses the moment it is not, the way short motion
+  behaves in Signal itself. `shouldAutoplayClip` in [public/ui-logic.js](public/ui-logic.js) is the
+  whole decision; `maybeAutoplayClip` and friends in [public/app.js](public/app.js) only drive it.
+  Four things about it are load-bearing:
+  (1) **the decision cannot happen when the row is built** - `duration` does not exist until
+  `loadedmetadata` fires, so the `<video>` is created exactly as before and *promoted* afterwards.
+  Nothing is swapped or re-created, which is also why the `?thumb=1` poster hands off to the first
+  decoded frame with no flash and no reflow;
+  (2) an **unreadable duration means no autoplay**. `NaN` (metadata not in) and `Infinity` (a length
+  the browser can't work out) both fall through to the ordinary play button - the failure mode of
+  guessing wrong is a twenty-minute video looping forever;
+  (3) a **real `image/gif` attachment is out of reach and must stay out of it**. It renders as an
+  `<img>` that the browser animates by itself with no API to start or stop it, so the `kind`
+  check comes first and the clip machinery never touches one. (Everything the `/gif` picker sends
+  is `video/mp4`, so it lands on the clip path, not that one - check which of the two an
+  attachment actually is before writing any pause logic.) `prefers-reduced-motion` is honoured for
+  the clips we *can* drive, and read at decision time so it applies to new rows without a reload;
+  (4) **`renderMessages` calls `resetClips()`** before its `replaceChildren`. One shared
+  `IntersectionObserver` drives every clip, and an observer holds a strong reference to its
+  targets - a clip that was already off screen when its row was replaced never changes
+  intersection state, so it would never be reaped by the callback's `isConnected` check. The
+  rebuilt rows re-register themselves on their own `loadedmetadata`.
+  Autoplay is **muted by definition** (browsers block it otherwise), so a playing clip carries a
+  corner sound toggle - offered on every clip, because whether a video has an audio track cannot
+  be answered before it plays and withholding the control on one that *does* is the worse miss -
+  and one click on the clip itself releases it: paused, unmuted, with its native `controls` back
+  (dropping `controls` also drops the element out of the tab order, so a promoted clip carries its
+  own `tabindex` and Enter/Space to the same escape hatch). If a resumed `play()` is refused
+  because the user unmuted it, `playClip` re-mutes and retries once - sound is never the reason a
+  clip stops looping - but **only on `NotAllowedError`**: a `play()` rejection is far more often
+  the `AbortError` from the observer pausing a clip that was still spinning up, and re-muting on
+  that would silently undo the unmute on every scroll past.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a
