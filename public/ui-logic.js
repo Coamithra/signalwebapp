@@ -43,10 +43,50 @@ export function menuActionsFor(msg) {
   const actions = [];
   const isOut = msg.direction === 'outgoing';
   const hasText = !!(msg.text && msg.text.trim());
+  // Reply first — it's the everyday action, and Signal lists it first too. Any
+  // live message can be replied to, yours or theirs, text or media; a tombstone
+  // can't (there is nothing left to quote).
+  if (!msg.deletedForEveryone) actions.push('reply');
   if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) actions.push('edit');
   if (isOut && !msg.deletedForEveryone) actions.push('deleteForEveryone');
   actions.push('deleteForMe');
   return actions;
+}
+
+// ---------- quoted replies ----------
+// What the quote box says. Signal copies the replied-to message onto the reply,
+// so this is all local data — no lookup of the original, which may be long gone.
+//
+// Returns { author, text, placeholder }. `placeholder: true` means the text is a
+// *description* of the original (a photo, a deleted message) rather than its
+// body, so the caller renders it dim/italic and WITHOUT the quote's bodyRanges —
+// those offsets belong to the body that isn't being shown.
+const QUOTE_KIND_LABEL = {
+  image: 'Photo', video: 'Video', voice: 'Voice message', audio: 'Audio', file: 'Attachment',
+};
+
+export function quoteSummary(quote) {
+  if (!quote) return null;
+  const author = quote.isMe ? 'You' : (quote.authorTitle || 'Unknown');
+  const described = (text) => ({ author, text, placeholder: true });
+  // Checked before the text: a quote of a since-deleted message keeps the text
+  // Signal copied at reply time, but showing it would contradict the tombstone
+  // now standing in the thread above.
+  if (quote.referencedMessageNotFound) return described('Original message not found');
+  if (quote.isViewOnce) return described('View-once media');
+  if (quote.isGiftBadge) return described('Gift badge');
+  if (quote.text && quote.text.trim()) {
+    return { author, text: quote.text, placeholder: false };
+  }
+  const att = quote.attachment;
+  if (att) {
+    // The file name is more use than "Attachment" for an actual file, but a
+    // photo/video/voice note is better named by what it is (and Signal's own
+    // quotes often carry an empty fileName for those anyway).
+    const label = QUOTE_KIND_LABEL[att.kind] || 'Attachment';
+    return described(att.kind === 'file' && att.fileName ? att.fileName : label);
+  }
+  return described('Message');
 }
 
 // ---------- jumbomoji ----------
@@ -94,8 +134,7 @@ export function jumbomojiSize(text) {
 
 // The veto, kept beside the sizing so both halves of the rule are testable and
 // in one place. Signal refuses jumbomoji for a message carrying anything *other*
-// than the emoji — media, a link preview, or formatting ranges (its own
-// predicate also lists quotes, which this UI doesn't render into the bubble).
+// than the emoji — media, a link preview, a quoted reply, or formatting ranges.
 // bodyRanges matters most: a spoilered or monospaced emoji is an ordinary
 // message in Signal, and blowing it up here would out-and-out break the spoiler.
 export function jumboSizeFor(msg) {
@@ -103,6 +142,7 @@ export function jumboSizeFor(msg) {
   if (msg.isViewOnce) return null;
   if ((msg.attachments || []).length) return null;
   if ((msg.preview || []).length) return null;
+  if (msg.quote) return null; // a 👍 answering something is a reply, not a jumbomoji
   if ((msg.bodyRanges || []).length) return null;
   return jumbomojiSize(msg.text);
 }

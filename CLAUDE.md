@@ -49,7 +49,7 @@ evaluate must target the isolated context's id.
 | File | Role |
 |------|------|
 | [src/cdp.js](src/cdp.js) | Generic CDP client over the built-in `WebSocket`. Probes `127.0.0.1` then `::1` (override with `SIGNAL_CDP_HOST`) for the host actually exposing `background.html`, connects to that page target, tracks the isolated context, auto-reconnects with backoff. |
-| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
+| [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/getQuoteThumbnail/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
@@ -57,7 +57,7 @@ evaluate must target the isolated context's id.
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
-| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
+| [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder, what a quoted reply's box says). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). Carries Signal's own `shortNameAlts` too, so `:poop:` works as well as `:hankey:`. |
 | [public/emoji-tags.js](public/emoji-tags.js) | **Generated** shortcode -> synonyms (~7800 tags over ~1800 emoji), the search terms behind `:chef` finding `:cook:`. Same script, but a different Signal source: its **downloaded** emoji search index, not the asar (see the autocomplete bullet). Search terms only, never shortcodes - they rank in `matchShortcodes` and never expand. |
 | [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `reboot.mjs` (free port 7700 and restart -- `npm run reboot`; runs the server from *its own* checkout, so it starts a worktree's code when called inside one). ⚠️ Node, not shell, and `reboot.sh` is a one-line wrapper around it: an npm script pointing at a `.sh` resolves `bash` through npm's PATH, which on Windows can find **WSL's** `bash.exe` in System32 rather than Git's and die with `execvpe(/bin/bash) failed`, `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
@@ -160,8 +160,8 @@ evaluate must target the isolated context's id.
   5=32px**; 6+ or mixed text falls back to the ordinary 14.5px bubble. Signal's veto clauses
   come with it - **attachments** (a caption beside a photo is still a caption), **link preview
   cards**, and **any `bodyRanges`**, so a spoilered or monospaced emoji stays an ordinary
-  message. (Signal's predicate also lists quotes; this UI doesn't render those into the bubble,
-  so there is nothing to veto on there.) Where we *do* diverge from Signal knowingly: Signal filters
+  message. (Signal's predicate also lists **quotes**, and so does ours now that a reply renders
+  a quote box.) Where we *do* diverge from Signal knowingly: Signal filters
   its matches through its own emoji table, we go by Unicode properties, so a handful of bare
   pre-VS16 pictographs (`☝`, `⬆`) jumbo here and don't there.
   `jumboSizeFor` in [public/ui-logic.js](public/ui-logic.js) is the whole decision;
@@ -186,6 +186,33 @@ evaluate must target the isolated context's id.
   `sendMedia` path** as any attachment, so there's no `page-api.js`/`bridge.js`
   change. The browser only ever passes a Giphy id, so the proxy can't be aimed at
   arbitrary hosts. Optional `GIPHY_RATING` (default `g`) caps the content rating.
+- **Quoted replies** — Signal copies the message being replied to *onto* the reply as
+  `message.quote`, so a quote renders with no lookup of the original (which may be long
+  scrolled away, or deleted). Probed shape (8.23): `{ id, authorAci, text, bodyRanges,
+  attachments: [{contentType, fileName, thumbnail}], referencedMessageNotFound, isViewOnce,
+  isGiftBadge }`, where **`id` is the original's `sent_at`**, not a message id — that plus the
+  author is how Signal identifies it across clients. `describeQuote` in
+  [src/page-api.js](src/page-api.js) puts it on every message as `quote`, running the text
+  through the same `formatBody` as a body so mentions and formatting are inlined and realigned
+  identically. The thumbnail is an ordinary v2 encrypted attachment, so `getQuoteThumbnail`
+  reuses `fetchDecrypted` and the route `GET /api/quote-thumbnails/:messageId` reuses the
+  attachment byte cache (key `quote:<id>` — same no-colon argument as `prev:`). What the box
+  *says* is `quoteSummary` in [public/ui-logic.js](public/ui-logic.js): "You" vs the author
+  title, and the body or a `Photo`/`Voice message`/`Original message not found` description —
+  a description sets `placeholder`, which is why app.js renders it dim and **without** the
+  quote's `bodyRanges` (those index into text that isn't on screen). A quote also vetoes
+  jumbomoji, like media and link cards.
+  **Sending** one goes through the *same* `enqueueMessageForSend`: it takes a `quote` and
+  stores it **verbatim** on the message (probed), so `buildQuote` constructs Signal's own
+  stored shape out of redux. ⚠️ **Signal's redux composer route is unusable here**, as with
+  attachments: `reduxActions.composer.setQuoteByMessageId(cid, id)` left
+  `composer.conversations[cid]` with no `quotedMessage` at all when driven headlessly — it
+  needs the conversation selected in Signal's own window. The routes take a
+  `quoteMessageId` (`/send`, `/send-gif`); only the *id* crosses the wire, because Signal
+  already has the message. ⚠️ **An outgoing reply carries no thumbnail**: Signal's own
+  `makeQuote` copies the original attachment's thumbnail, which needs the attachment-copy
+  helpers current Signal no longer exposes — recipients see the attachment's type label
+  instead. Everything else (text, author, ranges) is identical to a native reply.
 - **Edit a message** — `window.__sb.editMessage(conversationId, targetMessageId, body, bodyRanges)` →
   `window.reduxActions.composer.sendEditedMessage(conversationId, { targetMessageId, message, bodyRanges })`.
   This is Signal's own edit path (the composer thunk); it replaces the body, **keeps

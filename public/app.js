@@ -8,7 +8,7 @@ import {
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
-  tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
+  tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain, quoteSummary,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -25,6 +25,7 @@ const state = {
   messages: [],           // messages of the open thread (for up-arrow quick-edit lookup)
   hasOlder: false,        // the open thread has unloaded history above (drives #loadOlder + auto-load)
   editing: null,          // { messageId, original } while editing an already-sent message
+  replyTo: null,          // { messageId, quote } while composing a reply (quote = the echo's own descriptor)
 };
 
 // Outbound media limits — kept in lockstep with the server (src/server.js).
@@ -304,6 +305,55 @@ function linkPreviewEl(msg) {
   return card;
 }
 
+// ---------- quoted replies ----------
+
+// The box at the top of a reply's bubble showing what it answers — and, with a
+// message shape built by quoteFromMessage, the composer's reply banner too.
+// Everything in it came off the wire (author name, quoted body), so it's built
+// node by node and the body renders through the same formatter as a message.
+// What it *says* is quoteSummary's call; this only paints it.
+function quoteEl(msg) {
+  const q = msg.quote;
+  const summary = quoteSummary(q);
+  if (!summary) return null;
+
+  const author = el('div', { class: 'quote-author', text: summary.author });
+  // Same palette as the group author labels, so a quote of Bob is Bob-coloured
+  // wherever it appears. Our own quotes take the accent instead.
+  const color = q.isMe ? null : colorFor(q.authorId || summary.author);
+  if (color) author.style.color = color;
+
+  const text = el('div', { class: 'quote-text' + (summary.placeholder ? ' placeholder' : '') });
+  // A placeholder is a description of the original, not its body — the quote's
+  // bodyRanges index into text that isn't on screen, so they must not be used.
+  text.appendChild(summary.placeholder
+    ? document.createTextNode(summary.text)
+    : renderFormatted(summary.text, q.bodyRanges));
+
+  // '.me' has no colour of its own to carry (there's no palette entry for
+  // yourself), so the CSS gives it one that reads against a blue outgoing bubble.
+  const box = el('div', { class: 'quote' + (q.isMe ? ' me' : '') }, [
+    el('div', { class: 'quote-body' }, [author, text]),
+  ]);
+  if (color) box.style.setProperty('--quote-bar', color);
+
+  // The thumbnail rides on the quote itself (Signal copies it onto the reply),
+  // so it resolves even for a quote of a message that's no longer loaded. Fixed
+  // box: late-arriving bytes must not reflow the thread, or "load older" loses
+  // its anchor. An image that won't load just leaves the text.
+  if (q.attachment && q.attachment.hasThumbnail && msg.id) {
+    const img = el('img', {
+      class: 'quote-thumb',
+      src: `/api/quote-thumbnails/${encodeURIComponent(msg.id)}`,
+      loading: 'lazy',
+      alt: '',
+    });
+    img.addEventListener('error', () => img.remove());
+    box.appendChild(img);
+  }
+  return box;
+}
+
 function messageRow(msg, prev, isGroup) {
   if (msg.direction === 'system') return null;
 
@@ -329,6 +379,11 @@ function messageRow(msg, prev, isGroup) {
   }
 
   const bubble = el('div', { class: 'bubble' });
+
+  // What this message replies to, above everything else in the bubble — a
+  // view-once message can be a reply too, so this sits outside that branch.
+  const quote = quoteEl(msg);
+  if (quote) bubble.appendChild(quote);
 
   if (msg.isViewOnce) {
     bubble.appendChild(el('div', { class: 'view-once', text: '👁 View-once media' }));
@@ -391,6 +446,7 @@ function messageRow(msg, prev, isGroup) {
 // local delete. The eligibility rules live in ui-logic.js (testable); this only
 // binds the action names to labels and handlers.
 const MENU_ACTIONS = {
+  reply: (msg) => ({ label: 'Reply', onClick: () => startReply(msg) }),
   edit: (msg) => ({ label: 'Edit', onClick: () => startEdit(msg) }),
   deleteForEveryone: (msg) => ({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) }),
   deleteForMe: (msg) => ({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) }),
@@ -491,9 +547,62 @@ function lastEditableOutgoing() {
   return null;
 }
 
+// ----- reply mode (composer) -----
+// Signal stores a reply's quote as a COPY of the message being replied to, so
+// the descriptor we build here is both what the banner shows and what the
+// optimistic echo renders — the server only ever gets the message id, and
+// page-api.js builds the real quote out of Signal's own copy of that message.
+function quoteFromMessage(msg) {
+  const att = (msg.attachments || [])[0];
+  return {
+    id: msg.timestamp || null,
+    authorId: msg.direction === 'outgoing' ? null : (msg.authorId || null),
+    authorTitle: msg.authorTitle || null,
+    isMe: msg.direction === 'outgoing',
+    text: msg.text || '',
+    bodyRanges: msg.bodyRanges || [],
+    attachment: att ? { kind: att.kind, contentType: att.contentType, fileName: att.fileName, hasThumbnail: false } : null,
+    referencedMessageNotFound: false,
+    isViewOnce: !!msg.isViewOnce,
+    isGiftBadge: false,
+  };
+}
+
+function startReply(msg) {
+  if (!msg || !msg.id) return;
+  cancelEdit(); // editing an old message and replying to one are different jobs
+  state.replyTo = { messageId: msg.id, quote: quoteFromMessage(msg) };
+  renderReplyBanner();
+  const input = $('#composerInput');
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function cancelReply() {
+  if (!state.replyTo) return;
+  state.replyTo = null;
+  renderReplyBanner();
+}
+
+// The banner reuses the message quote box (same summary rules, same colours) so
+// what you see while composing is what the reply will carry.
+function renderReplyBanner() {
+  const banner = $('#replyBanner');
+  banner.classList.toggle('hidden', !state.replyTo);
+  if (!state.replyTo) { banner.replaceChildren(); return; }
+  banner.replaceChildren(
+    quoteEl({ quote: state.replyTo.quote }),
+    el('button', {
+      class: 'edit-banner-cancel', title: 'Cancel reply (Esc)', 'aria-label': 'Cancel reply',
+      text: '×', onclick: cancelReply,
+    }),
+  );
+}
+
 // ----- edit mode (composer) -----
 function startEdit(msg) {
   if (!msg || !msg.id) return;
+  cancelReply(); // a reply in progress isn't what's being edited
   // Put the composer's own syntax back in the box, so editing an italic message
   // shows "_like this_" and doesn't silently strip the formatting on save.
   const source = toMarkdown(msg.text || '', msg.bodyRanges);
@@ -585,6 +694,9 @@ async function doDelete(msg, forEveryone) {
   if (!id || !msg.id) return;
   // If we're editing the very message being deleted, drop out of edit mode.
   if (state.editing && state.editing.messageId === msg.id) cancelEdit();
+  // Likewise for a reply to it: Signal refuses to quote a deleted message
+  // (buildQuote returns quote-message-deleted), so drop the target now.
+  if (state.replyTo && state.replyTo.messageId === msg.id) cancelReply();
 
   // Optimistic only for "delete for me" (always succeeds). "Delete for everyone"
   // can fail (time window / undelivered), so leave it until the server confirms.
@@ -791,6 +903,7 @@ async function openConversation(id) {
   if (state.activeId !== id) {
     clearPending(); // staged files belong to the conversation they were added in
     cancelEdit();   // an in-progress edit belongs to the conversation it started in
+    cancelReply();  // ...and so does the message you were replying to
     closeThreadMenu(); // the options menu is per-chat; don't carry it across switches
     if (cancelOlderPin) cancelOlderPin(); // don't let a stale settle yank the new thread
     resetOlderGesture(); // upward intent belongs to the thread it was built in
@@ -1023,6 +1136,7 @@ async function sendMessage() {
   const attachments = state.pendingAttachments.slice();
   if ((!text && !attachments.length) || !state.activeId || state.sending) return;
   const id = state.activeId;
+  const replyTo = state.replyTo;
   state.sending = true;
   input.value = '';
   // Drop any warm still pending: it holds the pre-send text, and firing it after
@@ -1033,20 +1147,30 @@ async function sendMessage() {
   // Clear the tray optimistically; restore it if the send fails (below).
   state.pendingAttachments = [];
   renderPending();
+  // Same for the reply banner: the quote rides on the echo from here on.
+  cancelReply();
   updateSendEnabled();
 
   // optimistic echo (attachments rendered from local bytes; replaced by the
   // real, server-backed render on the refresh that follows a successful send)
   const inner = $('#messagesInner');
   const optimistic = messageRow(
-    { direction: 'outgoing', text, bodyRanges, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
+    {
+      direction: 'outgoing', text, bodyRanges, attachments: [], reactions: [],
+      timestamp: Date.now(), status: 'sending', authorId: 'me',
+      quote: replyTo ? replyTo.quote : null,
+    },
     null, false,
   );
   optimistic.classList.add('optimistic');
   const bubble = optimistic.querySelector('.bubble');
   if (bubble && attachments.length) {
-    if (!text) bubble.textContent = ''; // drop the empty-bubble placeholder
-    const ref = text ? bubble.firstChild : null;
+    // Drop the empty-bubble placeholder — a bare text node, and only that: a
+    // quote box may be sitting above it, and it stays.
+    if (!text) for (const n of [...bubble.childNodes]) if (n.nodeType === Node.TEXT_NODE) n.remove();
+    // Media goes above the text but below the quote, so anchor on the text span
+    // rather than on whatever happens to be the bubble's first child.
+    const ref = bubble.querySelector('.msg-text');
     for (const item of attachments) bubble.insertBefore(pendingEchoEl(item), ref);
     applyJumbo(bubble, { text, bodyRanges, attachments }); // messageRow was handed none
   }
@@ -1063,6 +1187,9 @@ async function sendMessage() {
         attachments: attachments.map((a) => ({
           fileName: a.fileName, contentType: a.contentType, base64: a.base64, width: a.width, height: a.height,
         })),
+        // Only the id travels: Signal has its own copy of that message, and
+        // page-api.js builds the quote from it (see buildQuote).
+        ...(replyTo ? { quoteMessageId: replyTo.messageId } : {}),
       }),
     });
     if (!r.ok) throw new Error(r.error || 'send failed');
@@ -1079,6 +1206,9 @@ async function sendMessage() {
       state.pendingAttachments = attachments.concat(state.pendingAttachments);
       renderPending();
     }
+    // ...and the reply target, so a retry is still a reply. Only if nothing has
+    // replaced it in the meantime (the send is awaited; the user may have moved on).
+    if (replyTo && !state.replyTo) { state.replyTo = replyTo; renderReplyBanner(); }
     if (raw) input.value = input.value || raw;
     updateSendEnabled();
   } finally {
@@ -1429,21 +1559,28 @@ async function sendGif(g) {
   if (!id || state.sending) return;
   const input = $('#composerInput');
   const { text, bodyRanges } = parseFormatting(input.value.trim()); // the caption formats like any other message
+  const replyTo = state.replyTo; // a GIF can be a reply like anything else
   state.sending = true;
   input.value = '';
   autoGrow();
+  cancelReply();
   updateSendEnabled();
 
   const inner = $('#messagesInner');
   const optimistic = messageRow(
-    { direction: 'outgoing', text, bodyRanges, attachments: [], reactions: [], timestamp: Date.now(), status: 'sending', authorId: 'me' },
+    {
+      direction: 'outgoing', text, bodyRanges, attachments: [], reactions: [],
+      timestamp: Date.now(), status: 'sending', authorId: 'me',
+      quote: replyTo ? replyTo.quote : null,
+    },
     null, false,
   );
   optimistic.classList.add('optimistic');
   const bubble = optimistic.querySelector('.bubble');
   if (bubble) {
-    if (!text) bubble.textContent = '';
-    const ref = text ? bubble.firstChild : null;
+    // Only the bare placeholder text node goes; see sendMessage() for why.
+    if (!text) for (const n of [...bubble.childNodes]) if (n.nodeType === Node.TEXT_NODE) n.remove();
+    const ref = bubble.querySelector('.msg-text');
     const img = el('img', { class: 'att-media att-image', src: g.preview.url, alt: g.title || 'GIF' });
     if (g.preview.w && g.preview.h) img.style.aspectRatio = `${g.preview.w} / ${g.preview.h}`;
     bubble.insertBefore(wrapMedia(img), ref);
@@ -1456,7 +1593,10 @@ async function sendGif(g) {
     const r = await api(`/api/conversations/${encodeURIComponent(id)}/send-gif`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: g.id, text, bodyRanges }),
+      body: JSON.stringify({
+        id: g.id, text, bodyRanges,
+        ...(replyTo ? { quoteMessageId: replyTo.messageId } : {}),
+      }),
     });
     if (!r.ok) throw new Error(r.error || 'send failed');
     scheduleRefreshActive();
@@ -1466,6 +1606,7 @@ async function sendGif(g) {
     optimistic.querySelector('.tick')?.replaceWith(
       Object.assign(document.createElement('span'), { className: 'tick error', textContent: '⚠' }),
     );
+    if (replyTo && !state.replyTo) { state.replyTo = replyTo; renderReplyBanner(); }
     if (text) input.value = input.value || text; // give the caption back
     updateSendEnabled();
   } finally {
@@ -1957,8 +2098,10 @@ function init() {
     // on every word a CJK user types.
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); return; }
     if (e.key === 'Escape' && state.editing) { e.preventDefault(); cancelEdit(); return; }
+    if (e.key === 'Escape' && state.replyTo) { e.preventDefault(); cancelReply(); return; }
     // ↑ on an empty composer pulls your last editable message in for a quick edit.
-    if (e.key === 'ArrowUp' && !state.editing && input.value === '') {
+    // Not while replying: the box belongs to the reply being composed.
+    if (e.key === 'ArrowUp' && !state.editing && !state.replyTo && input.value === '') {
       const last = lastEditableOutgoing();
       if (last) { e.preventDefault(); startEdit(last); }
     }

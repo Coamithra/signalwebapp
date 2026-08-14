@@ -56,12 +56,40 @@ export const INSTALL_SCRIPT = `(function () {
     };
   }
 
-  function resolveAuthorTitle(serviceIdOrId) {
+  // Resolve a serviceId (or conversation id) to who it is, and whether that's
+  // the user themselves. 'isMe' is NOT an attribute on the conversation model —
+  // probed: both conv.isMe and conv.get('isMe') are undefined — so it comes from
+  // the redux-shaped copy (the same field formatConversation reads), with our own
+  // conversation id as the fallback for a conversation redux hasn't got.
+  function resolveAuthor(serviceIdOrId) {
     if (!serviceIdOrId) return null;
     try {
-      var conv = window.ConversationController.get(serviceIdOrId);
+      var cc = window.ConversationController;
+      var conv = cc.get(serviceIdOrId);
       if (!conv) return null;
-      return conv.getTitle ? conv.getTitle() : safeTitle(conv.attributes);
+      var redux = window.reduxStore.getState().conversations.conversationLookup[conv.id];
+      var isMe = redux ? !!redux.isMe
+        : (cc.getOurConversationId ? conv.id === cc.getOurConversationId() : false);
+      return {
+        title: conv.getTitle ? conv.getTitle() : safeTitle(conv.attributes),
+        isMe: isMe,
+      };
+    } catch (_) { return null; }
+  }
+
+  function resolveAuthorTitle(serviceIdOrId) {
+    var a = resolveAuthor(serviceIdOrId);
+    return a ? a.title : null;
+  }
+
+  // Our own ACI, i.e. the authorAci to stamp on a quote of one of our own
+  // messages. Null if Signal can't tell us (then the reply is refused rather
+  // than sent with a quote nobody can attribute).
+  function ourServiceId() {
+    try {
+      var me = window.ConversationController.getOurConversation();
+      if (!me) return null;
+      return (me.getServiceId ? me.getServiceId() : null) || me.get('serviceId') || null;
     } catch (_) { return null; }
   }
 
@@ -153,6 +181,90 @@ export const INSTALL_SCRIPT = `(function () {
         width: img.width || null,
         height: img.height || null,
       } : null,
+    };
+  }
+
+  // A quoted reply. Signal copies the message being replied to onto the reply
+  // itself (rather than referencing it), so everything needed to draw the quote
+  // box is right here even when the original is long since scrolled away — or
+  // was deleted, which is what referencedMessageNotFound reports. 'id' is the
+  // ORIGINAL's sent_at timestamp, not a message id: that (plus the author) is
+  // how Signal identifies the quoted message across clients.
+  //
+  // The text goes through the same formatBody() as a real body, so a quote of a
+  // message with @mentions or formatting is inlined and realigned identically.
+  // The thumbnail is an ordinary v2 encrypted attachment hanging off the quote,
+  // fetched on demand through getQuoteThumbnail like any other media.
+  function describeQuote(q) {
+    if (!q) return null;
+    var a = Array.isArray(q.attachments) ? q.attachments[0] : null;
+    var t = a ? a.thumbnail : null;
+    var author = resolveAuthor(q.authorAci || q.author);
+    var formatted = formatBody(q.text || '', q.bodyRanges);
+    return {
+      id: q.id || null,
+      authorId: q.authorAci || q.author || null,
+      authorTitle: author ? author.title : null,
+      isMe: !!(author && author.isMe),
+      text: formatted.text,
+      bodyRanges: formatted.styles,
+      attachment: a ? {
+        kind: describeAttachment(a).kind,
+        contentType: a.contentType || '',
+        fileName: a.fileName || null,
+        hasThumbnail: !!(t && t.path && ((t.version || 1) < 2 || t.localKey) && !t.pending),
+      } : null,
+      referencedMessageNotFound: !!q.referencedMessageNotFound,
+      isViewOnce: !!q.isViewOnce,
+      isGiftBadge: !!q.isGiftBadge,
+    };
+  }
+
+  // Build the quote to hang on a reply we're about to send, out of the message
+  // being replied to. enqueueMessageForSend stores whatever it's given STRAIGHT
+  // onto the message (probed in Signal 8.23's bundle: the quote argument goes
+  // into the attributes verbatim), so this has to be Signal's own stored shape
+  // — the same one describeQuote reads back. (No backticks in this file: the
+  // whole body is a template literal.)
+  //
+  // We build it rather than going through Signal's composer action
+  // (reduxActions.composer.setQuoteByMessageId): probed against Note to Self,
+  // that left composer.conversations[id] with no quotedMessage at all, i.e. it's
+  // coupled to the conversation being open/selected in Signal's own window, the
+  // same way processAttachments is (see CLAUDE.md).
+  //
+  // ⚠️ Signal's own makeQuote additionally copies the original attachment's
+  // thumbnail into the quote. That needs the attachment-copy helpers current
+  // Signal no longer exposes, so a reply to a photo carries the attachment's
+  // type and name but no thumbnail — recipients render the type label instead.
+  function buildQuote(conversationId, messageId) {
+    var m = window.reduxStore.getState().conversations.messagesLookup[messageId];
+    if (!m) return { error: 'quote-message-not-loaded' };
+    if (m.conversationId && m.conversationId !== conversationId) return { error: 'quote-wrong-conversation' };
+    if (m.deletedForEveryone) return { error: 'quote-message-deleted' };
+    var authorAci = m.type === 'outgoing'
+      ? (ourServiceId() || m.sourceServiceId)
+      : (m.sourceServiceId || m.source);
+    if (!authorAci) return { error: 'quote-no-author' };
+    var atts = [];
+    var a = Array.isArray(m.attachments) ? m.attachments[0] : null;
+    if (a) {
+      atts.push({
+        contentType: a.contentType || 'application/octet-stream',
+        fileName: a.fileName || null,
+      });
+    }
+    return {
+      quote: {
+        id: m.sent_at || m.timestamp,
+        authorAci: authorAci,
+        text: m.body || '',
+        bodyRanges: Array.isArray(m.bodyRanges) ? m.bodyRanges : [],
+        attachments: atts,
+        isViewOnce: !!m.isViewOnce,
+        isGiftBadge: !!m.isGiftBadge,
+        referencedMessageNotFound: false,
+      },
     };
   }
 
@@ -393,6 +505,9 @@ export const INSTALL_SCRIPT = `(function () {
       // Link preview "postcards". Signal only ever renders the first; we keep
       // the array so the shape matches what's stored.
       preview: preview,
+      // The message this one replies to, copied onto it by Signal. Null for
+      // everything that isn't a reply.
+      quote: describeQuote(m.quote),
       reactions: reactions,
       deletedForEveryone: !!m.deletedForEveryone,
       isViewOnce: !!m.isViewOnce,
@@ -526,6 +641,23 @@ export const INSTALL_SCRIPT = `(function () {
       }
     },
 
+    // The little image beside a quoted reply: message.quote.attachments[0]
+    // .thumbnail. A quote carries its own copy of it (Signal copies the whole
+    // quoted message onto the reply), so this works even for a quote of a
+    // message that is no longer loaded — or no longer exists.
+    getQuoteThumbnail: async function (messageId) {
+      try {
+        var lookup = window.reduxStore.getState().conversations.messagesLookup || {};
+        var m = lookup[messageId];
+        if (!m || !m.quote) return { ok: false, error: 'message-not-loaded' };
+        var a = (m.quote.attachments || [])[0];
+        if (!a || !a.thumbnail) return { ok: false, error: 'no-thumbnail' };
+        return await fetchDecrypted(a.thumbnail);
+      } catch (e) {
+        return { ok: false, error: String(e) };
+      }
+    },
+
     // Warm the link preview slot for text the user is still typing, so the
     // eventual send doesn't have to wait on a network fetch. No-op when the
     // user's setting is off. Fire-and-forget — the result lands in the global
@@ -549,12 +681,25 @@ export const INSTALL_SCRIPT = `(function () {
     // its image as an in-memory Uint8Array — round-tripping those bytes out over
     // CDP and back in would serialize them as an integer-keyed object for no
     // reason. Resolving it in-page hands Signal the object it built, untouched.
+    //
+    // opts.quoteMessageId makes this a reply to that message (see buildQuote).
+    // The id is resolved here for the same reason: the quote is built out of
+    // redux, which only exists in this context.
     sendText: async function (id, body, bodyRanges, opts) {
       var conv = window.ConversationController.get(id);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
       if (typeof body !== 'string' || !body.length) return { ok: false, error: 'empty-body' };
       opts = opts || {};
       try {
+        var quote;
+        if (opts.quoteMessageId) {
+          // Unlike a link preview, a failed quote is NOT a nicety to swallow:
+          // the user asked to reply to something specific, and a reply that
+          // silently loses its quote reads as a non-sequitur in the chat.
+          var q = buildQuote(id, opts.quoteMessageId);
+          if (q.error) return { ok: false, error: q.error };
+          quote = q.quote;
+        }
         var preview = [];
         if (opts.linkPreview) {
           // A preview is a nicety: a failure here must never cost the message.
@@ -564,10 +709,16 @@ export const INSTALL_SCRIPT = `(function () {
           } catch (_) {}
         }
         await conv.enqueueMessageForSend(
-          { body: body, attachments: [], preview: preview, bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [] },
+          {
+            body: body,
+            attachments: [],
+            preview: preview,
+            bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [],
+            quote: quote,
+          },
           { dontClearDraft: true },
         );
-        return { ok: true, preview: preview.length > 0 };
+        return { ok: true, preview: preview.length > 0, quoted: !!quote };
       } catch (e) {
         return { ok: false, error: String(e) };
       }
@@ -585,11 +736,18 @@ export const INSTALL_SCRIPT = `(function () {
     // coupled to the conversation being open/mounted in Signal's own window, so
     // driving it headlessly would be fragile and disruptive. (Confirmed by
     // probing the running app — the old window.Signal.Migrations API is gone.)
-    sendMedia: async function (id, body, files, bodyRanges) {
+    sendMedia: async function (id, body, files, bodyRanges, opts) {
       var conv = window.ConversationController.get(id);
       if (!conv) return { ok: false, error: 'conversation-not-found' };
       if (!Array.isArray(files) || !files.length) return { ok: false, error: 'no-files' };
+      opts = opts || {};
       try {
+        var quote;
+        if (opts.quoteMessageId) {
+          var q = buildQuote(id, opts.quoteMessageId);
+          if (q.error) return { ok: false, error: q.error };
+          quote = q.quote;
+        }
         var attachments = [];
         for (var i = 0; i < files.length; i++) {
           var f = files[i] || {};
@@ -615,6 +773,7 @@ export const INSTALL_SCRIPT = `(function () {
             // put a card on one either; the attachment is the visual.
             preview: [],
             bodyRanges: Array.isArray(bodyRanges) ? bodyRanges : [],
+            quote: quote,
           },
           { dontClearDraft: true },
         );

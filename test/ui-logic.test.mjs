@@ -15,7 +15,7 @@ import {
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
-  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
+  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI, quoteSummary,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
 
@@ -71,16 +71,29 @@ test('menuActionsFor: local delete is always offered', () => {
 
 test('menuActionsFor: edit needs your own live text message', () => {
   const base = { direction: 'outgoing', text: 'hi' };
-  assert.deepEqual(menuActionsFor(base), ['edit', 'deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor(base), ['reply', 'edit', 'deleteForEveryone', 'deleteForMe']);
   // Incoming: no edit, no unsend.
-  assert.deepEqual(menuActionsFor({ ...base, direction: 'incoming' }), ['deleteForMe']);
+  assert.deepEqual(menuActionsFor({ ...base, direction: 'incoming' }), ['reply', 'deleteForMe']);
   // Attachment-only (no text): unsend still applies, edit does not.
-  assert.deepEqual(menuActionsFor({ direction: 'outgoing' }), ['deleteForEveryone', 'deleteForMe']);
-  assert.deepEqual(menuActionsFor({ ...base, text: '   ' }), ['deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor({ direction: 'outgoing' }), ['reply', 'deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor({ ...base, text: '   ' }), ['reply', 'deleteForEveryone', 'deleteForMe']);
   // View-once: not editable, but still unsendable.
-  assert.deepEqual(menuActionsFor({ ...base, isViewOnce: true }), ['deleteForEveryone', 'deleteForMe']);
-  // Already a tombstone: nothing left to edit or retract.
+  assert.deepEqual(menuActionsFor({ ...base, isViewOnce: true }), ['reply', 'deleteForEveryone', 'deleteForMe']);
+  // Already a tombstone: nothing left to edit, retract, or quote.
   assert.deepEqual(menuActionsFor({ ...base, deletedForEveryone: true }), ['deleteForMe']);
+});
+
+test('menuActionsFor: reply is offered on anything still live, and comes first', () => {
+  for (const msg of [
+    { direction: 'incoming', text: 'hi' },
+    { direction: 'outgoing', text: 'hi' },
+    { direction: 'incoming' },                        // attachment-only
+    { direction: 'incoming', isViewOnce: true },      // Signal lets you reply to one
+  ]) {
+    assert.equal(menuActionsFor(msg)[0], 'reply', JSON.stringify(msg));
+  }
+  // A tombstone has nothing left to quote.
+  assert.ok(!menuActionsFor({ direction: 'incoming', deletedForEveryone: true }).includes('reply'));
 });
 
 // ---------- attachments ----------
@@ -506,6 +519,55 @@ test('every action menuActionsFor can emit has a handler in app.js', async () =>
   for (const action of emitted) assert.ok(handled.has(action), `MENU_ACTIONS has no entry for '${action}'`);
 });
 
+// ---------- quoted replies ----------
+
+test('quoteSummary names the author, and calls your own messages "You"', () => {
+  assert.equal(quoteSummary({ authorTitle: 'Bob', text: 'hi' }).author, 'Bob');
+  // isMe wins over whatever title the author's conversation carries.
+  assert.equal(quoteSummary({ authorTitle: 'Harald', isMe: true, text: 'hi' }).author, 'You');
+  // An author Signal couldn't resolve still gets a box, not a crash.
+  assert.equal(quoteSummary({ text: 'hi' }).author, 'Unknown');
+  assert.equal(quoteSummary(null), null);
+});
+
+test('quoteSummary shows the quoted body when there is one', () => {
+  const s = quoteSummary({ authorTitle: 'Bob', text: 'the original' });
+  assert.deepEqual(s, { author: 'Bob', text: 'the original', placeholder: false });
+});
+
+test('quoteSummary describes a text-less original by its attachment', () => {
+  const q = (attachment, rest) => quoteSummary({ authorTitle: 'Bob', text: '', attachment, ...rest });
+  assert.equal(q({ kind: 'image' }).text, 'Photo');
+  assert.equal(q({ kind: 'video' }).text, 'Video');
+  assert.equal(q({ kind: 'voice' }).text, 'Voice message');
+  assert.equal(q({ kind: 'audio' }).text, 'Audio');
+  // A real file is better named by its file name; a photo is not (Signal's own
+  // quotes routinely carry an empty fileName for those).
+  assert.equal(q({ kind: 'file', fileName: 'taxes.pdf' }).text, 'taxes.pdf');
+  assert.equal(q({ kind: 'file' }).text, 'Attachment');
+  assert.equal(q({ kind: 'image', fileName: 'IMG_1234.jpg' }).text, 'Photo');
+  // All of those are descriptions, not the body: the caller must not render
+  // them with the quote's bodyRanges (which index into text nobody can see).
+  assert.equal(q({ kind: 'image' }).placeholder, true);
+  // Whitespace-only text is no text.
+  assert.equal(quoteSummary({ text: '   ', attachment: { kind: 'image' } }).text, 'Photo');
+  // Nothing at all to describe.
+  assert.deepEqual(quoteSummary({ authorTitle: 'Bob', text: '' }), { author: 'Bob', text: 'Message', placeholder: true });
+});
+
+test('quoteSummary prefers the special states over the copied text', () => {
+  // Signal copies the original's text onto the reply, so a quote of a message
+  // that has since been deleted still HAS text — showing it would contradict
+  // the tombstone standing in the thread above.
+  const base = { authorTitle: 'Bob', text: 'secret' };
+  assert.deepEqual(quoteSummary({ ...base, referencedMessageNotFound: true }),
+    { author: 'Bob', text: 'Original message not found', placeholder: true });
+  assert.deepEqual(quoteSummary({ ...base, isViewOnce: true }),
+    { author: 'Bob', text: 'View-once media', placeholder: true });
+  assert.deepEqual(quoteSummary({ ...base, isGiftBadge: true }),
+    { author: 'Bob', text: 'Gift badge', placeholder: true });
+});
+
 // ---------- jumbomoji ----------
 // Emoji-only messages render big and bubble-less. The sizes are Signal
 // Desktop's own ladder, so a message looks the same in both apps.
@@ -604,6 +666,14 @@ test('jumboSizeFor vetoes media, view-once and formatted messages', () => {
   // would defeat the spoiler, and Signal keeps it an ordinary message too.
   assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 3 }] }), null);
   assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 1 }] }), null);
+});
+
+test('jumboSizeFor vetoes a quoted reply', () => {
+  // A 👍 that answers something is a reply, not a jumbomoji — and the quote box
+  // above a bubble-less 56px glyph would look like two unrelated things.
+  const emoji = '\u{1F44D}';
+  assert.equal(jumboSizeFor({ text: emoji, quote: { authorTitle: 'Bob', text: 'ok?' } }), null);
+  assert.equal(jumboSizeFor({ text: emoji, quote: null }), 56);
 });
 
 test('jumboSizeFor vetoes a message carrying a link preview card', () => {
