@@ -13,10 +13,11 @@ import { fileURLToPath } from 'node:url';
 import {
   AVATAR_COLORS, colorFor, initials, previewText, menuActionsFor,
   canReactTo, myReaction, groupReactions, reactionChoices, DEFAULT_REACTIONS,
-  kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
+  kindForType, iconForKind, shouldAutoplayClip, clipSoundIcon, AUTOPLAY_MAX_SECONDS,
+  parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
-  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
+  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI, quoteSummary, quoteSendFailure,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
 
@@ -72,22 +73,22 @@ test('menuActionsFor: local delete is always offered', () => {
 
 test('menuActionsFor: edit needs your own live text message', () => {
   const base = { direction: 'outgoing', text: 'hi' };
-  assert.deepEqual(menuActionsFor(base), ['edit', 'deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor(base), ['reply', 'edit', 'deleteForEveryone', 'deleteForMe']);
   // Incoming: no edit, no unsend.
-  assert.deepEqual(menuActionsFor({ ...base, direction: 'incoming' }), ['deleteForMe']);
+  assert.deepEqual(menuActionsFor({ ...base, direction: 'incoming' }), ['reply', 'deleteForMe']);
   // Attachment-only (no text): unsend still applies, edit does not.
-  assert.deepEqual(menuActionsFor({ direction: 'outgoing' }), ['deleteForEveryone', 'deleteForMe']);
-  assert.deepEqual(menuActionsFor({ ...base, text: '   ' }), ['deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor({ direction: 'outgoing' }), ['reply', 'deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor({ ...base, text: '   ' }), ['reply', 'deleteForEveryone', 'deleteForMe']);
   // View-once: not editable, but still unsendable.
-  assert.deepEqual(menuActionsFor({ ...base, isViewOnce: true }), ['deleteForEveryone', 'deleteForMe']);
-  // Already a tombstone: nothing left to edit or retract.
+  assert.deepEqual(menuActionsFor({ ...base, isViewOnce: true }), ['reply', 'deleteForEveryone', 'deleteForMe']);
+  // Already a tombstone: nothing left to edit, retract, or quote.
   assert.deepEqual(menuActionsFor({ ...base, deletedForEveryone: true }), ['deleteForMe']);
 });
 
-test('menuActionsFor: react comes first, and only for a message you can react to', () => {
+test('menuActionsFor: react leads the ordinary entries, and only where you can react', () => {
   const live = { id: 'm1', direction: 'outgoing', text: 'hi', status: 'sent' };
-  assert.deepEqual(menuActionsFor(live), ['react', 'edit', 'deleteForEveryone', 'deleteForMe']);
-  assert.deepEqual(menuActionsFor({ id: 'm1', direction: 'incoming', text: 'hi' }), ['react', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor(live), ['react', 'reply', 'edit', 'deleteForEveryone', 'deleteForMe']);
+  assert.deepEqual(menuActionsFor({ id: 'm1', direction: 'incoming', text: 'hi' }), ['react', 'reply', 'deleteForMe']);
   // A send still in flight (or failed) has nothing on the wire to react to.
   assert.ok(!menuActionsFor({ ...live, status: 'sending' }).includes('react'));
   assert.ok(!menuActionsFor({ ...live, status: 'error' }).includes('react'));
@@ -157,6 +158,49 @@ test('reactionChoices: dedupes, falls back to Signal defaults, always includes m
   assert.deepEqual(reactionChoices([null, '', 5], null), DEFAULT_REACTIONS);
 });
 
+test('menuActionsFor: reply is offered on anything still live, right behind react', () => {
+  for (const msg of [
+    { id: 'm1', direction: 'incoming', text: 'hi' },
+    { id: 'm1', direction: 'outgoing', text: 'hi' },
+    { id: 'm1', direction: 'incoming' },                    // attachment-only
+    { id: 'm1', direction: 'incoming', isViewOnce: true },  // Signal lets you reply to one
+  ]) {
+    assert.deepEqual(menuActionsFor(msg).slice(0, 2), ['react', 'reply'], JSON.stringify(msg));
+  }
+  // Still first among the ordinary entries when the message can't be reacted to.
+  assert.equal(menuActionsFor({ direction: 'incoming', text: 'hi' })[0], 'reply');
+  // A tombstone has nothing left to quote.
+  assert.ok(!menuActionsFor({ id: 'm1', direction: 'incoming', deletedForEveryone: true }).includes('reply'));
+});
+
+test('menuActionsFor: summarize rides on the server-attached youtube field', () => {
+  const yt = { url: 'https://youtu.be/dQw4w9WgXcQ', videoId: 'dQw4w9WgXcQ', summarized: false };
+  // Leads the list, and applies to a message you did NOT send — the whole point.
+  assert.deepEqual(
+    menuActionsFor({ id: 'm1', direction: 'incoming', text: 'watch this https://youtu.be/dQw4w9WgXcQ', youtube: yt }),
+    ['summarize', 'react', 'reply', 'deleteForMe'],
+  );
+  assert.deepEqual(
+    menuActionsFor({ id: 'm1', direction: 'outgoing', text: 'mine https://youtu.be/dQw4w9WgXcQ', youtube: yt }),
+    ['summarize', 'react', 'reply', 'edit', 'deleteForEveryone', 'deleteForMe'],
+  );
+  // Already done in this chat: the entry stays, disabled, rather than vanishing.
+  assert.deepEqual(
+    menuActionsFor({ id: 'm1', direction: 'incoming', text: 'x', youtube: { ...yt, summarized: true } }),
+    ['summarized', 'react', 'reply', 'deleteForMe'],
+  );
+  // No link -> the server attached nothing -> no entry at all.
+  assert.deepEqual(
+    menuActionsFor({ id: 'm1', direction: 'incoming', text: 'https://example.com' }),
+    ['react', 'reply', 'deleteForMe'],
+  );
+  // A tombstone has no body left to summarize.
+  assert.deepEqual(
+    menuActionsFor({ id: 'm1', direction: 'outgoing', text: 'x', youtube: yt, deletedForEveryone: true }),
+    ['deleteForMe'],
+  );
+});
+
 // ---------- attachments ----------
 
 test('kindForType / iconForKind', () => {
@@ -173,6 +217,49 @@ test('kindForType / iconForKind', () => {
   assert.equal(iconForKind('audio'), '🎵');
   assert.equal(iconForKind('file'), '📎');
   assert.equal(iconForKind('nonsense'), '📎');
+});
+
+// ---------- autoplaying short clips ----------
+
+const video = { kind: 'video', contentType: 'video/mp4' };
+
+test('shouldAutoplayClip: short videos autoplay, long ones keep their controls', () => {
+  assert.equal(shouldAutoplayClip(video, 3, false), true);
+  assert.equal(shouldAutoplayClip(video, AUTOPLAY_MAX_SECONDS, false), true);   // the threshold is inclusive
+  assert.equal(shouldAutoplayClip(video, AUTOPLAY_MAX_SECONDS + 0.1, false), false);
+  assert.equal(shouldAutoplayClip(video, 600, false), false);
+});
+
+test('shouldAutoplayClip: an unusable duration falls back to the play button', () => {
+  // Metadata not in yet, or a length the browser can't work out. Either way the
+  // safe answer is "ordinary video" — never a 20-minute clip looping forever.
+  assert.equal(shouldAutoplayClip(video, NaN, false), false);
+  assert.equal(shouldAutoplayClip(video, Infinity, false), false);
+  assert.equal(shouldAutoplayClip(video, undefined, false), false);
+  assert.equal(shouldAutoplayClip(video, 0, false), false);
+  assert.equal(shouldAutoplayClip(video, -1, false), false);
+  assert.equal(shouldAutoplayClip(video, '3', false), false); // duration is a number or it's nothing
+});
+
+test('shouldAutoplayClip: only a <video> can be driven', () => {
+  // An animated image/gif renders as <img> and animates itself — there is no
+  // API to start or stop it, so it must never reach the clip machinery.
+  assert.equal(shouldAutoplayClip({ kind: 'image', contentType: 'image/gif' }, 3, false), false);
+  assert.equal(shouldAutoplayClip({ kind: 'audio' }, 3, false), false);
+  assert.equal(shouldAutoplayClip({ kind: 'voice' }, 3, false), false);
+  assert.equal(shouldAutoplayClip({ kind: 'file' }, 3, false), false);
+  assert.equal(shouldAutoplayClip(null, 3, false), false);
+  assert.equal(shouldAutoplayClip(undefined, 3, false), false);
+});
+
+test('shouldAutoplayClip: prefers-reduced-motion vetoes everything', () => {
+  assert.equal(shouldAutoplayClip(video, 3, true), false);
+  assert.equal(shouldAutoplayClip(video, AUTOPLAY_MAX_SECONDS, true), false);
+});
+
+test('clipSoundIcon labels the action, not the state', () => {
+  assert.deepEqual(clipSoundIcon(true), { glyph: '🔇', label: 'Unmute' });
+  assert.deepEqual(clipSoundIcon(false), { glyph: '🔊', label: 'Mute' });
 });
 
 // ---------- emoji frequency: parsing ----------
@@ -427,12 +514,30 @@ test('evictOldestTldr: an over-cap map holding only the active chat is left alon
 test('retryErrorReason', () => {
   assert.equal(retryErrorReason('not-configured'), 'auto-TLDR is not configured');
   assert.equal(retryErrorReason('bad-url'), 'not a recognized YouTube link');
+  assert.equal(retryErrorReason('already-summarized'), 'that video already has a TLDR in this chat');
+  assert.equal(retryErrorReason('in-progress'), 'that video is already being summarized');
   assert.equal(retryErrorReason('Claude usage limit reached'), 'Claude usage limit reached');
   assert.equal(retryErrorReason(''), 'retry failed');
   assert.equal(retryErrorReason(undefined), 'retry failed');
 });
 
 // ---------- auto-TLDR status bubble model ----------
+
+// A refusal must never render as 'failed': that stage always offers Retry, and
+// Retry goes to the ungated /tldr/retry — one click past the gate that just
+// refused, and the duplicate TLDR is sent.
+test('tldrBubble: a refusal is a dismiss-only notice, never retryable', () => {
+  for (const token of ['already-summarized', 'in-progress']) {
+    const b = tldrBubble('refused', retryErrorReason(token));
+    assert.equal(b.retry, false, token);
+    assert.equal(b.dismiss, true, token);
+    assert.equal(b.tone, 'info', token);
+    assert.match(b.label, /Not summarized: /, token);
+    assert.doesNotMatch(b.label, /failed/i, token);
+  }
+  // No reason (a token the server has not sent before) still reads sensibly.
+  assert.equal(tldrBubble('refused').label, 'Not summarized: already done');
+});
 
 test('tldrBubble: working stages are work-toned, with no buttons', () => {
   for (const stage of ['fetching', 'summarizing', 'researching']) {
@@ -574,10 +679,12 @@ test('every action menuActionsFor can emit has a handler in app.js', async () =>
           // id and status are in the matrix because 'react' needs them: without
           // an id every message here would be ineligible and the react entry
           // would slip past this check entirely.
-          for (const id of ['m1', undefined]) {
-            for (const status of ['sent', 'sending', 'error', undefined]) {
-              const msg = { id, direction, text, deletedForEveryone, isViewOnce, status };
-              for (const a of menuActionsFor(msg)) emitted.add(a);
+          for (const youtube of [undefined, { summarized: false }, { summarized: true }]) {
+            for (const id of ['m1', undefined]) {
+              for (const status of ['sent', 'sending', 'error', undefined]) {
+                const msg = { id, direction, text, deletedForEveryone, isViewOnce, status, youtube };
+                for (const a of menuActionsFor(msg)) emitted.add(a);
+              }
             }
           }
         }
@@ -587,6 +694,78 @@ test('every action menuActionsFor can emit has a handler in app.js', async () =>
   assert.ok(emitted.has('react'), 'sanity: the matrix must reach an eligible message');
   assert.ok(emitted.size > 0);
   for (const action of emitted) assert.ok(handled.has(action), `MENU_ACTIONS has no entry for '${action}'`);
+});
+
+// ---------- quoted replies ----------
+
+test('quoteSummary names the author, and calls your own messages "You"', () => {
+  assert.equal(quoteSummary({ authorTitle: 'Bob', text: 'hi' }).author, 'Bob');
+  // isMe wins over whatever title the author's conversation carries.
+  assert.equal(quoteSummary({ authorTitle: 'Harald', isMe: true, text: 'hi' }).author, 'You');
+  // An author Signal couldn't resolve still gets a box, not a crash.
+  assert.equal(quoteSummary({ text: 'hi' }).author, 'Unknown');
+  assert.equal(quoteSummary(null), null);
+});
+
+test('quoteSummary shows the quoted body when there is one', () => {
+  const s = quoteSummary({ authorTitle: 'Bob', text: 'the original' });
+  assert.deepEqual(s, { author: 'Bob', text: 'the original', placeholder: false });
+});
+
+test('quoteSummary describes a text-less original by its attachment', () => {
+  const q = (attachment, rest) => quoteSummary({ authorTitle: 'Bob', text: '', attachment, ...rest });
+  assert.equal(q({ kind: 'image' }).text, 'Photo');
+  assert.equal(q({ kind: 'video' }).text, 'Video');
+  assert.equal(q({ kind: 'voice' }).text, 'Voice message');
+  assert.equal(q({ kind: 'audio' }).text, 'Audio');
+  // A real file is better named by its file name; a photo is not (Signal's own
+  // quotes routinely carry an empty fileName for those).
+  assert.equal(q({ kind: 'file', fileName: 'taxes.pdf' }).text, 'taxes.pdf');
+  assert.equal(q({ kind: 'file' }).text, 'Attachment');
+  assert.equal(q({ kind: 'image', fileName: 'IMG_1234.jpg' }).text, 'Photo');
+  // All of those are descriptions, not the body: the caller must not render
+  // them with the quote's bodyRanges (which index into text nobody can see).
+  assert.equal(q({ kind: 'image' }).placeholder, true);
+  // Whitespace-only text is no text.
+  assert.equal(quoteSummary({ text: '   ', attachment: { kind: 'image' } }).text, 'Photo');
+  // Nothing at all to describe.
+  assert.deepEqual(quoteSummary({ authorTitle: 'Bob', text: '' }), { author: 'Bob', text: 'Message', placeholder: true });
+});
+
+test('quoteSummary prefers the special states over the copied text', () => {
+  // Signal copies the original's text onto the reply, so a quote of a message
+  // that has since been deleted still HAS text — showing it would contradict
+  // the tombstone standing in the thread above.
+  const base = { authorTitle: 'Bob', text: 'secret' };
+  assert.deepEqual(quoteSummary({ ...base, referencedMessageNotFound: true }),
+    { author: 'Bob', text: 'Original message not found', placeholder: true });
+  assert.deepEqual(quoteSummary({ ...base, isViewOnce: true }),
+    { author: 'Bob', text: 'View-once media', placeholder: true });
+  assert.deepEqual(quoteSummary({ ...base, isGiftBadge: true }),
+    { author: 'Bob', text: 'Gift badge', placeholder: true });
+});
+
+test('quoteSendFailure explains a refused quote, and only a refused quote', () => {
+  // Every quote-* token the page API can return has to produce a sentence: the
+  // raw token is what the toast would otherwise show, and the caller keys the
+  // "drop the reply target" behaviour off a non-null answer here.
+  for (const tok of ['quote-message-not-loaded', 'quote-message-deleted', 'quote-wrong-conversation', 'quote-no-author']) {
+    const msg = quoteSendFailure(tok);
+    assert.ok(msg && !msg.includes('quote-'), `${tok} -> ${msg}`);
+  }
+  // Anything else is an ordinary send failure and keeps its own wording.
+  for (const other of ['conversation-not-found', 'empty-body', undefined, '', 'Failed to fetch']) {
+    assert.equal(quoteSendFailure(other), null, String(other));
+  }
+});
+
+// The page API's quote-* error tags and the frontend's mapping of them are
+// wired only by string; a new tag with no sentence would surface raw in a toast.
+test('every quote-* error page-api.js can return has a sentence', async () => {
+  const api = await readFile(path.join(here, '..', 'src', 'page-api.js'), 'utf8');
+  const tags = new Set([...api.matchAll(/'(quote-[a-z-]+)'/g)].map((m) => m[1]));
+  assert.ok(tags.size >= 4, `expected the quote-* tags, found ${[...tags]}`);
+  for (const tag of tags) assert.ok(quoteSendFailure(tag), `${tag} has no sentence`);
 });
 
 // ---------- jumbomoji ----------
@@ -687,6 +866,14 @@ test('jumboSizeFor vetoes media, view-once and formatted messages', () => {
   // would defeat the spoiler, and Signal keeps it an ordinary message too.
   assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 3 }] }), null);
   assert.equal(jumboSizeFor({ text: emoji, bodyRanges: [{ start: 0, length: 2, style: 1 }] }), null);
+});
+
+test('jumboSizeFor vetoes a quoted reply', () => {
+  // A 👍 that answers something is a reply, not a jumbomoji — and the quote box
+  // above a bubble-less 56px glyph would look like two unrelated things.
+  const emoji = '\u{1F44D}';
+  assert.equal(jumboSizeFor({ text: emoji, quote: { authorTitle: 'Bob', text: 'ok?' } }), null);
+  assert.equal(jumboSizeFor({ text: emoji, quote: null }), 56);
 });
 
 test('jumboSizeFor vetoes a message carrying a link preview card', () => {

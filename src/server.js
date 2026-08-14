@@ -200,6 +200,17 @@ const REACTION_EMOJI = /^(?:[\p{RGI_Emoji}--[\p{Emoji_Modifier}]]|[\p{Extended_P
 function validReactionEmoji(emoji) {
   return typeof emoji === 'string' && REACTION_EMOJI.test(emoji);
 }
+
+// The message a send is replying to. Absent/empty -> undefined (not a reply);
+// anything that isn't a plausible message id -> null, which the caller turns
+// into a 400 rather than passing junk into a CDP evaluate expression. Signal's
+// ids are UUIDs; the length cap is the real guard, the charset keeps it boring.
+function quoteIdFrom(raw) {
+  if (raw == null || raw === '') return undefined;
+  if (typeof raw !== 'string') return null;
+  return /^[\w-]{1,128}$/.test(raw) ? raw : null;
+}
+
 // In-flight fetches, keyed identically to the cache. A <video> fires several
 // Range requests at once; without this each would do its own CDP round-trip and
 // base64 decode of the whole file. Concurrent misses share one promise instead.
@@ -443,6 +454,11 @@ const server = http.createServer(async (req, res) => {
       const id = decodeURIComponent(m[1]);
       const older = url.searchParams.get('older') === '1';
       const data = await bridge.getMessages(id, { older });
+      // Tag any message carrying a YouTube link with { url, videoId, summarized }
+      // so the frontend can offer "Summarize in chat" (and grey it out once that
+      // video has one) without a second copy of the URL parser in the browser.
+      // Same route serves ?older=1, so scrolled-back history is tagged too.
+      if (data) tldr.annotate(id, data.messages);
       return sendJson(res, 200, data);
     }
 
@@ -483,6 +499,24 @@ const server = http.createServer(async (req, res) => {
       return serveBuffer(req, res, out.entry.buf, out.entry.contentType, key);
     }
 
+    // /api/quote-thumbnails/:messageId   thumbnail beside a quoted reply
+    m = pathname.match(/^\/api\/quote-thumbnails\/([^/]+)$/);
+    if (m && req.method === 'GET') {
+      const messageId = decodeURIComponent(m[1]);
+      // Same collision argument as the 'prev:' prefix above: message ids are
+      // UUIDs and hold no ':'. A message has at most one quote, so no index.
+      const key = `quote:${messageId}`;
+
+      const out = await loadMedia(key, () => bridge.getQuoteThumbnail(messageId));
+      if (out.error) {
+        const code = out.error === 'too-large' ? 413
+          : (out.error === 'pending' || out.error === 'no-path') ? 409
+          : 404;
+        return sendJson(res, code, { error: out.error });
+      }
+      return serveBuffer(req, res, out.entry.buf, out.entry.contentType, key);
+    }
+
     // /api/link-preview/warm   { text }  -> start Signal fetching a preview for
     // links in text the user is still typing. Fire-and-forget; the result waits
     // in Signal's own slot until the send picks it up.
@@ -496,7 +530,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, result);
     }
 
-    // /api/conversations/:id/send   { text?, attachments?: [{fileName,contentType,base64,width?,height?}] }
+    // /api/conversations/:id/send   { text?, attachments?: [{fileName,contentType,base64,width?,height?}], quoteMessageId? }
     m = pathname.match(/^\/api\/conversations\/([^/]+)\/send$/);
     if (m && req.method === 'POST') {
       const id = decodeURIComponent(m[1]);
@@ -511,6 +545,11 @@ const server = http.createServer(async (req, res) => {
       const bodyRanges = sanitizeBodyRanges(body.bodyRanges, text);
       const rawAttachments = Array.isArray(body.attachments) ? body.attachments : [];
       if (!text.trim() && !rawAttachments.length) return sendJson(res, 400, { ok: false, error: 'empty' });
+      // Reply-to: only shape-checked here. Whether that message exists, is in
+      // this conversation, and can be quoted is decided in-page, where redux is
+      // (page-api.js buildQuote), and comes back as a 'quote-*' error.
+      const quoteMessageId = quoteIdFrom(body.quoteMessageId);
+      if (quoteMessageId === null) return sendJson(res, 400, { ok: false, error: 'bad-quote-id' });
 
       if (rawAttachments.length) {
         if (rawAttachments.length > SEND_MAX_FILES) {
@@ -533,13 +572,13 @@ const server = http.createServer(async (req, res) => {
             height: Number(a.height) || undefined,
           });
         }
-        const result = await bridge.sendMedia(id, text, files, bodyRanges);
+        const result = await bridge.sendMedia(id, text, files, bodyRanges, { quoteMessageId });
         return sendJson(res, result.ok ? 200 : 400, result);
       }
 
       // Text-only sends get a link preview card when the text has a link and the
       // user's Signal setting allows it (both decided in-page — see page-api.js).
-      const result = await bridge.sendText(id, text, bodyRanges, { linkPreview: true });
+      const result = await bridge.sendText(id, text, bodyRanges, { linkPreview: true, quoteMessageId });
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 
@@ -641,6 +680,21 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 
+    // /api/conversations/:id/tldr/summarize   POST { url } -> summarize it now
+    // The message menu's "Summarize in chat". Same fire-and-forget shape as
+    // /retry (the outcome arrives over SSE), but a SEPARATE route because it is
+    // gated on "already summarized" and /retry must stay ungated — retry is the
+    // recovery path after a failure, when nothing was ever recorded.
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/tldr\/summarize$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      let body;
+      try { body = await readBody(req, 4 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const result = tldr.summarizeNow(id, String(body.url || ''));
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
     // ---- in-app `claude auth login` -----------------------------------------
     // Three routes driving one pending child process (src/claude-cli.js): start
     // it and get the sign-in URL, hand back the code the user pastes, or bail
@@ -701,7 +755,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // POST /api/conversations/:id/send-gif   { id, text?, bodyRanges? }
+    // POST /api/conversations/:id/send-gif   { id, text?, bodyRanges?, quoteMessageId? }
     // The browser passes only a Giphy gif id; the server resolves it to a media
     // URL via Giphy's API, fetches the bytes, and sends through the same
     // sendMedia path as any other attachment (so it lands as a real image/gif).
@@ -715,6 +769,8 @@ const server = http.createServer(async (req, res) => {
       const gifId = String(body.id || '');
       const text = String(body.text || '');
       if (!/^[A-Za-z0-9_-]{1,64}$/.test(gifId)) return sendJson(res, 400, { ok: false, error: 'bad-id' });
+      const gifQuoteId = quoteIdFrom(body.quoteMessageId);
+      if (gifQuoteId === null) return sendJson(res, 400, { ok: false, error: 'bad-quote-id' });
 
       let pick, meta;
       try {
@@ -745,7 +801,7 @@ const server = http.createServer(async (req, res) => {
         width: pick.w || undefined,
         height: pick.h || undefined,
       };
-      const result = await bridge.sendMedia(convId, text, [file], sanitizeBodyRanges(body.bodyRanges, text));
+      const result = await bridge.sendMedia(convId, text, [file], sanitizeBodyRanges(body.bodyRanges, text), { quoteMessageId: gifQuoteId });
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

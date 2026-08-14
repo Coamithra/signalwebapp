@@ -39,11 +39,29 @@ export function previewText(conv) {
 // your own (Signal's unsend); "Delete for me" (local) is always available.
 // Tombstones/incoming get just the local delete. Returns action *names* —
 // app.js maps them to labels and handlers, which is what keeps this testable.
+//
+// "Summarize in chat" leads when it applies at all, and is the one
+// action that applies to messages you did NOT send — running the auto-TLDR
+// pipeline over someone else's video is the whole reason it exists. It rides on
+// `msg.youtube`, which the SERVER attaches (annotateYouTube in src/tldr.js), so
+// the URL parser stays in one place instead of being shipped to the browser too.
+// Once that video has a summary in this chat it becomes 'summarized', a disabled
+// entry: an option that silently vanishes reads as a bug, where a greyed-out one
+// answers the question the user was about to ask.
 export function menuActionsFor(msg) {
   const actions = [];
   const isOut = msg.direction === 'outgoing';
   const hasText = !!(msg.text && msg.text.trim());
+  // A tombstone has no body left to hold a link, so this is belt-and-braces —
+  // but summarizing a message whose text is gone would be nonsense either way.
+  if (msg.youtube && !msg.deletedForEveryone) {
+    actions.push(msg.youtube.summarized ? 'summarized' : 'summarize');
+  }
+  // React and Reply are the everyday actions, so they lead the ordinary entries
+  // (only the situational Summarize outranks them). Both apply to messages you
+  // did not send; a tombstone gets neither — nothing left to quote or react to.
   if (canReactTo(msg)) actions.push('react');
+  if (!msg.deletedForEveryone) actions.push('reply');
   if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) actions.push('edit');
   if (isOut && !msg.deletedForEveryone) actions.push('deleteForEveryone');
   actions.push('deleteForMe');
@@ -116,6 +134,65 @@ export function reactionChoices(preferred, mine) {
   return out;
 }
 
+// ---------- quoted replies ----------
+// What the quote box says. Signal copies the replied-to message onto the reply,
+// so this is all local data — no lookup of the original, which may be long gone.
+//
+// Returns { author, text, placeholder }. `placeholder: true` means the text is a
+// *description* of the original (a photo, a deleted message) rather than its
+// body, so the caller renders it dim/italic and WITHOUT the quote's bodyRanges —
+// those offsets belong to the body that isn't being shown.
+const QUOTE_KIND_LABEL = {
+  image: 'Photo', video: 'Video', voice: 'Voice message', audio: 'Audio', file: 'Attachment',
+};
+
+export function quoteSummary(quote) {
+  if (!quote) return null;
+  const author = quote.isMe ? 'You' : (quote.authorTitle || 'Unknown');
+  const described = (text) => ({ author, text, placeholder: true });
+  // Checked before the text, which a quote carries either way: this flag means
+  // the original was ALREADY gone when the reply arrived, so the copied text is
+  // whatever the sender's client had and there is nothing here to scroll to.
+  // (It says nothing about a message deleted *after* the reply landed — that
+  // quote still shows its copied body, as Signal's own does.)
+  if (quote.referencedMessageNotFound) return described('Original message not found');
+  if (quote.isViewOnce) return described('View-once media');
+  if (quote.isGiftBadge) return described('Gift badge');
+  if (quote.text && quote.text.trim()) {
+    return { author, text: quote.text, placeholder: false };
+  }
+  const att = quote.attachment;
+  if (att) {
+    // The file name is more use than "Attachment" for an actual file, but a
+    // photo/video/voice note is better named by what it is (and Signal's own
+    // quotes often carry an empty fileName for those anyway).
+    const label = QUOTE_KIND_LABEL[att.kind] || 'Attachment';
+    return described(att.kind === 'file' && att.fileName ? att.fileName : label);
+  }
+  return described('Message');
+}
+
+// A send refused because the message being replied to can't be quoted. Those
+// come back as our own fixed 'quote-*' tokens, and they are all terminal for
+// THIS reply: Signal reloading empties messagesLookup down to the newest window,
+// so a reply aimed at an older message dies here and would fail identically on
+// every retry. So the caller drops the reply target as well as saying why —
+// otherwise the user is left retrying a send that cannot succeed.
+// -> a sentence, or null when the error isn't about the quote at all.
+export function quoteSendFailure(error) {
+  switch (error) {
+    case 'quote-message-not-loaded':
+    case 'quote-message-deleted':
+      return 'That message can no longer be quoted — sent nothing. Try again to send it without the reply.';
+    case 'quote-wrong-conversation':
+      return 'That message is in another chat — sent nothing.';
+    case 'quote-no-author':
+      return "That message has no sender Signal can quote — sent nothing. Try again to send it without the reply.";
+    default:
+      return null;
+  }
+}
+
 // ---------- jumbomoji ----------
 // A message that is *nothing but* emoji renders big and bubble-less, the way
 // Signal Desktop (and Telegram) do it. The thresholds are Signal's own, read
@@ -161,8 +238,7 @@ export function jumbomojiSize(text) {
 
 // The veto, kept beside the sizing so both halves of the rule are testable and
 // in one place. Signal refuses jumbomoji for a message carrying anything *other*
-// than the emoji — media, a link preview, or formatting ranges (its own
-// predicate also lists quotes, which this UI doesn't render into the bubble).
+// than the emoji — media, a link preview, a quoted reply, or formatting ranges.
 // bodyRanges matters most: a spoilered or monospaced emoji is an ordinary
 // message in Signal, and blowing it up here would out-and-out break the spoiler.
 export function jumboSizeFor(msg) {
@@ -170,6 +246,7 @@ export function jumboSizeFor(msg) {
   if (msg.isViewOnce) return null;
   if ((msg.attachments || []).length) return null;
   if ((msg.preview || []).length) return null;
+  if (msg.quote) return null; // a 👍 answering something is a reply, not a jumbomoji
   if ((msg.bodyRanges || []).length) return null;
   return jumbomojiSize(msg.text);
 }
@@ -223,6 +300,38 @@ export function kindForType(ct) {
 
 export function iconForKind(kind) {
   return kind === 'image' ? '🖼️' : kind === 'video' ? '🎬' : kind === 'audio' ? '🎵' : '📎';
+}
+
+// ---------- autoplaying short clips ----------
+// Short motion in a thread should just play, the way it does in Signal itself.
+// Over this many seconds it's a video you chose to watch, not a clip you glanced
+// at, and it keeps its ordinary controls.
+export const AUTOPLAY_MAX_SECONDS = 15;
+
+// Should this attachment loop silently while it's on screen?
+//
+// Only a <video> can be driven: an animated image/gif is an <img> that the
+// browser animates by itself with no API to start or stop it, so it is already
+// "autoplaying" and there is nothing here to decide — hence the kind check
+// before anything else. (Everything the /gif picker sends is video/mp4, so it
+// lands on this path, not that one.)
+//
+// `duration` only exists once 'loadedmetadata' has fired, and even then it can
+// be NaN or Infinity for a length the browser can't work out. Both fall through
+// to false — an unreadable duration degrades to today's play button, never to a
+// clip that turns out to be twenty minutes long and loops forever.
+export function shouldAutoplayClip(att, duration, reducedMotion) {
+  if (reducedMotion) return false;              // the OS asked for less motion; honour it
+  if (!att || att.kind !== 'video') return false;
+  return Number.isFinite(duration) && duration > 0 && duration <= AUTOPLAY_MAX_SECONDS;
+}
+
+// The corner sound toggle on a playing clip. Autoplay is always muted, so this
+// is the only way to hear a short video that does carry audio.
+export function clipSoundIcon(muted) {
+  return muted
+    ? { glyph: '🔇', label: 'Unmute' }
+    : { glyph: '🔊', label: 'Mute' };
 }
 
 // ---------- emoji pick frequency ----------
@@ -331,11 +440,15 @@ export function evictOldestTldr(map, cap, keepKey) {
   }
 }
 
-// Friendly text for the error tokens the retry endpoint can return, so the
-// bubble never shows a raw enum like "not-configured".
+// Friendly text for the error tokens the retry / summarize endpoints can
+// return, so the bubble never shows a raw enum like "not-configured". The last
+// two are only reachable from the message menu's "Summarize in chat", which is
+// the one entry point gated on a video having been summarized already.
 export function retryErrorReason(msg) {
   if (msg === 'not-configured') return 'auto-TLDR is not configured';
   if (msg === 'bad-url') return 'not a recognized YouTube link';
+  if (msg === 'already-summarized') return 'that video already has a TLDR in this chat';
+  if (msg === 'in-progress') return 'that video is already being summarized';
   return msg || 'retry failed';
 }
 
@@ -394,6 +507,16 @@ export function tldrBubble(stage, reason, kind) {
     return {
       label: `Auto-TLDR failed${reason ? `: ${reason}` : ''}`,
       tone: 'warn', retry: true, dismiss: true, login: kind === 'auth',
+    };
+  }
+  if (stage === 'refused') {
+    // The server declined to start a run at all — that video already has a TLDR
+    // here, or one is in flight. NOT 'failed': that stage always offers Retry,
+    // and Retry posts to the deliberately ungated /tldr/retry, so one more click
+    // would send the very duplicate the refusal just prevented.
+    return {
+      label: `Not summarized: ${reason || 'already done'}`,
+      tone: 'info', retry: false, dismiss: true,
     };
   }
   if (stage === 'login') {
