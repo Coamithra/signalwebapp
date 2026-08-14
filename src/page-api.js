@@ -496,6 +496,15 @@ export const INSTALL_SCRIPT = `(function () {
   // hold several links and Signal previews whichever it chose, and a thumbnail
   // on the wrong card would be worse than none. Copied, never mutated: the
   // preview object belongs to the redux slot.
+  //
+  // An imageless preview here is a SETTLED failure, not an image still in
+  // flight: sampling the slot through a grab (8.23) shows it go loading
+  // placeholder (no title, no image) -> complete, with title and image landing
+  // in one dispatch — so the fallback can never shadow a bigger image that was
+  // about to arrive. The image shape matches what a grabbed preview carries
+  // ({ data, size, contentType, width, height }; a probed real one adds only
+  // derived fields like blurHash/plaintextHash, and has no fileName/pending —
+  // verified round-trip: the send stores, uploads and delivers it).
   async function withFallbackImage(p, fb) {
     if (!fb || typeof fb.base64 !== 'string' || !fb.base64) return p;
     if (typeof fb.videoId !== 'string' || !fb.videoId) return p;

@@ -584,8 +584,8 @@ const server = http.createServer(async (req, res) => {
       // 404s, leaving Signal's grab title-only, and page-api attaches this
       // instead when that happens (see fetchThumbnail). Gated behind the warm's
       // `grabbed` flag so nothing is fetched when the user's link-preview
-      // setting is off — and the warm doubles as a head start on Signal's own
-      // grab, running it in parallel with our thumbnail fetch.
+      // setting is off — and the warm kicks off Signal's own grab first, so
+      // that grab runs while we fetch the thumbnail.
       let fallbackImage = null;
       const yt = findYouTubeUrl(text);
       if (yt) {

@@ -31,6 +31,8 @@ const UA =
 // Extract the 11-char video id from any common YouTube URL shape
 // (watch?v=, youtu.be/, shorts/, embed/, live/, music./m./-nocookie). Returns
 // null for anything that isn't a YouTube video URL.
+const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
 export function parseVideoId(input) {
   if (!input) return null;
   let u;
@@ -48,7 +50,7 @@ export function parseVideoId(input) {
       if (m) id = m[1];
     }
   }
-  return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+  return id && VIDEO_ID_RE.test(id) ? id : null;
 }
 
 // Find every YouTube video link in a free-text message, in the order they
@@ -339,16 +341,21 @@ export async function fetchMeta(videoId) {
 // and hands it along for page-api to attach when Signal's own grab came back
 // imageless. Best-effort: null on any failure — the card just stays bare.
 export async function fetchThumbnail(videoId, opts = {}) {
-  if (!/^[A-Za-z0-9_-]{11}$/.test(String(videoId || ''))) return null;
+  if (!VIDEO_ID_RE.test(String(videoId || ''))) return null;
   try {
     const res = await fetch(`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`, {
       headers: { 'user-agent': UA },
-      signal: AbortSignal.timeout(opts.timeoutMs || 5000),
+      // Tight by default: this fetch sits in front of the send, and the image
+      // is decoration — better a bare card than a slow message.
+      signal: AbortSignal.timeout(opts.timeoutMs || 2000),
     });
     if (!res.ok) return null;
+    // hqdefault is ~10–50 KB; anything past 1 MB isn't the thumbnail we asked
+    // for. Checked on the header first so an oversized body isn't buffered.
+    const MAX_BYTES = 1024 * 1024;
+    if (Number(res.headers.get('content-length') || 0) > MAX_BYTES) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    // hqdefault is ~10–50 KB; anything past 1 MB isn't the thumbnail we asked for.
-    if (!buf.length || buf.length > 1024 * 1024) return null;
+    if (!buf.length || buf.length > MAX_BYTES) return null;
     // Always the 480x360 render, so no JPEG header parsing needed.
     return { base64: buf.toString('base64'), contentType: 'image/jpeg', width: 480, height: 360 };
   } catch {
