@@ -11,6 +11,7 @@ import {
   formatTldr, friendlyReason, friendlyContextReason, MAX_TRANSCRIPT_CHARS,
   buildContextPrompt, CONTEXT_SYSTEM_PROMPT, parseContext, MAX_CONTEXT_CHARS,
   availabilityError, shouldAttempt, AVAILABILITY_RECHECK_MS, AVAILABILITY_TEXT,
+  annotateYouTube,
 } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
 
@@ -568,4 +569,57 @@ test('AVAILABILITY_TEXT is the same wording a real run\'s failure produces', () 
     const kind = availabilityError(new Error(tag));
     assert.ok(AVAILABILITY_TEXT[kind], tag);
   }
+});
+
+// --- "Summarize in chat" annotation ---------------------------------------
+// The server tags outgoing message payloads so the browser can offer the menu
+// entry without owning a second copy of the YouTube URL parser.
+
+test('annotateYouTube tags only messages that carry a YouTube link', () => {
+  const messages = [
+    { id: 'a', text: 'watch this https://youtu.be/dQw4w9WgXcQ please' },
+    { id: 'b', text: 'https://example.com/not-youtube' },
+    { id: 'c', text: '' },
+    { id: 'd' },                       // attachment-only: no text at all
+    { id: 'e', text: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' },
+  ];
+  annotateYouTube(messages, () => false);
+  assert.deepEqual(messages[0].youtube,
+    { url: 'https://youtu.be/dQw4w9WgXcQ', videoId: 'dQw4w9WgXcQ', summarized: false });
+  assert.deepEqual(messages[4].youtube,
+    { url: 'https://www.youtube.com/watch?v=aaaaaaaaaaa', videoId: 'aaaaaaaaaaa', summarized: false });
+  // Untouched, so `if (msg.youtube)` is the whole test on the frontend side.
+  for (const i of [1, 2, 3]) assert.ok(!('youtube' in messages[i]), String(i));
+});
+
+test('annotateYouTube asks the caller whether that video is already summarized', () => {
+  const seen = [];
+  const messages = [
+    { text: 'https://youtu.be/dQw4w9WgXcQ' },
+    { text: 'https://youtu.be/aaaaaaaaaaa' },
+  ];
+  annotateYouTube(messages, (videoId) => { seen.push(videoId); return videoId === 'dQw4w9WgXcQ'; });
+  assert.deepEqual(seen, ['dQw4w9WgXcQ', 'aaaaaaaaaaa']);
+  assert.equal(messages[0].youtube.summarized, true);
+  assert.equal(messages[1].youtube.summarized, false);
+});
+
+test('annotateYouTube survives whatever the bridge hands it', () => {
+  // A failed/empty getMessages must not throw on the way out of the route.
+  assert.equal(annotateYouTube(undefined, () => false), undefined);
+  assert.equal(annotateYouTube(null, () => false), null);
+  const messages = [null, 'not an object', { text: 42 }, { text: 'https://youtu.be/dQw4w9WgXcQ' }];
+  annotateYouTube(messages, () => false);
+  assert.equal(messages[3].youtube.videoId, 'dQw4w9WgXcQ');
+});
+
+// The frontend's menu entry is built from the annotation, and the summarize
+// endpoint re-parses the url it posts back — so the two parses have to agree, or
+// a visible entry answers with 'bad-url'.
+test('an annotated url still resolves through findYouTubeUrl', () => {
+  const messages = [{ text: 'see https://youtu.be/dQw4w9WgXcQ, great stuff' }];
+  annotateYouTube(messages, () => false);
+  assert.deepEqual(findYouTubeUrl(messages[0].youtube.url), {
+    url: messages[0].youtube.url, videoId: messages[0].youtube.videoId,
+  });
 });

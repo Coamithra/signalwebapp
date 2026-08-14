@@ -39,10 +39,24 @@ export function previewText(conv) {
 // your own (Signal's unsend); "Delete for me" (local) is always available.
 // Tombstones/incoming get just the local delete. Returns action *names* —
 // app.js maps them to labels and handlers, which is what keeps this testable.
+//
+// "Summarize in chat" leads, being the only non-destructive one, and is the one
+// action that applies to messages you did NOT send — running the auto-TLDR
+// pipeline over someone else's video is the whole reason it exists. It rides on
+// `msg.youtube`, which the SERVER attaches (annotateYouTube in src/tldr.js), so
+// the URL parser stays in one place instead of being shipped to the browser too.
+// Once that video has a summary in this chat it becomes 'summarized', a disabled
+// entry: an option that silently vanishes reads as a bug, where a greyed-out one
+// answers the question the user was about to ask.
 export function menuActionsFor(msg) {
   const actions = [];
   const isOut = msg.direction === 'outgoing';
   const hasText = !!(msg.text && msg.text.trim());
+  // A tombstone has no body left to hold a link, so this is belt-and-braces —
+  // but summarizing a message whose text is gone would be nonsense either way.
+  if (msg.youtube && !msg.deletedForEveryone) {
+    actions.push(msg.youtube.summarized ? 'summarized' : 'summarize');
+  }
   if (isOut && hasText && !msg.deletedForEveryone && !msg.isViewOnce) actions.push('edit');
   if (isOut && !msg.deletedForEveryone) actions.push('deleteForEveryone');
   actions.push('deleteForMe');
@@ -264,11 +278,15 @@ export function evictOldestTldr(map, cap, keepKey) {
   }
 }
 
-// Friendly text for the error tokens the retry endpoint can return, so the
-// bubble never shows a raw enum like "not-configured".
+// Friendly text for the error tokens the retry / summarize endpoints can
+// return, so the bubble never shows a raw enum like "not-configured". The last
+// two are only reachable from the message menu's "Summarize in chat", which is
+// the one entry point gated on a video having been summarized already.
 export function retryErrorReason(msg) {
   if (msg === 'not-configured') return 'auto-TLDR is not configured';
   if (msg === 'bad-url') return 'not a recognized YouTube link';
+  if (msg === 'already-summarized') return 'that video already has a TLDR in this chat';
+  if (msg === 'in-progress') return 'that video is already being summarized';
   return msg || 'retry failed';
 }
 
