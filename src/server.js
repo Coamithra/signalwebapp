@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SignalBridge } from './bridge.js';
 import { createTldr } from './tldr.js';
+import { findYouTubeUrl, fetchThumbnail } from './youtube.js';
 import { createClaudeLogin } from './claude-cli.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -578,7 +579,23 @@ const server = http.createServer(async (req, res) => {
 
       // Text-only sends get a link preview card when the text has a link and the
       // user's Signal setting allows it (both decided in-page — see page-api.js).
-      const result = await bridge.sendText(id, text, bodyRanges, { linkPreview: true, quoteMessageId });
+      // For a YouTube link, also pre-fetch the video's guaranteed hqdefault
+      // thumbnail: the watch page's og:image is often a maxresdefault.jpg that
+      // 404s, leaving Signal's grab title-only, and page-api attaches this
+      // instead when that happens (see fetchThumbnail). Gated behind the warm's
+      // `grabbed` flag so nothing is fetched when the user's link-preview
+      // setting is off — and the warm kicks off Signal's own grab first, so
+      // that grab runs while we fetch the thumbnail.
+      let fallbackImage = null;
+      const yt = findYouTubeUrl(text);
+      if (yt) {
+        const warm = await bridge.warmLinkPreview(text).catch(() => null);
+        if (warm && warm.grabbed) {
+          const thumb = await fetchThumbnail(yt.videoId);
+          if (thumb) fallbackImage = { ...thumb, videoId: yt.videoId };
+        }
+      }
+      const result = await bridge.sendText(id, text, bodyRanges, { linkPreview: true, quoteMessageId, fallbackImage });
       return sendJson(res, result.ok ? 200 : 400, result);
     }
 

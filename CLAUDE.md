@@ -67,7 +67,7 @@ evaluate must target the isolated context's id.
 | [src/page-api.js](src/page-api.js) | **The contract with Signal.** A string of JS injected into the isolated context. Defines `window.__sb` (list/getMessages/getAttachment/getPreviewImage/getQuoteThumbnail/sendText/sendMedia/warmLinkPreview/editMessage/deleteMessage/sendReaction/markRead/sendTyping) and a redux subscriber that queues change events into `window.__sbQueue`. This is the single place to repair if Signal renames internals. ⚠️ The whole file body is a **template literal**, so a `/` inside a regex literal must be written `\\/` or the template silently turns it into a `//` line comment — `node -e "import('./src/page-api.js').then(m=>new Function(m.INSTALL_SCRIPT))"` catches it. |
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
-| [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrls` — plural and deduped by video id, with `findYouTubeUrl` a thin wrapper over it — plus `parseVideoId`), `fetchMeta` (title/channel from oEmbed, also what labels the multi-link picker) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
+| [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrls` — plural and deduped by video id, with `findYouTubeUrl` a thin wrapper over it — plus `parseVideoId`), `fetchMeta` (title/channel from oEmbed, also what labels the multi-link picker), `fetchThumbnail` (the guaranteed 480×360 `hqdefault.jpg`, the send path's fallback card image when Signal's grab comes back imageless) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
 | [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, the realtime watcher, the multi-link picker, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
@@ -413,7 +413,21 @@ evaluate must target the isolated context's id.
   preview that could never arrive. ⚠️ When re-probing this, note Signal **memoizes at module
   level** (`currentlyMatchedLink` plus a list of urls excluded after a failed fetch), so
   grabbing the *same* url twice in a row silently does nothing — a repeat probe reads as a
-  false negative unless each attempt uses a fresh url. Media sends and the GIF path keep
+  false negative unless each attempt uses a fresh url. ⚠️ **A YouTube card can come back
+  title-only through no fault of ours**: the watch page routinely advertises
+  `og:image = maxresdefault.jpg` for videos that never got a maxres render, the URL 404s, and
+  Signal stores the preview with no image — which reads as "the preview wasn't picked up" (the
+  `t=` param it was once blamed on was a red herring; the failure is per-video). So on
+  YouTube-link sends the server pre-fetches the video's guaranteed 480×360 `hqdefault.jpg`
+  (`fetchThumbnail` in [src/youtube.js](src/youtube.js)) and passes it as
+  `opts.fallbackImage`; `withFallbackImage` in [src/page-api.js](src/page-api.js) attaches it
+  only when the resolved preview is imageless **and** its url carries that same videoId (a
+  message can hold several links, and a thumbnail on the wrong card is worse than none). The
+  fetch is gated behind `warmLinkPreview`'s `grabbed` flag, so the privacy setting above still
+  decides whether we fetch anything at all (with it on, the thumbnail may be fetched for a
+  YouTube link Signal ends up not carding — e.g. an earlier link in the message won the slot);
+  the warm also doubles as a head start on Signal's own grab.
+  Media sends and the GIF path keep
   `preview: []` (Signal doesn't card a message that carries attachments), and the card vetoes
   jumbomoji.
 - **Realtime** — the in-page redux subscriber compares slice references and pushes
