@@ -7,7 +7,10 @@
 // existing getMessages + sendText, so there is no page-api.js / bridge.js change.
 //
 // Trigger policy (per the feature spec): only the user's OWN outgoing links fire
-// a summary, never links other people post. Failures (no captions, YouTube
+// a summary AUTOMATICALLY, never links other people post. Those are reachable by
+// hand instead — summarizeNow() backs the message menu's "Summarize in chat",
+// which ignores the toggle, the floor and the direction, and refuses only a video
+// that already has a summary in that chat. Failures (no captions, YouTube
 // blocked, Claude error) are logged and swallowed — we never post an error into
 // the chat.
 
@@ -49,21 +52,71 @@ const CLAUDE_BACKOFF_MS = 2000;
 function log(...args) { console.log('  [tldr]', ...args); }
 
 // --- per-chat settings persistence (a gitignored JSON file at the repo root) ---
-function loadEnabled(file) {
+//
+// Two sets share the file: the chats with auto-TLDR switched on, and the
+// `${convId}:${videoId}` pairs that already have a summary in a chat, which is
+// what lets the manual "Summarize in chat" action refuse a second run. The
+// second one is PERSISTED rather than kept in memory because "don't let me do it
+// twice" that quietly resets on a server restart is not the promise the feature
+// makes; it is FIFO-bounded so the file cannot grow without limit.
+export const SUMMARIZED_CAP = 1000;
+
+function loadSettings(file) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const arr = Array.isArray(data) ? data : (Array.isArray(data?.enabled) ? data.enabled : []);
-    return new Set(arr.map(String));
+    // The oldest files were a bare array of enabled ids, with no summarized key
+    // at all -- both shapes degrade to an empty set rather than throwing.
+    const enabled = Array.isArray(data) ? data : (Array.isArray(data?.enabled) ? data.enabled : []);
+    const summarized = Array.isArray(data?.summarized) ? data.summarized : [];
+    return {
+      enabled: new Set(enabled.map(String)),
+      // Keep the NEWEST entries if a hand-edited file is over the cap: the set
+      // is FIFO, so its tail is the recent history worth honouring.
+      summarized: new Set(summarized.slice(-SUMMARIZED_CAP).map(String)),
+    };
   } catch {
-    return new Set(); // missing/corrupt -> start empty
+    return { enabled: new Set(), summarized: new Set() }; // missing/corrupt -> start empty
   }
 }
-function saveEnabled(file, set) {
+function saveSettings(file, enabled, summarized) {
   try {
-    fs.writeFileSync(file, JSON.stringify({ enabled: [...set] }, null, 2));
+    fs.writeFileSync(file, JSON.stringify({
+      enabled: [...enabled],
+      summarized: [...summarized],
+    }, null, 2));
   } catch (e) {
     log('could not persist settings:', e.message);
   }
+}
+
+// Tag each message with the YouTube link it carries, for the frontend's
+// "Summarize in chat" menu entry.
+//
+// Detection happens HERE, server-side, and rides out on the message as
+// `youtube: { url, videoId, summarized }`. The alternative — letting the browser
+// decide — means a second copy of parseVideoId in public/, and two parsers that
+// disagree about what counts as a YouTube link is exactly the drift that makes a
+// menu entry appear for a message the server then rejects as 'bad-url'.
+//
+// `isSummarized(videoId) -> boolean` is passed in rather than read off a closure
+// so this stays free of createTldr's state and unit-testable. Messages are
+// tagged IN PLACE (they are
+// freshly-built plain objects from the CDP round trip, not shared state), and one
+// with no YouTube link is left completely untouched — `msg.youtube` is absent
+// rather than null, so `if (msg.youtube)` is the whole test on the other side.
+export function annotateYouTube(messages, isSummarized) {
+  if (!Array.isArray(messages)) return messages;
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue;
+    const found = findYouTubeUrl(msg.text);
+    if (!found) continue;
+    msg.youtube = {
+      url: found.url,
+      videoId: found.videoId,
+      summarized: !!isSummarized(found.videoId),
+    };
+  }
+  return messages;
 }
 
 // A transient failure worth retrying: our own timeout, or a run that produced
@@ -681,12 +734,33 @@ async function summarize({ bin, model, effort, transcript, title, onRetry }) {
 // realtime watcher. Toggling works even without the CLI installed (the preference
 // persists); summaries only happen once `claude` is on PATH and logged in.
 export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort = 'medium', ytDlp = true, withContext = true, onStage }) {
-  const enabled = loadEnabled(settingsPath);
+  const { enabled, summarized } = loadSettings(settingsPath);
   // Per-conversation timestamp floor: we only summarize links in messages newer
   // than this, so server boot / enabling a chat never re-summarizes old history.
   const since = new Map();
   const processed = new Set(); // `${convId}:${msgId}` we've already handled
   const bootTs = Date.now();
+
+  // Videos that already have a summary IN THIS CHAT, keyed `${convId}:${videoId}`
+  // — per conversation, because the same video posted in two chats is two
+  // legitimate summaries. Written on a successful send, so every path feeds it:
+  // the watcher, the Retry button and the manual action all end in the same send.
+  const videoKey = (convId, videoId) => `${convId}:${videoId}`;
+  // The same key, held only while a run is in flight. Recording on success alone
+  // leaves a window that a second start walks straight through — a double-click,
+  // or the watcher's first pass over a link the user has just summarized by hand
+  // — and this closes it without the opposite risk of latching a video as
+  // summarized on a run that then fails to send. Consulted by all three entry
+  // points: summarizeNow, retry, and the watcher loop in handleConversation.
+  const inFlight = new Set();
+
+  function markSummarized(key) {
+    if (summarized.has(key)) return;
+    summarized.add(key);
+    // Sets iterate in insertion order, so the first key is the oldest.
+    while (summarized.size > SUMMARIZED_CAP) summarized.delete(summarized.values().next().value);
+    saveSettings(settingsPath, enabled, summarized);
+  }
 
   // Whether the `claude` CLI is actually usable: installed AND logged in.
   //
@@ -788,7 +862,15 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     if (processed.size > PROCESSED_CAP) processed.delete(processed.values().next().value);
   }
 
-  async function summarizeAndSend(convId, found) {
+  // Thin wrapper over runSummary so the in-flight key is released however the run
+  // ends — including the throw runSummary is allowed to make on a bridge failure.
+  function summarizeAndSend(convId, found) {
+    const key = videoKey(convId, found.videoId);
+    inFlight.add(key);
+    return runSummary(convId, found, key).finally(() => inFlight.delete(key));
+  }
+
+  async function runSummary(convId, found, key) {
     emit(convId, 'fetching', found.url);
     let transcript;
     try {
@@ -851,6 +933,10 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       emit(convId, 'failed', found.url, 'could not send');
     } else {
       log(`sent TLDR for ${found.url}`);
+      // Only now, with the summary actually in the chat, is the video "done" —
+      // a run that died at the transcript, at Claude, or at the send leaves
+      // nothing to read and must stay re-runnable.
+      markSummarized(key);
       // A 'done' with a reason means "the TLDR went out, but without its context
       // block" -- the UI shows a dismissible notice instead of clearing silently.
       emit(convId, 'done', found.url, contextReason, contextKind);
@@ -872,6 +958,11 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       const key = `${convId}:${msg.id}`;
       if (processed.has(key)) continue;
       markProcessed(key);
+      // Someone is already summarizing this video here, by hand. `processed` is
+      // keyed by MESSAGE and cannot see that: the manual action names a video,
+      // not the message it was read off. Without this the watcher's first pass
+      // over a link the user just clicked sends a second, identical TLDR.
+      if (inFlight.has(videoKey(convId, found.videoId))) continue;
       // The CLI is known-unusable and the recheck window has not elapsed, so
       // there is no point spawning anything -- but SAY so, in the bubble, rather
       // than doing nothing. Silence is indistinguishable from the feature being
@@ -898,6 +989,15 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     isEnabled: (id) => enabled.has(String(id)),
     list: () => [...enabled],
 
+    // Tag a conversation's messages with the YouTube link each one carries, so
+    // the frontend can offer "Summarize in chat" without shipping a second copy
+    // of the URL parser to the browser (see annotateYouTube). Mutates and
+    // returns the array it is given.
+    annotate(convId, messages) {
+      const id = String(convId);
+      return annotateYouTube(messages, (videoId) => summarized.has(videoKey(id, videoId)));
+    },
+
     // Re-ask the CLI whether it is usable, right now. Called after an in-app
     // login succeeds so the feature comes back immediately instead of sitting
     // out the rest of the AVAILABILITY_RECHECK_MS window -- the user just did
@@ -913,8 +1013,32 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       } else {
         enabled.delete(id);
       }
-      saveEnabled(settingsPath, enabled);
+      saveSettings(settingsPath, enabled, summarized);
       return enabled.has(id);
+    },
+
+    // The message menu's "Summarize in chat" action.
+    //
+    // Deliberately ignores everything the watcher gates on: the per-chat toggle,
+    // the `since` floor, and the message direction. That is the whole point of
+    // the action — running the pipeline over a video SOMEONE ELSE posted, or one
+    // of your own in a chat where auto-TLDR is off, neither of which the watcher
+    // will ever touch.
+    //
+    // It IS gated on "already summarized", which neither the watcher nor retry()
+    // is: this is the one path a user can fire by hand, repeatedly, on a message
+    // that has been sitting in the thread for weeks. Like retry() it is NOT gated
+    // on `available` — a broken CLI reports itself truthfully in the status
+    // bubble within seconds, which beats refusing up front with a vaguer reason.
+    summarizeNow(convId, url) {
+      const found = findYouTubeUrl(url);
+      if (!found) return { ok: false, error: 'bad-url' };
+      const id = String(convId);
+      const key = videoKey(id, found.videoId);
+      if (summarized.has(key)) return { ok: false, error: 'already-summarized' };
+      if (inFlight.has(key)) return { ok: false, error: 'in-progress' };
+      summarizeAndSend(id, found).catch((e) => log('summarize error:', e.message));
+      return { ok: true };
     },
 
     // Manual re-run of one link's summary, triggered by the UI's Retry button.
@@ -929,10 +1053,16 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     // is still broken the run says so within seconds, in the bubble, with the
     // truthful reason ("Claude Code CLI is not logged in") -- strictly better
     // than refusing up front with a generic "not configured".
+    // The ONE guard it does keep is in-flight: a double-clicked Retry sending
+    // two identical TLDRs is a bug on any reading, and refusing a run that is
+    // already happening bypasses nothing -- unlike `summarized`, which retry
+    // must ignore for the reasons above.
     retry(convId, url) {
       const found = findYouTubeUrl(url);
       if (!found) return { ok: false, error: 'bad-url' };
-      summarizeAndSend(String(convId), found).catch((e) => log('retry error:', e.message));
+      const id = String(convId);
+      if (inFlight.has(videoKey(id, found.videoId))) return { ok: false, error: 'in-progress' };
+      summarizeAndSend(id, found).catch((e) => log('retry error:', e.message));
       return { ok: true };
     },
 
