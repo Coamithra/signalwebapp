@@ -13,9 +13,8 @@
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { findYouTubeUrl, fetchTranscript } from './youtube.js';
+import { runDir, authStatus } from './claude-cli.js';
 
 // Don't feed a pathological transcript to the model. Claude handles ~1M tokens,
 // far more than even a multi-hour transcript, so this only guards against
@@ -67,36 +66,6 @@ function saveEnabled(file, set) {
   }
 }
 
-// A scratch working directory for the child process.
-//
-// `claude` discovers project CLAUDE.md, settings and skills from its cwd upward.
-// Spawning it inside this repo would load THIS project's instructions into a run
-// that only has to summarize a transcript: slower, noisier, and it would couple
-// our summaries to whatever the repo's CLAUDE.md happens to say that week. An
-// empty dir of our own has nothing project-scoped to discover. (User-level
-// config is a separate axis, and `--setting-sources ""` on the spawn is what
-// excludes that -- cwd alone would not.)
-//
-// Never fall back to os.tmpdir() itself: the temp root is full of other
-// processes' files and is a plausible discovery root, which is the exact thing
-// this is avoiding. A fixed named subdirectory is the fallback instead, and is
-// also what keeps a crash-restart loop from minting a new mkdtemp per boot.
-let scratchDir = null;
-function runDir() {
-  if (scratchDir && fs.existsSync(scratchDir)) return scratchDir;
-  const fixed = path.join(os.tmpdir(), 'sb-tldr');
-  try {
-    scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-tldr-'));
-    // Best-effort: the dir stays empty, but leaving one per server start behind
-    // in %TEMP% forever is untidy.
-    process.once('exit', () => { try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch {} });
-  } catch {
-    try { fs.mkdirSync(fixed, { recursive: true }); } catch { /* fall through */ }
-    scratchDir = fixed;
-  }
-  return scratchDir;
-}
-
 // A transient failure worth retrying: our own timeout, or a run that produced
 // no parseable envelope. Deliberately an ALLOW-list, because everything else is
 // deterministic and retrying it just burns three spawns and six seconds of
@@ -140,10 +109,19 @@ export function shouldAttempt({ available, unavailableAt, now, cooldownMs = AVAI
 // IMPORTANT: returns only fixed phrases derived from our own error tags -- it
 // must never echo raw stdout/stderr, which can carry transcript text or the
 // timedtext URL with its params.
+// The two availability failures, keyed by the token `availabilityError` returns.
+// One source of truth: the watcher reports a known-unusable CLI with the same
+// words a real run's failure would have used, so "we didn't even try" and "we
+// tried and it failed" don't read as two different problems.
+export const AVAILABILITY_TEXT = {
+  'not-found': 'Claude Code CLI not found',
+  auth: 'Claude Code CLI is not logged in',
+};
+
 export function friendlyReason(e) {
   const msg = (e && e.message) || '';
-  if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
-  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
+  if (/^claude-not-found/.test(msg)) return AVAILABILITY_TEXT['not-found'];
+  if (/^claude-auth/.test(msg)) return AVAILABILITY_TEXT.auth;
   if (/^claude-timeout/.test(msg)) return 'timed out';
   if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
   if (/^claude-refusal/.test(msg)) return 'declined to summarize this one';
@@ -161,8 +139,8 @@ export function friendlyContextReason(e) {
   const msg = (e && e.message) || '';
   if (/^claude-timeout/.test(msg)) return 'research timed out';
   if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
-  if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
-  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
+  if (/^claude-not-found/.test(msg)) return AVAILABILITY_TEXT['not-found'];
+  if (/^claude-auth/.test(msg)) return AVAILABILITY_TEXT.auth;
   return 'research failed';
 }
 
@@ -712,12 +690,13 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
 
   // Whether the `claude` CLI is actually usable: installed AND logged in.
   //
-  // `--version` can prove absence, never login -- it exits 0 for a logged-out
-  // CLI, which is why a boot probe alone once reported "configured" while every
-  // summary died at claude-auth. So the only honest probe is a REAL run, and
-  // that is what this tracks: `noteRunOutcome` lowers the flag when a run fails
-  // with an availability error and raises it when one succeeds. The boot probe
-  // below is the single other writer, and it may only LOWER (see its comment).
+  // Two writers, both honest about login state. `noteRunOutcome` lowers the flag
+  // when a REAL run fails with an availability error and raises it when one
+  // succeeds; the boot `probe()` below asks `claude auth status`, which reports
+  // login state directly. (The probe used to be `claude --version`, which exits
+  // 0 for an installed-but-logged-out CLI -- that is how this once reported
+  // itself "configured" while every summary died at claude-auth, and why the
+  // probe was for a long time only allowed to LOWER the flag.)
   //
   // Starts optimistic so the UI doesn't flash a "not configured" hint during
   // startup, and `unavailableAt` stamps the latch so shouldAttempt can let one
@@ -752,21 +731,40 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
 
   // Boot probe. Asynchronous, so boot is never blocked on a process spawn.
   //
-  // ⚠️ It may only LOWER `available`, never raise it: `--version` can prove
-  // absence, never login. It runs once, before any real run, so there is no
-  // auth latch for it to clobber -- the guard is there to keep that true if
-  // anyone ever calls it again.
-  function probe() {
-    execFile(bin, ['--version'], { timeout: 20000, windowsHide: true }, (err, stdout) => {
-      if (err) {
+  // `claude auth status --json` answers the question the old `--version` probe
+  // could not: it reports `loggedIn` directly, and reports it false for a
+  // credentials file whose token has expired with no refresh token (verified) —
+  // not merely "there is a token on disk". So this one may RAISE the flag as
+  // well as lower it, and the UI can name the real problem from boot instead of
+  // waiting for the first YouTube link to fail.
+  //
+  // Output it cannot parse is deliberately left alone rather than treated as
+  // logged-out: a CLI whose output shape changed should degrade to the old
+  // behaviour (find out on the first real run), not latch the feature off.
+  async function probe() {
+    const st = await authStatus(bin);
+    if (!st.ok) {
+      if (st.reason === 'not-found') {
         available = false;
         unavailableAt = Date.now();
         reason = 'not-found';
-        log(`\`${bin}\` not usable (${err.code || err.message}) — auto-TLDR is idle until it is (per-chat toggle still works).`);
+        log(`\`${bin}\` not found — auto-TLDR is idle until it is (per-chat toggle still works).`);
       } else {
-        log(`using ${String(stdout).trim() || bin} — model ${model}, effort ${effort}`);
+        log(`could not read \`${bin} auth status\` — assuming it works until a run says otherwise.`);
       }
-    });
+      return;
+    }
+    if (!st.loggedIn) {
+      available = false;
+      unavailableAt = Date.now();
+      reason = 'auth';
+      log(`\`${bin}\` is not logged in — auto-TLDR is idle until it is (per-chat toggle still works).`);
+      return;
+    }
+    available = true;
+    unavailableAt = 0;
+    reason = null;
+    log(`\`${bin}\` is logged in — model ${model}, effort ${effort}`);
   }
 
   // Local-only stage feedback for the UI. A callback (wired in src/server.js to
@@ -775,9 +773,13 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
   // sends anything into the chat; it's purely so the browser can show a transient
   // status bubble. `reason` is a pre-sanitized friendly string (never the raw
   // error, which can carry transcript text / a timedtext URL).
-  const emit = (convId, state, url, reason) => {
+  //
+  // `kind` is the same failure classified as a fixed token ('not-found' /
+  // 'auth'), so the UI can decide to offer the in-app login without matching on
+  // the human-readable `reason` text -- which exists to be reworded.
+  const emit = (convId, state, url, reason, kind) => {
     if (typeof onStage !== 'function') return;
-    try { onStage({ conversationId: String(convId), state, url, reason }); }
+    try { onStage({ conversationId: String(convId), state, url, reason, ...(kind ? { kind } : {}) }); }
     catch (err) { log('stage emit error:', err.message); }
   };
 
@@ -807,7 +809,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     } catch (e) {
       noteRunOutcome(e);
       log(`summary failed for ${found.url}: ${e.message}`);
-      emit(convId, 'failed', found.url, friendlyReason(e));
+      emit(convId, 'failed', found.url, friendlyReason(e), availabilityError(e));
       return;
     }
     // The optional second pass. Deliberately restricted to the schema-compliant
@@ -818,6 +820,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     const parsed = parseReply(reply);
     let researched = null;
     let contextReason; // set only when the context pass FAILED (not "found nothing")
+    let contextKind;   // that failure as a fixed token, when it was an availability one
     if (parsed && withContext) {
       emit(convId, 'researching', found.url);
       try {
@@ -838,6 +841,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
         noteRunOutcome(e);
         log(`context pass failed for ${found.url}: ${e.message}`);
         contextReason = friendlyContextReason(e);
+        contextKind = availabilityError(e);
       }
     }
     const { body, bodyRanges } = formatTldr(parsed ?? reply, researched);
@@ -849,7 +853,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       log(`sent TLDR for ${found.url}`);
       // A 'done' with a reason means "the TLDR went out, but without its context
       // block" -- the UI shows a dismissible notice instead of clearing silently.
-      emit(convId, 'done', found.url, contextReason);
+      emit(convId, 'done', found.url, contextReason, contextKind);
     }
   }
 
@@ -868,6 +872,19 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       const key = `${convId}:${msg.id}`;
       if (processed.has(key)) continue;
       markProcessed(key);
+      // The CLI is known-unusable and the recheck window has not elapsed, so
+      // there is no point spawning anything -- but SAY so, in the bubble, rather
+      // than doing nothing. Silence is indistinguishable from the feature being
+      // switched off, and the bubble is where the Log in button lives: a probe
+      // honest enough to know the CLI is logged out at boot would otherwise mean
+      // the user never sees the one control that fixes it.
+      //
+      // Not a hard lockout: shouldAttempt still lets one link per recheck window
+      // through, and that run re-probes the CLI for real.
+      if (!shouldAttempt({ available, unavailableAt, now: Date.now() })) {
+        emit(convId, 'failed', found.url, AVAILABILITY_TEXT[reason] || 'the Claude Code CLI is not usable', reason);
+        continue;
+      }
       summarizeAndSend(convId, found).catch((e) => log('unexpected:', e.message));
     }
     since.set(convId, maxTs); // advance the floor so we don't re-scan handled messages
@@ -880,6 +897,13 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     unavailableReason: () => reason,
     isEnabled: (id) => enabled.has(String(id)),
     list: () => [...enabled],
+
+    // Re-ask the CLI whether it is usable, right now. Called after an in-app
+    // login succeeds so the feature comes back immediately instead of sitting
+    // out the rest of the AVAILABILITY_RECHECK_MS window -- the user just did
+    // something explicit about the exact problem, so making them wait ten
+    // minutes to see it worked would read as the login having failed.
+    recheck: () => probe(),
 
     setEnabled(id, on) {
       id = String(id);
@@ -913,7 +937,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     },
 
     start() {
-      probe();
+      probe().catch((e) => log('probe error:', e.message));
       // Serialize processing per conversation. A single send produces a burst of
       // coalesced 'messages' events (the message + its sent/delivered updates);
       // running handleConversation concurrently for them could summarize the
@@ -932,9 +956,12 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
           });
       };
       bridge.on('event', (e) => {
-        // Not a hard lockout: once the recheck window has passed, one link is
-        // allowed through and its run re-probes the CLI for real.
-        if (!shouldAttempt({ available, unavailableAt, now: Date.now() })) return;
+        // No availability gate here: it lives in handleConversation, AFTER a
+        // YouTube link has actually been found, so an unusable CLI can report
+        // itself in the bubble instead of the watcher going quiet. The cost is
+        // one getMessages per event for an enabled chat while the CLI is
+        // broken, which is a cheap price for the feature being able to explain
+        // itself.
         if (!e || e.type !== 'messages' || !e.conversationId) return;
         if (!enabled.has(e.conversationId)) return;
         schedule(e.conversationId);

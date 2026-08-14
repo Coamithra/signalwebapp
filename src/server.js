@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SignalBridge } from './bridge.js';
 import { createTldr } from './tldr.js';
+import { createClaudeLogin } from './claude-cli.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -89,6 +90,16 @@ const tldr = createTldr({
   onStage: (e) => broadcast('signal', { type: 'tldr', ...e }),
 });
 tldr.start();
+
+// Browser-driven `claude auth login`, so an expired CLI session can be fixed
+// from the app instead of from a terminal the user may not have open. See
+// src/claude-cli.js for the flow; the routes are near the other /tldr ones.
+const claudeLogin = createClaudeLogin({
+  bin: TLDR_CLAUDE_BIN,
+  // Fires server-side the moment a login is observed to have worked, so the
+  // feature is live again even if nobody has a tab open watching for it.
+  onLogin: () => tldr.recheck(),
+});
 
 // ---- helpers ----
 const CONTENT_TYPES = {
@@ -590,6 +601,50 @@ const server = http.createServer(async (req, res) => {
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const result = tldr.retry(id, String(body.url || ''));
       return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    // ---- in-app `claude auth login` -----------------------------------------
+    // Three routes driving one pending child process (src/claude-cli.js): start
+    // it and get the sign-in URL, hand back the code the user pastes, or bail
+    // out. Not per-conversation — the CLI's login is machine-wide — but the UI
+    // that offers it is the per-chat TLDR bubble.
+    //
+    // ⚠️ The pasted code is a credential in transit. It is written straight to
+    // the child's stdin and is never logged, echoed in a response, or stored.
+    // These routes are as loopback-only as the rest of the server (see the
+    // 127.0.0.1 bind); do not add a path that reflects the code back.
+
+    // POST /api/tldr/login   -> { ok, url } — spawn the login, return where to
+    // send the user. Idempotent: a second call returns the same pending URL.
+    if (pathname === '/api/tldr/login' && req.method === 'POST') {
+      const result = await claudeLogin.begin();
+      return sendJson(res, result.ok ? 200 : 502, result);
+    }
+
+    // GET /api/tldr/login/status   -> { waiting, loggedIn }
+    // Polled by the browser while a login is in flight. `waiting` is true until
+    // the child exits; `loggedIn` is null until then and carries the verdict
+    // afterwards. THIS is the normal completion path — the sign-in page calls
+    // back and the CLI exits logged in, with no code ever shown to the user.
+    if (pathname === '/api/tldr/login/status' && req.method === 'GET') {
+      return sendJson(res, 200, claudeLogin.status());
+    }
+
+    // POST /api/tldr/login/code { code }   -> { ok } — the FALLBACK path, for
+    // the flow that really does prompt for a code ("paste code here *if
+    // prompted*"). Availability is re-probed by the onLogin hook, not here.
+    if (pathname === '/api/tldr/login/code' && req.method === 'POST') {
+      let body;
+      try { body = await readBody(req, 4 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const result = await claudeLogin.submitCode(body.code);
+      return sendJson(res, result.ok ? 200 : 400, result);
+    }
+
+    // POST /api/tldr/login/cancel   -> { ok } — drop a login the user backed out
+    // of, so the next attempt starts from a clean child.
+    if (pathname === '/api/tldr/login/cancel' && req.method === 'POST') {
+      return sendJson(res, 200, claudeLogin.cancel());
     }
 
     // GET /api/gif/search?q=&limit=   (empty q -> trending)

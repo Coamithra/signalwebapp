@@ -51,7 +51,7 @@ This runs [`scripts/launch-signal.ps1`](scripts/launch-signal.ps1). To do it by 
 - **macOS:** `/Applications/Signal.app/Contents/MacOS/Signal --remote-debugging-port=9222`
 - **Linux:** `signal-desktop --remote-debugging-port=9222`
 
-**2. Start the server:** `npm start`
+**2. Start the server:** `npm start` — or `npm run reboot`, which frees port 7700 first (handy when restarting after a change).
 
 **3. Open the tab:** http://127.0.0.1:7700 — pin it and you're done.
 
@@ -96,7 +96,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `npm start` prints "failed to start" | Same as above — Signal needs `--remote-debugging-port=9222`. |
 | Empty/black right pane, or the list won't scroll | Hard-refresh the tab (Ctrl+Shift+R) to pick up the latest assets. |
 | Tab stuck "connecting" after a Signal update | Signal may have changed internals. Restart the server; if it persists, the fix is usually localized to [`src/page-api.js`](src/page-api.js). |
-| Port 7700 already in use | Set a different port: `set PORT=7800 && npm start` (PowerShell: `$env:PORT=7800; npm start`). |
+| Port 7700 already in use | Usually the previous server still running: `npm run reboot` stops it and starts a fresh one. Or use another port: `set PORT=7800 && npm start` (PowerShell: `$env:PORT=7800; npm start`). |
 
 ## What works
 
@@ -131,7 +131,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `SIGNAL_CDP_HOST`  | auto (probe)  | Pin the CDP host. Unset: probe `127.0.0.1` then `::1` and accept whichever exposes Signal. Set to one host (e.g. `127.0.0.1`) as an escape hatch. |
 | `GIPHY_API_KEY`    | (unset)       | Enables the `/gif` picker. Free key from [developers.giphy.com](https://developers.giphy.com); until it's set, the picker shows a hint. |
 | `GIPHY_RATING`     | `g`           | Max content rating for GIF results (`g`, `pg`, `pg-13`, `r`). |
-| `TLDR_CLAUDE_BIN`  | `claude`      | The Claude Code CLI that writes the summaries. **Auto-TLDR needs no API key** — it spawns this binary, so summaries bill your Claude subscription. Requires `claude` on the server's `PATH` and already logged in; until it resolves, the per-chat toggle shows a hint. |
+| `TLDR_CLAUDE_BIN`  | `claude`      | The Claude Code CLI that writes the summaries. **Auto-TLDR needs no API key** — it spawns this binary, so summaries bill your Claude subscription. Requires `claude` on the server's `PATH` and logged in; until it resolves, the per-chat toggle shows a hint. If it's installed but the login has expired, you can sign in **from the app** — the thread menu and the failure bubble both offer a **Log in**, which opens the sign-in page and takes the code it gives you back. |
 | `TLDR_MODEL`       | `claude-opus-5` | Model used for the summary. `claude-sonnet-5` / `claude-haiku-4-5` are cheaper against your usage limits. |
 | `TLDR_EFFORT`      | `medium`      | Reasoning effort (`low`…`max`). `low` is slightly faster and still good; above `medium` buys little on a summarization task. |
 | `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude run per link, this one with web search, and the summary waits on it: typically ~10-80s, capped at 5 minutes. Set to `0` to keep summaries only. |

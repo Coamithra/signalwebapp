@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings even on Windows, where core.autocrlf=true
+# would otherwise hand them CRLF on checkout — bash then fails on the stray
+# carriage return with `$'\r': command not found`, which reads as a syntax error
+# in a script that is perfectly fine.
+*.sh text eol=lf

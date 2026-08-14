@@ -285,7 +285,11 @@ export function tldrHint(data) {
   }
   const reason = data && data.reason;
   if (reason === 'auth') {
-    return { before: 'The ', code: 'claude', after: ' CLI on the server is not logged in.' };
+    // The one failure the user can fix from here: `login` tells app.js to put a
+    // Log in button under the hint. Not offered for 'not-found' — no browser
+    // flow installs a missing binary, and a button that cannot work is worse
+    // than the sentence explaining what to do.
+    return { before: 'The ', code: 'claude', after: ' CLI on the server is not logged in.', login: true };
   }
   if (reason === 'not-found') {
     return { before: 'The ', code: 'claude', after: ' CLI was not found on the server’s PATH.' };
@@ -303,17 +307,56 @@ export function tldrHint(data) {
 // but its "For context" block was lost to a failure (a clean done clears the
 // bubble before anything is rendered). It gets dismiss but never Retry: the
 // summary is already in the chat, and a retry would send a whole duplicate.
-export function tldrBubble(stage, reason) {
+// The last four stages are LOCAL ones -- the in-app `claude auth login` never
+// touches the server-side pipeline, so no SSE event ever carries them; app.js
+// sets them on the same per-conversation status it uses for the real stages, so
+// the login lives in the bubble that reported the problem.
+//
+// `kind` is the server's fixed classification of a failure ('auth' /
+// 'not-found'), and only 'auth' earns the Log in button: a missing binary is
+// not something a browser flow can install, so offering one would be a button
+// that cannot work.
+export function tldrBubble(stage, reason, kind) {
   if (stage === 'done') {
     return {
       label: `Sent without its "For context" block: ${reason || 'research failed'}`,
-      tone: 'info', retry: false, dismiss: true,
+      tone: 'info', retry: false, dismiss: true, login: kind === 'auth',
     };
   }
   if (stage === 'failed') {
     return {
       label: `Auto-TLDR failed${reason ? `: ${reason}` : ''}`,
-      tone: 'warn', retry: true, dismiss: true,
+      tone: 'warn', retry: true, dismiss: true, login: kind === 'auth',
+    };
+  }
+  if (stage === 'login') {
+    // ⚠️ The browser normally finishes this by itself — the sign-in page calls
+    // back, the CLI exits logged in, and the user is never shown a code. So the
+    // label waits rather than instructing, and the code field is offered as the
+    // fallback for the flow that does prompt ("paste code here *if prompted*").
+    // Demanding a code up front produced a bubble asking for something that does
+    // not exist in the common path.
+    return {
+      label: 'Waiting for you to finish signing in…',
+      tone: 'work', retry: false, dismiss: false, codeInput: true, cancelLogin: true,
+    };
+  }
+  if (stage === 'logging-in') {
+    return { label: 'Signing in…', tone: 'work', retry: false, dismiss: false };
+  }
+  if (stage === 'login-failed') {
+    return {
+      label: `Sign-in failed${reason ? `: ${reason}` : ''}`,
+      tone: 'warn', retry: false, dismiss: true, login: true,
+    };
+  }
+  if (stage === 'logged-in') {
+    // Asks for Retry so the link that triggered all this can be re-run in one
+    // click. Reached from the thread menu instead there is no link in flight,
+    // and the renderer drops a Retry it has no url for (see renderTldrStatus).
+    return {
+      label: 'Signed in. Auto-TLDR is live again.',
+      tone: 'info', retry: true, dismiss: true,
     };
   }
   const label =

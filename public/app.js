@@ -1516,6 +1516,16 @@ function buildThreadMenu(id, data) {
   children.push(hint.note
     ? el('div', { class: 'menu-note', text: hint.note })
     : el('div', { class: 'menu-hint' }, [hint.before, el('code', { text: hint.code }), hint.after]));
+  // A logged-out CLI is the one hint the user can act on from here, so it gets a
+  // button rather than only a sentence. It runs the same flow as the failure
+  // bubble's Log in and reports into that bubble, so closing the menu (which the
+  // click does) doesn't lose the code field.
+  if (hint.login) {
+    children.push(el('button', {
+      class: 'menu-item', role: 'menuitem',
+      onclick: () => { closeThreadMenu(); beginClaudeLogin(); },
+    }, [el('span', { class: 'menu-check' }), el('span', { class: 'menu-label', text: 'Log in to Claude Code…' })]));
+  }
   $('#threadMenu').replaceChildren(...children);
 }
 
@@ -1573,15 +1583,26 @@ function clearTldrFor(convId) {
 // rides into the Retry handler so a manual retry knows what to re-run. What to
 // show (label, icon, which buttons) is decided in ui-logic.js (tldrBubble);
 // this only paints it.
-function renderTldrStatus(stage, reason, url) {
+function renderTldrStatus(stage, reason, url, kind) {
   const host = $('#tldrStatus');
   if (!host) return;
-  const b = tldrBubble(stage, reason);
+  const b = tldrBubble(stage, reason, kind);
   const children = [];
   if (b.tone === 'warn') children.push(el('span', { class: 'tldr-icon', text: '⚠' }));
   else if (b.tone === 'work') children.push(el('span', { class: 'tldr-spinner' }));
   children.push(el('span', { class: 'tldr-text', text: b.label }));
-  if (b.retry) children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
+  // The sign-in link is a real anchor, never window.open(): opened after an
+  // await it would be eaten by the popup blocker, and the CLI has usually
+  // opened its own tab in the server machine's default browser already — which
+  // may not be the browser you are reading this in. A plain link works in both
+  // cases and needs no popup permission.
+  if (b.codeInput) children.push(...tldrLoginForm(url));
+  if (b.login) children.push(el('button', { class: 'tldr-retry', text: 'Log in', onclick: () => beginClaudeLogin(url) }));
+  // Retry is dropped when there is no link to re-run (the 'logged-in' bubble
+  // reached from the thread menu); a button whose action has no argument is a
+  // trap, and that is a rendering concern rather than a stage-policy one.
+  if (b.retry && url) children.push(el('button', { class: 'tldr-retry', text: 'Retry', onclick: () => retryTldr(url) }));
+  if (b.cancelLogin) children.push(el('button', { class: 'tldr-retry', text: 'Cancel', onclick: () => cancelClaudeLogin(url) }));
   if (b.dismiss) {
     children.push(el('button', {
       class: 'tldr-dismiss', text: '×', title: 'Dismiss', 'aria-label': 'Dismiss', onclick: () => clearTldrFor(state.activeId),
@@ -1611,7 +1632,10 @@ function handleTldrStage(e) {
       return;
     }
   }
-  setTldrFor(convId, { stage: e.state, reason: e.reason, url: e.url });
+  // `kind` is the server's fixed classification of a failure ('auth' /
+  // 'not-found'); it is what decides whether the bubble offers to log in, so it
+  // is never inferred from the human-readable reason text.
+  setTldrFor(convId, { stage: e.state, reason: e.reason, url: e.url, kind: e.kind });
   if (convId === state.activeId) renderActiveTldr();
 }
 
@@ -1625,7 +1649,195 @@ function renderActiveTldr() {
     if (host) { host.replaceChildren(); host.classList.add('hidden'); }
     return;
   }
-  renderTldrStatus(st.stage, st.reason, st.url);
+  renderTldrStatus(st.stage, st.reason, st.url, st.kind);
+}
+
+// ---------- in-app `claude auth login` ----------
+// The auto-TLDR bubble's dead end used to be "Auto-TLDR failed: Claude Code CLI
+// is not logged in" plus a Retry that could not possibly work until the user
+// found a terminal. These three handlers drive the server's login routes (see
+// src/claude-cli.js) so the whole thing happens in the tab you are already in.
+//
+// The CLI uses the paste-a-code OAuth redirect rather than a localhost callback,
+// so a new tab alone cannot finish it — the flow is: start the login, open the
+// sign-in page, paste the code that page gives you back into the bubble.
+//
+// ⚠️ That code is a credential. It goes straight to the server (loopback only)
+// and into the CLI's stdin. Never log it, never put it in a URL, never store it.
+//
+// Only one login can be pending server-side, so the URL for it is a single
+// module-level value rather than per-conversation state.
+let claudeAuthUrl = null;
+
+// The sign-in link + the code field, as bubble children.
+//
+// The link is a real anchor: opened from a click handler after an await,
+// window.open() is eaten by the popup blocker, and the CLI has usually already
+// opened its own tab in the SERVER machine's default browser — which may not be
+// the browser you are reading this in. An anchor works either way.
+function tldrLoginForm(url) {
+  const input = el('input', {
+    class: 'tldr-code', type: 'text', placeholder: 'Code, if it asks for one',
+    'aria-label': 'Sign-in code', autocomplete: 'off', spellcheck: 'false',
+    onkeydown: (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submitClaudeCode(input.value, url); }
+      else if (e.key === 'Escape') { e.preventDefault(); cancelClaudeLogin(); }
+    },
+  });
+  // Focus without stealing it from a user already typing in the composer.
+  setTimeout(() => { if (document.activeElement === document.body) input.focus(); }, 0);
+  const nodes = [];
+  if (claudeAuthUrl) {
+    nodes.push(el('a', {
+      class: 'tldr-link', href: claudeAuthUrl, target: '_blank', rel: 'noopener noreferrer',
+      text: 'Open sign-in page',
+    }));
+  }
+  nodes.push(input);
+  nodes.push(el('button', { class: 'tldr-retry', text: 'Submit', onclick: () => submitClaudeCode(input.value, url) }));
+  return nodes;
+}
+
+// Start the login and show the code field. `url` is the YouTube link whose
+// summary failed, carried through so the bubble can offer to re-run it once the
+// sign-in lands; it is undefined when this is reached from the thread menu.
+async function beginClaudeLogin(url) {
+  const key = state.activeId;
+  if (!key) return;
+  // We deliberately do NOT open a tab here. `claude auth login` opens one itself
+  // as it starts, so doing it too gave the user two sign-in windows for one
+  // login -- and only one of them belongs to the OAuth exchange the CLI is
+  // actually waiting on, which makes "which of these do I use?" a real question
+  // with a wrong answer in it. The anchor in the bubble covers the case the
+  // CLI's tab cannot: it opens in the *server machine's* default browser, which
+  // need not be the browser this app is open in.
+  const prev = tldrByConv.get(key);
+  setTldrFor(key, { stage: 'logging-in', url, prev });
+  renderActiveTldr();
+  let r;
+  try {
+    r = await api('/api/tldr/login', { method: 'POST' });
+    if (!r.ok) throw new Error(r.error || 'login failed');
+  } catch (err) {
+    setTldrFor(key, { stage: 'login-failed', reason: loginErrorReason(err.message), url, prev });
+    renderActiveTldr();
+    return;
+  }
+  claudeAuthUrl = r.url;
+  setTldrFor(key, { stage: 'login', url, prev });
+  renderActiveTldr();
+  pollClaudeLogin(key, url, prev);
+}
+
+// Watch for the login finishing on its own, which is the NORMAL path: the
+// sign-in page calls back, the CLI exits logged in, and no code is ever shown.
+// Polling is cheap by design — the server answers from the child's exit and only
+// checks the credential store once, so this is not a spawn every two seconds.
+const LOGIN_POLL_MS = 1500;
+const LOGIN_POLL_LIMIT = 400; // ~10 min, matching the server's pending timeout
+let loginPollTimer = null;
+function stopClaudeLoginPoll() {
+  if (loginPollTimer) { clearTimeout(loginPollTimer); loginPollTimer = null; }
+}
+function pollClaudeLogin(key, url, prev, tries = 0) {
+  stopClaudeLoginPoll();
+  loginPollTimer = setTimeout(async () => {
+    // The user cancelled, switched away from the flow, or typed a code in by
+    // hand while we were waiting — whatever the bubble says now, it isn't ours.
+    if (tldrByConv.get(key)?.stage !== 'login') return;
+    let st;
+    try { st = await api('/api/tldr/login/status'); }
+    catch { st = null; } // a blip shouldn't abandon a login that may still land
+    if (tldrByConv.get(key)?.stage !== 'login') return;
+    if (st && st.loggedIn === true) return finishClaudeLogin(key, url);
+    if (st && st.loggedIn === false) {
+      claudeAuthUrl = null;
+      setTldrFor(key, { stage: 'login-failed', reason: 'sign-in did not complete', url, prev });
+      renderActiveTldr();
+      return;
+    }
+    if (tries + 1 >= LOGIN_POLL_LIMIT) {
+      setTldrFor(key, { stage: 'login-failed', reason: 'timed out waiting for sign-in', url, prev });
+      renderActiveTldr();
+      return;
+    }
+    pollClaudeLogin(key, url, prev, tries + 1);
+  }, LOGIN_POLL_MS);
+}
+
+// Shared landing point for both completion paths (the browser callback and a
+// pasted code): the server has already re-probed availability via its onLogin
+// hook, so go straight back to the link that failed.
+function finishClaudeLogin(key, url) {
+  stopClaudeLoginPoll();
+  claudeAuthUrl = null;
+  refreshThreadMenuIfOpen(key); // the toggle's "not logged in" hint is now stale
+  // Straight on with the summary that failed, rather than parking on a "signed
+  // in" notice and making the user click Retry: the link is the thing they
+  // wanted, and the login was only ever in the way of it.
+  if (url) { retryTldr(url); return; }
+  // Reached from the thread menu instead, with no link in flight: say it worked.
+  setTldrFor(key, { stage: 'logged-in', url });
+  renderActiveTldr();
+}
+
+// Hand the pasted code to the server, which writes it to the waiting CLI.
+async function submitClaudeCode(code, url) {
+  const key = state.activeId;
+  const clean = String(code || '').trim();
+  if (!key || !clean) return;
+  const prev = tldrByConv.get(key)?.prev;
+  stopClaudeLoginPoll(); // this hand-entered code supersedes the watcher
+  setTldrFor(key, { stage: 'logging-in', url, prev });
+  renderActiveTldr();
+  try {
+    const r = await api('/api/tldr/login/code', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: clean }),
+    });
+    if (!r.ok) throw new Error(r.error || 'not-logged-in');
+  } catch (err) {
+    setTldrFor(key, { stage: 'login-failed', reason: loginErrorReason(err.message), url, prev });
+    renderActiveTldr();
+    return;
+  }
+  finishClaudeLogin(key, url);
+}
+
+// Back out of a login: drop the server's pending child and restore whatever the
+// bubble said before, so cancelling returns you to the failure rather than to a
+// blank thread.
+async function cancelClaudeLogin() {
+  const key = state.activeId;
+  if (!key) return;
+  stopClaudeLoginPoll();
+  claudeAuthUrl = null;
+  const prev = tldrByConv.get(key)?.prev;
+  if (prev) setTldrFor(key, prev); else tldrByConv.delete(key);
+  renderActiveTldr();
+  try { await api('/api/tldr/login/cancel', { method: 'POST' }); } catch { /* best effort */ }
+}
+
+// Map a login failure to something worth reading. Same discipline as
+// retryErrorReason: the server's errors are fixed tokens, and anything else is
+// reported generically rather than dumped raw into the bubble.
+function loginErrorReason(msg) {
+  const s = String(msg || '');
+  if (/not-found/.test(s)) return 'the claude CLI was not found';
+  if (/no-url/.test(s)) return 'the CLI did not offer a sign-in link';
+  if (/no-pending-login/.test(s)) return 'that sign-in expired — start again';
+  if (/bad-code/.test(s)) return 'that does not look like a valid code';
+  if (/not-logged-in/.test(s)) return 'the code was not accepted';
+  return 'could not sign in';
+}
+
+// Repaint an open thread menu so a just-completed login clears its stale hint.
+async function refreshThreadMenuIfOpen(id) {
+  if (!threadMenuOpen || state.activeId !== id) return;
+  try {
+    const data = await api(`/api/conversations/${encodeURIComponent(id)}/tldr`);
+    if (threadMenuOpen && state.activeId === id) buildThreadMenu(id, data);
+  } catch { /* leave the menu as it is */ }
 }
 
 // Manual retry: ask the server to re-run this link's summary. Optimistically store
