@@ -316,7 +316,42 @@ export function tldrHint(data) {
 // 'not-found'), and only 'auth' earns the Log in button: a missing binary is
 // not something a browser flow can install, so offering one would be a button
 // that cannot work.
-export function tldrBubble(stage, reason, kind) {
+// The picker's question line. `links` are the candidates the server listed and
+// `skipped` the ones past its cap -- said out loud, because a link dropped in
+// silence is the whole bug this feature exists to fix.
+export function pickerLabel(links, skipped) {
+  const n = Array.isArray(links) ? links.length : 0;
+  const extra = skipped > 0 ? skipped : 0;
+  // The count is the message's REAL total, not the listed subset: "8 links in
+  // that message (2 more were not listed)" reads as a contradiction, and the
+  // whole point of saying anything is that the reader learns nothing was
+  // quietly dropped.
+  const head = `${n + extra} YouTube links in that message. Which should I summarize?`;
+  return extra ? `${head} Only the first ${n} are listed.` : head;
+}
+
+// `extra` carries the stage's own payload: `links`/`skipped` for the picker, and
+// `progress` ({index,total}) for a link the user picked out of a multi-link
+// message. The progress suffix is appended to every label rather than handled
+// per stage -- with one bubble per conversation, "(2 of 3)" is the only thing
+// distinguishing the second link's failure from the first one's.
+export function tldrBubble(stage, reason, kind, extra = {}) {
+  const b = bubbleFor(stage, reason, kind, extra);
+  const p = extra && extra.progress;
+  if (p && p.total > 1) b.label = `${b.label} (${p.index} of ${p.total})`;
+  return b;
+}
+
+function bubbleFor(stage, reason, kind, extra) {
+  if (stage === 'choose') {
+    // The only stage that asks a question rather than reporting. No Retry (there
+    // is no single link in flight yet) and no spinner: nothing is running, and
+    // nothing will until the user answers.
+    return {
+      label: pickerLabel(extra.links, extra.skipped),
+      tone: 'info', retry: false, dismiss: true, picker: true,
+    };
+  }
   if (stage === 'done') {
     return {
       label: `Sent without its "For context" block: ${reason || 'research failed'}`,

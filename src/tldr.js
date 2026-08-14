@@ -13,7 +13,7 @@
 
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
-import { findYouTubeUrl, fetchTranscript } from './youtube.js';
+import { findYouTubeUrl, findYouTubeUrls, fetchTranscript, fetchMeta } from './youtube.js';
 import { runDir, authStatus } from './claude-cli.js';
 
 // Don't feed a pathological transcript to the model. Claude handles ~1M tokens,
@@ -22,6 +22,26 @@ import { runDir, authStatus } from './claude-cli.js';
 // child's stdin.
 export const MAX_TRANSCRIPT_CHARS = 600_000;
 const PROCESSED_CAP = 2000; // bound the dedup set
+
+// ---- the multi-link picker --------------------------------------------------
+//
+// A message with several YouTube links doesn't auto-summarize anything: each
+// summary is two whole `claude` runs billed to the user's subscription, and
+// guessing which of five pasted links they meant is worse than asking. So the
+// pipeline offers a picker instead and waits. Nothing spawns until a human ticks
+// a box, which is also why there is no separate "how many may fire" cap: the
+// list length IS the cap.
+export const MAX_PICK_LINKS = 8;
+// Titles are third-party text rendered in the UI. The browser builds them with
+// createElement so they can't inject anything, but a 300-char title would still
+// wreck the bubble's layout.
+const MAX_PICK_TITLE_CHARS = 120;
+// A pending question is in-memory and per conversation (the newest multi-link
+// message wins), so it survives a page reload but not a server restart — the
+// same ephemerality the status bubble has always had. TTL'd because an
+// unanswered picker is a question the user has plainly moved on from.
+const PENDING_CAP = 50;
+const PENDING_TTL_MS = 6 * 60 * 60_000;
 // Hard cap on the summary we actually post. The prompt asks for ~4 sentences,
 // but this auto-sends to real contacts, so clamp defensively in case the model
 // ignores that and rambles. Sized with headroom over the ~100-word target.
@@ -289,6 +309,18 @@ function clampQuote(line, max = MAX_QUOTE_CHARS) {
   const last = out.charCodeAt(out.length - 1);
   if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1); // never half an emoji
   return out.trimEnd().replace(/["”]$/, '') + '…' + close;
+}
+
+// A video title for the multi-link picker: one line, bounded. Third-party text
+// that the browser renders (with createElement, so it can't inject anything) --
+// this is about the bubble's layout, not safety. Exported for the tests.
+export function clampTitle(title) {
+  const s = String(title ?? '').replace(/\s+/g, ' ').trim();
+  if (s.length <= MAX_PICK_TITLE_CHARS) return s;
+  let out = s.slice(0, MAX_PICK_TITLE_CHARS - 1);
+  const last = out.charCodeAt(out.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1); // never half an emoji
+  return out.trimEnd() + '…';
 }
 
 // A line that is nothing but a quoted span: opens and closes with a double
@@ -685,7 +717,13 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
   // Per-conversation timestamp floor: we only summarize links in messages newer
   // than this, so server boot / enabling a chat never re-summarizes old history.
   const since = new Map();
-  const processed = new Set(); // `${convId}:${msgId}` we've already handled
+  // `${convId}:${msgId}:${videoId}` we've already handled. Keyed per LINK, not
+  // per message: one message can carry several videos, and each has to be
+  // remembered separately or a message whose second link is picked later reads
+  // as already done.
+  const processed = new Set();
+  // Multi-link questions nobody has answered yet, one per conversation.
+  const pending = new Map(); // convId -> { links, skipped, ts }
   const bootTs = Date.now();
 
   // Whether the `claude` CLI is actually usable: installed AND logged in.
@@ -777,10 +815,15 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
   // `kind` is the same failure classified as a fixed token ('not-found' /
   // 'auth'), so the UI can decide to offer the in-app login without matching on
   // the human-readable `reason` text -- which exists to be reworded.
-  const emit = (convId, state, url, reason, kind) => {
+  //
+  // `extra` carries the stage-specific payload: the candidate list for 'choose',
+  // and `progress` ({index,total}) on every event of a chosen batch, so one
+  // bubble can say "(2 of 3)" instead of three batched links fighting over it.
+  const emit = (convId, state, url, reason, kind, extra) => {
     if (typeof onStage !== 'function') return;
-    try { onStage({ conversationId: String(convId), state, url, reason, ...(kind ? { kind } : {}) }); }
-    catch (err) { log('stage emit error:', err.message); }
+    try {
+      onStage({ conversationId: String(convId), state, url, reason, ...(kind ? { kind } : {}), ...extra });
+    } catch (err) { log('stage emit error:', err.message); }
   };
 
   function markProcessed(key) {
@@ -788,28 +831,55 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     if (processed.size > PROCESSED_CAP) processed.delete(processed.values().next().value);
   }
 
-  async function summarizeAndSend(convId, found) {
-    emit(convId, 'fetching', found.url);
+  // The unanswered question for a chat, or null when there is none or it has
+  // gone stale. Expiry is checked on read rather than on a timer: an abandoned
+  // picker costs nothing until someone asks about it.
+  function pendingFor(convId) {
+    const key = String(convId);
+    const entry = pending.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > PENDING_TTL_MS) { pending.delete(key); return null; }
+    return entry;
+  }
+
+  // One entry per conversation, so a second multi-link message replaces that
+  // chat's question rather than queueing behind it -- the bubble asking it is
+  // one per conversation, and there is nowhere to show two. The cap bounds the
+  // number of CHATS holding an unanswered question; FIFO-evict, since Map keeps
+  // insertion order.
+  function setPending(convId, entry) {
+    pending.set(String(convId), entry);
+    while (pending.size > PENDING_CAP) pending.delete(pending.keys().next().value);
+  }
+
+  // `progress` is set only for a link the user picked out of a multi-link
+  // message: {index, total} rides on every stage event of this run so the one
+  // bubble per conversation counts the batch through instead of the events
+  // silently overwriting each other.
+  async function summarizeAndSend(convId, found, progress) {
+    const say = (state, reason, kind) =>
+      emit(convId, state, found.url, reason, kind, progress ? { progress } : undefined);
+    say('fetching');
     let transcript;
     try {
       transcript = await fetchTranscript(found.videoId, { ytDlp });
     } catch (e) {
       log(`no transcript for ${found.url}: ${e.message}`);
-      emit(convId, 'failed', found.url, 'no transcript available');
+      say('failed', 'no transcript available');
       return; // stay silent in the chat
     }
-    emit(convId, 'summarizing', found.url);
+    say('summarizing');
     let reply;
     try {
       reply = await enqueue(() => summarize({
         bin, model, effort, transcript: transcript.text, title: transcript.title,
-        onRetry: (e) => emit(convId, 'retrying', found.url, friendlyReason(e)),
+        onRetry: (e) => say('retrying', friendlyReason(e)),
       }));
       noteRunOutcome();
     } catch (e) {
       noteRunOutcome(e);
       log(`summary failed for ${found.url}: ${e.message}`);
-      emit(convId, 'failed', found.url, friendlyReason(e), availabilityError(e));
+      say('failed', friendlyReason(e), availabilityError(e));
       return;
     }
     // The optional second pass. Deliberately restricted to the schema-compliant
@@ -822,7 +892,7 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     let contextReason; // set only when the context pass FAILED (not "found nothing")
     let contextKind;   // that failure as a fixed token, when it was an availability one
     if (parsed && withContext) {
-      emit(convId, 'researching', found.url);
+      say('researching');
       try {
         researched = await enqueue(() => researchContext({
           bin, model, effort,
@@ -848,12 +918,54 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
     const r = await bridge.sendText(convId, body, bodyRanges);
     if (!r || !r.ok) {
       log(`send failed for ${found.url}: ${r && r.error}`);
-      emit(convId, 'failed', found.url, 'could not send');
+      say('failed', 'could not send');
     } else {
       log(`sent TLDR for ${found.url}`);
       // A 'done' with a reason means "the TLDR went out, but without its context
       // block" -- the UI shows a dismissible notice instead of clearing silently.
-      emit(convId, 'done', found.url, contextReason, contextKind);
+      say('done', contextReason, contextKind);
+    }
+  }
+
+  // A message carrying several videos: ask which ones, rather than guessing at
+  // the first (what this used to do, silently) or firing all of them (two
+  // `claude` runs each, on the user's subscription, for links they may have been
+  // forwarding rather than recommending).
+  //
+  // Each candidate is labelled with its real title from oEmbed -- cheap,
+  // unauthenticated and ungated, and crucially NOT the transcript path, so
+  // listing eight videos costs eight small HTTP calls and no model runs. A title
+  // we can't get is left empty and the UI falls back to the url.
+  //
+  // The question is recorded (so a page opened or reloaded later still sees it)
+  // and emitted as the 'choose' stage. Nothing is summarized until choose().
+  async function offerPicker(convId, links) {
+    const listed = links.slice(0, MAX_PICK_LINKS);
+    const skipped = links.length - listed.length;
+    const meta = await Promise.all(listed.map((l) => fetchMeta(l.videoId)));
+    const candidates = listed.map((l, i) => ({
+      url: l.url,
+      videoId: l.videoId,
+      title: clampTitle(meta[i] && meta[i].title),
+    }));
+    setPending(convId, { links: candidates, skipped, ts: Date.now() });
+    log(`${links.length} links in one message — asking which to summarize` +
+        (skipped ? ` (${skipped} beyond the cap of ${MAX_PICK_LINKS})` : ''));
+    // No `url`: the question is about the whole message, and a url here would
+    // reach the bubble's Retry/Log-in handlers as "the link in flight".
+    emit(convId, 'choose', null, null, null, { links: candidates, skipped });
+  }
+
+  // Run the picked links one after another. `enqueue` already serializes the
+  // spawns, but sequential execution is what makes the progress counter honest:
+  // "(2 of 3)" has to mean the second one is the one actually running.
+  async function runPicked(convId, links) {
+    for (let i = 0; i < links.length; i++) {
+      try {
+        await summarizeAndSend(convId, links[i], { index: i + 1, total: links.length });
+      } catch (e) {
+        log('picked link failed:', e.message);
+      }
     }
   }
 
@@ -867,11 +979,25 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       if (ts > maxTs) maxTs = ts;
       if (ts <= floor) continue;                  // pre-watch history
       if (msg.direction !== 'outgoing') continue; // only the user's own links
-      const found = findYouTubeUrl(msg.text);
-      if (!found) continue;
-      const key = `${convId}:${msg.id}`;
-      if (processed.has(key)) continue;
-      markProcessed(key);
+      // Every link in the message, deduped by video id, minus the ones already
+      // dealt with. Marked processed up front -- including the ones past the
+      // cap, which were reported as skipped rather than swallowed -- so the
+      // burst of coalesced events a single send produces can't re-ask.
+      const links = findYouTubeUrls(msg.text)
+        .filter((l) => !processed.has(`${convId}:${msg.id}:${l.videoId}`));
+      if (!links.length) continue;
+      for (const l of links) markProcessed(`${convId}:${msg.id}:${l.videoId}`);
+
+      if (links.length > 1) {
+        // Deliberately NOT availability-gated. Picking is an explicit user
+        // action, like retry(): if the CLI is broken the chosen run says so in
+        // the bubble within seconds, whereas gating here would throw the links
+        // away and leave nothing to re-run after the user logs in.
+        await offerPicker(convId, links);
+        continue;
+      }
+
+      const found = links[0];
       // The CLI is known-unusable and the recheck window has not elapsed, so
       // there is no point spawning anything -- but SAY so, in the bubble, rather
       // than doing nothing. Silence is indistinguishable from the feature being
@@ -934,6 +1060,36 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       if (!found) return { ok: false, error: 'bad-url' };
       summarizeAndSend(String(convId), found).catch((e) => log('retry error:', e.message));
       return { ok: true };
+    },
+
+    // The unanswered multi-link question for a chat, or null. Served on the
+    // per-chat GET so a browser opened (or reloaded) after the question was
+    // asked still sees it -- the stage events that carry it are fire-and-forget
+    // over SSE, so without this a reload would lose the picker and with it every
+    // link in the message.
+    pending(convId) {
+      const entry = pendingFor(convId);
+      return entry ? { links: entry.links, skipped: entry.skipped } : null;
+    },
+
+    // The answer to a picker: the subset of urls the user ticked. An empty list
+    // is a valid answer ("none of them") and just clears the question.
+    //
+    // Only urls from the pending entry are honoured, and answering consumes it,
+    // so a stale tab can't re-run a question already dealt with. Summarizing an
+    // arbitrary url is what retry() is for.
+    choose(convId, urls) {
+      const key = String(convId);
+      const entry = pendingFor(key);
+      if (!entry) return { ok: false, error: 'no-pending' };
+      const wanted = new Set((Array.isArray(urls) ? urls : []).map(String));
+      const picked = entry.links.filter((l) => wanted.has(l.url));
+      pending.delete(key);
+      if (picked.length) {
+        log(`summarizing ${picked.length} of ${entry.links.length} offered links`);
+        runPicked(key, picked).catch((e) => log('picked batch error:', e.message));
+      }
+      return { ok: true, started: picked.length };
     },
 
     start() {

@@ -14,7 +14,7 @@ import {
   AVATAR_COLORS, colorFor, initials, previewText, menuActionsFor,
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
-  parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
+  parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint, pickerLabel,
   jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
@@ -408,6 +408,41 @@ test('tldrBubble: only an auth failure offers the in-app login', () => {
   // and logging in fixes the next one.
   assert.equal(tldrBubble('done', 'Claude usage limit reached').login, false);
   assert.equal(tldrBubble('done', 'Claude Code CLI is not logged in', 'auth').login, true);
+});
+
+test('tldrBubble: the picker asks rather than reports', () => {
+  const links = [{ url: 'https://youtu.be/a', title: 'One' }, { url: 'https://youtu.be/b', title: '' }];
+  const b = tldrBubble('choose', undefined, undefined, { links, skipped: 0 });
+  assert.equal(b.picker, true);
+  assert.equal(b.tone, 'info');   // nothing is running yet, so no spinner
+  assert.equal(b.retry, false);   // and no single link to re-run
+  assert.equal(b.dismiss, true);
+  assert.match(b.label, /2 YouTube links/);
+});
+
+test('pickerLabel: links past the cap are said out loud, not swallowed', () => {
+  const links = [{ url: 'a' }, { url: 'b' }];
+  assert.match(pickerLabel(links, 0), /^2 YouTube links/);
+  assert.doesNotMatch(pickerLabel(links, 0), /listed/);
+  // The count is the message's real total, so it can't contradict the note --
+  // "8 links (2 more were not listed)" is nonsense to read.
+  assert.match(pickerLabel(links, 3), /^5 YouTube links/);
+  assert.match(pickerLabel(links, 3), /Only the first 2 are listed\./);
+});
+
+test('tldrBubble: a chosen batch counts itself through the one bubble', () => {
+  const at = (i, total) => tldrBubble('summarizing', undefined, undefined, { progress: { index: i, total } });
+  assert.match(at(2, 3).label, /\(2 of 3\)$/);
+  // A batch of one is just an ordinary run — no counter.
+  assert.doesNotMatch(at(1, 1).label, /of 1/);
+  // Failures count too: with one bubble per chat it is the only thing telling
+  // the second link's failure apart from the first's.
+  assert.match(
+    tldrBubble('failed', 'no transcript available', undefined, { progress: { index: 3, total: 3 } }).label,
+    /no transcript available \(3 of 3\)$/,
+  );
+  // Everything else keeps working with no extras at all.
+  assert.doesNotMatch(tldrBubble('summarizing').label, /of/);
 });
 
 test('tldrBubble: the login stages carry their own controls', () => {

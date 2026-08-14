@@ -51,19 +51,37 @@ export function parseVideoId(input) {
   return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
 }
 
-// Find the first YouTube video link anywhere in a free-text message. Returns
-// { url, videoId } or null. Scans every http(s) token so surrounding words,
-// punctuation, and non-YouTube links don't get in the way.
-export function findYouTubeUrl(text) {
-  if (typeof text !== 'string' || !text) return null;
+// Find every YouTube video link in a free-text message, in the order they
+// appear. Returns an array of { url, videoId }. Scans every http(s) token so
+// surrounding words, punctuation, and non-YouTube links don't get in the way.
+//
+// Deduped by videoId, not by url: the same video pasted twice (once as a
+// youtu.be short link, once with a &t= timestamp) is one video and must not
+// earn two summaries. The first url wins, since that's the one the reader sees
+// first. `limit` bounds the result — the caller is asking a human which of
+// these to summarize, and a list has to end somewhere.
+export function findYouTubeUrls(text, limit = Infinity) {
+  const out = [];
+  if (typeof text !== 'string' || !text || limit < 1) return out;
+  const seen = new Set();
   const re = /https?:\/\/[^\s<>"')]+/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
     const url = m[0].replace(/[.,);!?]+$/, ''); // drop trailing sentence punctuation
     const videoId = parseVideoId(url);
-    if (videoId) return { url, videoId };
+    if (!videoId || seen.has(videoId)) continue;
+    seen.add(videoId);
+    out.push({ url, videoId });
+    if (out.length >= limit) break;
   }
-  return null;
+  return out;
+}
+
+// The first YouTube link, or null. A thin wrapper over the plural form — kept
+// because most callers (the retry route, the defang tests) genuinely want one
+// link, not a list.
+export function findYouTubeUrl(text) {
+  return findYouTubeUrls(text, 1)[0] ?? null;
 }
 
 // Walk an embedded JSON object literal starting at `marker` (e.g.
@@ -292,7 +310,12 @@ async function fetchViaYtDlp(videoId, opts) {
 // Best-effort by design: metadata is a nice-to-have (it sharpens the summary and
 // is the only thing the auto-TLDR context pass can research a channel by), and
 // never worth failing a transcript we already have.
-async function fetchMeta(videoId) {
+//
+// Exported because the multi-link picker labels each candidate with its real
+// title before anything is summarized. That is the whole reason to reach for
+// oEmbed rather than the transcript path: listing eight videos costs eight
+// small HTTP calls and no `claude` runs at all.
+export async function fetchMeta(videoId) {
   try {
     const url = 'https://www.youtube.com/oembed?format=json&url='
       + encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`);

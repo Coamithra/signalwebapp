@@ -582,11 +582,31 @@ const server = http.createServer(async (req, res) => {
       // our own error tags, never CLI output, so the hint can say which of the
       // two things is actually wrong.
       const reason = tldr.unavailableReason();
+      // `pending` is an unanswered multi-link picker (see MAX_PICK_LINKS in
+      // src/tldr.js). It rides on this route because the stage events that
+      // normally carry it are fire-and-forget over SSE: without it, reloading
+      // the page mid-question would lose the picker and every link in it.
+      const pending = tldr.pending(id);
       return sendJson(res, 200, {
         enabled: tldr.isEnabled(id),
         configured: tldr.configured(),
         ...(reason ? { reason } : {}),
+        ...(pending ? { pending } : {}),
       });
+    }
+
+    // /api/conversations/:id/tldr/choose   POST { urls: [...] } -> answer the
+    // multi-link picker. The urls must come from the pending question; an empty
+    // list is the valid "none of them" answer and just clears it. Like retry,
+    // fire-and-forget: the outcome arrives as 'tldr' stage events over SSE.
+    m = pathname.match(/^\/api\/conversations\/([^/]+)\/tldr\/choose$/);
+    if (m && req.method === 'POST') {
+      const id = decodeURIComponent(m[1]);
+      let body;
+      try { body = await readBody(req, 16 * 1024); }
+      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
+      const result = tldr.choose(id, body.urls);
+      return sendJson(res, result.ok ? 200 : 400, result);
     }
 
     // /api/conversations/:id/tldr/retry   POST { url } -> re-run that link's summary
