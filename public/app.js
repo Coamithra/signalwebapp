@@ -1747,9 +1747,15 @@ async function submitClaudeCode(code, url) {
     return;
   }
   claudeAuthUrl = null;
+  refreshThreadMenuIfOpen(key); // the toggle's "not logged in" hint is now stale
+  // Straight on with the summary that failed, rather than parking on a "signed
+  // in" notice and making the user click Retry: the link is the thing they
+  // wanted, and the login was only ever in the way of it. (The server's own
+  // gate is already clear -- /login/code calls tldr.recheck() before replying.)
+  if (url) { retryTldr(url); return; }
+  // Reached from the thread menu instead, with no link in flight: say it worked.
   setTldrFor(key, { stage: 'logged-in', url });
   renderActiveTldr();
-  refreshThreadMenuIfOpen(key); // the toggle's "not logged in" hint is now stale
 }
 
 // Back out of a login: drop the server's pending child and restore whatever the

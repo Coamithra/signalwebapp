@@ -10,7 +10,7 @@ import {
   buildPrompt, SYSTEM_PROMPT, defangUrls, clampSummary, splitQuoteLine, parseReply,
   formatTldr, friendlyReason, friendlyContextReason, MAX_TRANSCRIPT_CHARS,
   buildContextPrompt, CONTEXT_SYSTEM_PROMPT, parseContext, MAX_CONTEXT_CHARS,
-  availabilityError, shouldAttempt, AVAILABILITY_RECHECK_MS,
+  availabilityError, shouldAttempt, AVAILABILITY_RECHECK_MS, AVAILABILITY_TEXT,
 } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
 
@@ -555,4 +555,17 @@ test('an unusable CLI is gated off, but only until the recheck window passes', (
   }), true);
   // An available CLI is never gated, whatever the stale timestamp says.
   assert.equal(shouldAttempt({ available: true, unavailableAt: at, now: at }), true);
+});
+
+// The watcher reports a known-unusable CLI with these exact words, so "we never
+// tried" and "we tried and it failed" don't read as two unrelated problems.
+test('AVAILABILITY_TEXT is the same wording a real run\'s failure produces', () => {
+  assert.equal(AVAILABILITY_TEXT.auth, friendlyReason(new Error('claude-auth')));
+  assert.equal(AVAILABILITY_TEXT['not-found'], friendlyReason(new Error('claude-not-found')));
+  // Both availability tokens are covered: the watcher indexes this by the token
+  // availabilityError() returns, so a missing key would read as a generic error.
+  for (const tag of ['claude-auth', 'claude-not-found']) {
+    const kind = availabilityError(new Error(tag));
+    assert.ok(AVAILABILITY_TEXT[kind], tag);
+  }
 });

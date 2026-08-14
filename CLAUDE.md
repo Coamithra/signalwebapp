@@ -60,7 +60,7 @@ evaluate must target the isolated context's id.
 | [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
 | [public/emoji-shortcodes.js](public/emoji-shortcodes.js) | **Generated** `:shortcode:` → emoji map (~1900 entries). Do not hand-edit — re-run `node scripts/gen-emoji-map.mjs` (it reads Signal's own `build/emoji-data.json` out of its `app.asar`, so our shortcodes are exactly Signal's). Carries Signal's own `shortNameAlts` too, so `:poop:` works as well as `:hankey:`. |
 | [public/emoji-tags.js](public/emoji-tags.js) | **Generated** shortcode -> synonyms (~7800 tags over ~1800 emoji), the search terms behind `:chef` finding `:cook:`. Same script, but a different Signal source: its **downloaded** emoji search index, not the asar (see the autocomplete bullet). Search terms only, never shortcodes - they rank in `matchShortcodes` and never expand. |
-| [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
+| [scripts/](scripts/) | `launch-signal.ps1` (relaunch Signal w/ debug port, tray), `autostart.ps1` + `install-autostart.ps1` (login plumbing), `reboot.sh` (free port 7700 and restart -- `npm run reboot`; runs the server from *its own* checkout, so it starts a worktree's code when called inside one), `gen-emoji-map.mjs` (regenerates the emoji map **and** the synonym tags after a Signal update - one script, two outputs, so they can't drift apart). |
 
 ## How the core operations work (don't relearn these the hard way)
 
@@ -433,7 +433,14 @@ evaluate must target the isolated context's id.
   a "not configured" hint.
   Recovery needs no restart: `shouldAttempt` gates the watcher, so an unusable CLI is idle for
   `AVAILABILITY_RECHECK_MS` (10 min) and then gets **one** attempt through — the run *is* the
-  re-probe, which is why there is no timer and no extra probe spawn. `retry()` is not gated at
+  re-probe, which is why there is no timer and no extra probe spawn. ⚠️ That gate sits **inside
+  `handleConversation`, after a YouTube link has been found**, not on the event handler: a
+  skipped link still emits a `failed` stage carrying `AVAILABILITY_TEXT[reason]`, so the bubble
+  (and its **Log in** button) appears. Moving it back up to the event handler is what made an
+  honest boot probe *worse* than the old optimistic one — the link was skipped in total
+  silence, which is indistinguishable from the feature being switched off, and the one control
+  that fixes it lives in the bubble that never appeared. The cost is one `getMessages` per
+  event for an enabled chat while the CLI is broken. `retry()` is not gated at
   all (it's the explicit user action, and so the natural "I just logged in" path; a still-broken
   CLI reports itself truthfully in the bubble within seconds), and a successful in-app login
   calls `tldr.recheck()` so the feature comes back **immediately** rather than sitting out the

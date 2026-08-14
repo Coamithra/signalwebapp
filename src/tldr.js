@@ -109,10 +109,19 @@ export function shouldAttempt({ available, unavailableAt, now, cooldownMs = AVAI
 // IMPORTANT: returns only fixed phrases derived from our own error tags -- it
 // must never echo raw stdout/stderr, which can carry transcript text or the
 // timedtext URL with its params.
+// The two availability failures, keyed by the token `availabilityError` returns.
+// One source of truth: the watcher reports a known-unusable CLI with the same
+// words a real run's failure would have used, so "we didn't even try" and "we
+// tried and it failed" don't read as two different problems.
+export const AVAILABILITY_TEXT = {
+  'not-found': 'Claude Code CLI not found',
+  auth: 'Claude Code CLI is not logged in',
+};
+
 export function friendlyReason(e) {
   const msg = (e && e.message) || '';
-  if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
-  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
+  if (/^claude-not-found/.test(msg)) return AVAILABILITY_TEXT['not-found'];
+  if (/^claude-auth/.test(msg)) return AVAILABILITY_TEXT.auth;
   if (/^claude-timeout/.test(msg)) return 'timed out';
   if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
   if (/^claude-refusal/.test(msg)) return 'declined to summarize this one';
@@ -130,8 +139,8 @@ export function friendlyContextReason(e) {
   const msg = (e && e.message) || '';
   if (/^claude-timeout/.test(msg)) return 'research timed out';
   if (/^claude-limit/.test(msg)) return 'Claude usage limit reached';
-  if (/^claude-not-found/.test(msg)) return 'Claude Code CLI not found';
-  if (/^claude-auth/.test(msg)) return 'Claude Code CLI is not logged in';
+  if (/^claude-not-found/.test(msg)) return AVAILABILITY_TEXT['not-found'];
+  if (/^claude-auth/.test(msg)) return AVAILABILITY_TEXT.auth;
   return 'research failed';
 }
 
@@ -863,6 +872,19 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
       const key = `${convId}:${msg.id}`;
       if (processed.has(key)) continue;
       markProcessed(key);
+      // The CLI is known-unusable and the recheck window has not elapsed, so
+      // there is no point spawning anything -- but SAY so, in the bubble, rather
+      // than doing nothing. Silence is indistinguishable from the feature being
+      // switched off, and the bubble is where the Log in button lives: a probe
+      // honest enough to know the CLI is logged out at boot would otherwise mean
+      // the user never sees the one control that fixes it.
+      //
+      // Not a hard lockout: shouldAttempt still lets one link per recheck window
+      // through, and that run re-probes the CLI for real.
+      if (!shouldAttempt({ available, unavailableAt, now: Date.now() })) {
+        emit(convId, 'failed', found.url, AVAILABILITY_TEXT[reason] || 'the Claude Code CLI is not usable', reason);
+        continue;
+      }
       summarizeAndSend(convId, found).catch((e) => log('unexpected:', e.message));
     }
     since.set(convId, maxTs); // advance the floor so we don't re-scan handled messages
@@ -934,9 +956,12 @@ export function createTldr({ bridge, settingsPath, bin = 'claude', model, effort
           });
       };
       bridge.on('event', (e) => {
-        // Not a hard lockout: once the recheck window has passed, one link is
-        // allowed through and its run re-probes the CLI for real.
-        if (!shouldAttempt({ available, unavailableAt, now: Date.now() })) return;
+        // No availability gate here: it lives in handleConversation, AFTER a
+        // YouTube link has actually been found, so an unusable CLI can report
+        // itself in the bubble instead of the watcher going quiet. The cost is
+        // one getMessages per event for an enabled chat while the CLI is
+        // broken, which is a cheap price for the feature being able to explain
+        // itself.
         if (!e || e.type !== 'messages' || !e.conversationId) return;
         if (!enabled.has(e.conversationId)) return;
         schedule(e.conversationId);
