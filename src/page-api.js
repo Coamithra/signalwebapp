@@ -242,9 +242,12 @@ export const INSTALL_SCRIPT = `(function () {
     if (!m) return { error: 'quote-message-not-loaded' };
     if (m.conversationId && m.conversationId !== conversationId) return { error: 'quote-wrong-conversation' };
     if (m.deletedForEveryone) return { error: 'quote-message-deleted' };
-    var authorAci = m.type === 'outgoing'
-      ? (ourServiceId() || m.sourceServiceId)
-      : (m.sourceServiceId || m.source);
+    // Strictly the ACI: this one goes ON THE WIRE, where it is half of how the
+    // recipient matches the quote to the original (the other half is the sent_at
+    // in 'id'). formatMessage's authorId can fall back to the legacy 'source'
+    // because it only ever picks an avatar colour; here an e164 in an aci field
+    // would ship a quote nothing can match — better to refuse the reply.
+    var authorAci = m.type === 'outgoing' ? ourServiceId() : m.sourceServiceId;
     if (!authorAci) return { error: 'quote-no-author' };
     var atts = [];
     var a = Array.isArray(m.attachments) ? m.attachments[0] : null;

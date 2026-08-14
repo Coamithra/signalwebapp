@@ -35,7 +35,7 @@ The thumbnail is an ordinary v2 encrypted attachment (`path` + `localKey`), i.e.
 - `quoteSummary(quote)` → `{ author, text, placeholder }`: `'You'` vs the author title; the text to show, falling back through *Original message not found* / *View-once media* / *Photo* / *Video* / *Voice message* / *Audio* / file name / *Attachment*; `placeholder: true` when that text is a description rather than the real body (rendered dim/italic, and never with `bodyRanges`).
 - `jumboSizeFor` gains the quote veto — Signal's own jumbomoji predicate refuses a message carrying a quote, and this UI now has one to veto on (the comment there says so already).
 
-**public/app.js** — `quoteEl(msg)` builds the box (`createElement` only; text is attacker-influenced), inserted as the bubble's first child, above attachments/text. Real body text renders through `renderFormatted` with the quote's own ranges. The thumbnail is a fixed 44×44 box so late-arriving bytes never reflow the thread (the "load older" anchor depends on that).
+**public/app.js** — `quoteEl(msg)` builds the box (`createElement` only; text is attacker-influenced), inserted as the bubble's first child, above attachments/text. Real body text renders through `renderFormatted` with the quote's own ranges. The thumbnail is a fixed 40×40 box so late-arriving bytes never reflow the thread (the "load older" anchor depends on that).
 
 **public/style.css** — `.quote` box: left bar coloured with `colorFor(authorId)` (the same palette as group author labels), dim background, author line, two-line-clamped text, square thumbnail.
 
@@ -57,5 +57,5 @@ Probed too: `enqueueMessageForSend` takes a `quote` and stores it **verbatim** o
 
 ## Out of scope (follow-up cards)
 
-- **Composing** a reply from this UI (a "Reply" menu item + `quote` on the send path).
 - Click-a-quote-to-jump-to-the-original scrolling/highlight.
+- A **thumbnail on an outgoing** reply to a photo (needs Signal's attachment-copy helpers; see above).

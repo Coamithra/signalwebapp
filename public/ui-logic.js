@@ -69,9 +69,11 @@ export function quoteSummary(quote) {
   if (!quote) return null;
   const author = quote.isMe ? 'You' : (quote.authorTitle || 'Unknown');
   const described = (text) => ({ author, text, placeholder: true });
-  // Checked before the text: a quote of a since-deleted message keeps the text
-  // Signal copied at reply time, but showing it would contradict the tombstone
-  // now standing in the thread above.
+  // Checked before the text, which a quote carries either way: this flag means
+  // the original was ALREADY gone when the reply arrived, so the copied text is
+  // whatever the sender's client had and there is nothing here to scroll to.
+  // (It says nothing about a message deleted *after* the reply landed — that
+  // quote still shows its copied body, as Signal's own does.)
   if (quote.referencedMessageNotFound) return described('Original message not found');
   if (quote.isViewOnce) return described('View-once media');
   if (quote.isGiftBadge) return described('Gift badge');
@@ -87,6 +89,27 @@ export function quoteSummary(quote) {
     return described(att.kind === 'file' && att.fileName ? att.fileName : label);
   }
   return described('Message');
+}
+
+// A send refused because the message being replied to can't be quoted. Those
+// come back as our own fixed 'quote-*' tokens, and they are all terminal for
+// THIS reply: Signal reloading empties messagesLookup down to the newest window,
+// so a reply aimed at an older message dies here and would fail identically on
+// every retry. So the caller drops the reply target as well as saying why —
+// otherwise the user is left retrying a send that cannot succeed.
+// -> a sentence, or null when the error isn't about the quote at all.
+export function quoteSendFailure(error) {
+  switch (error) {
+    case 'quote-message-not-loaded':
+    case 'quote-message-deleted':
+      return 'That message can no longer be quoted — sent nothing. Try again to send it without the reply.';
+    case 'quote-wrong-conversation':
+      return 'That message is in another chat — sent nothing.';
+    case 'quote-no-author':
+      return "That message has no sender Signal can quote — sent nothing. Try again to send it without the reply.";
+    default:
+      return null;
+  }
 }
 
 // ---------- jumbomoji ----------

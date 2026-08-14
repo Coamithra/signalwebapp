@@ -15,7 +15,7 @@ import {
   kindForType, iconForKind, parseEmojiFreq, nextEmojiFreq,
   EMOJI_FREQ_MAX, EMOJI_FREQ_HALFLIFE, EMOJI_FREQ_FLOOR,
   parseGifCommand, evictOldestTldr, retryErrorReason, tldrBubble, tldrHint,
-  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI, quoteSummary,
+  jumbomojiSize, jumboSizeFor, JUMBO_MAX_EMOJI, quoteSummary, quoteSendFailure,
   hasLink, safeHttpUrl, previewDomain,
 } from '../public/ui-logic.js';
 
@@ -566,6 +566,29 @@ test('quoteSummary prefers the special states over the copied text', () => {
     { author: 'Bob', text: 'View-once media', placeholder: true });
   assert.deepEqual(quoteSummary({ ...base, isGiftBadge: true }),
     { author: 'Bob', text: 'Gift badge', placeholder: true });
+});
+
+test('quoteSendFailure explains a refused quote, and only a refused quote', () => {
+  // Every quote-* token the page API can return has to produce a sentence: the
+  // raw token is what the toast would otherwise show, and the caller keys the
+  // "drop the reply target" behaviour off a non-null answer here.
+  for (const tok of ['quote-message-not-loaded', 'quote-message-deleted', 'quote-wrong-conversation', 'quote-no-author']) {
+    const msg = quoteSendFailure(tok);
+    assert.ok(msg && !msg.includes('quote-'), `${tok} -> ${msg}`);
+  }
+  // Anything else is an ordinary send failure and keeps its own wording.
+  for (const other of ['conversation-not-found', 'empty-body', undefined, '', 'Failed to fetch']) {
+    assert.equal(quoteSendFailure(other), null, String(other));
+  }
+});
+
+// The page API's quote-* error tags and the frontend's mapping of them are
+// wired only by string; a new tag with no sentence would surface raw in a toast.
+test('every quote-* error page-api.js can return has a sentence', async () => {
+  const api = await readFile(path.join(here, '..', 'src', 'page-api.js'), 'utf8');
+  const tags = new Set([...api.matchAll(/'(quote-[a-z-]+)'/g)].map((m) => m[1]));
+  assert.ok(tags.size >= 4, `expected the quote-* tags, found ${[...tags]}`);
+  for (const tag of tags) assert.ok(quoteSendFailure(tag), `${tag} has no sentence`);
 });
 
 // ---------- jumbomoji ----------

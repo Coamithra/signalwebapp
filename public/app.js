@@ -8,7 +8,8 @@ import {
 import {
   colorFor, initials, previewText, menuActionsFor, kindForType, iconForKind,
   parseEmojiFreq, nextEmojiFreq, parseGifCommand, evictOldestTldr, retryErrorReason,
-  tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain, quoteSummary,
+  tldrBubble, tldrHint, jumboSizeFor, hasLink, safeHttpUrl, previewDomain,
+  quoteSummary, quoteSendFailure,
 } from './ui-logic.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -608,10 +609,14 @@ function startEdit(msg) {
   const source = toMarkdown(msg.text || '', msg.bodyRanges);
   // The message's non-text parts ride along so the optimistic repaint in
   // submitEdit can re-decide jumbomoji without re-finding the message. Signal's
-  // edit is text-only, so these are exactly as true after the edit as before.
+  // edit is text-only, so these are exactly as true after the edit as before —
+  // and every one of jumboSizeFor's vetoes has to be here, or editing a reply
+  // (or a link-preview message) down to a bare emoji paints a 56px glyph on a
+  // bubble that still holds a quote box or a card.
   state.editing = {
     messageId: msg.id, original: source,
     attachments: msg.attachments || [], isViewOnce: !!msg.isViewOnce,
+    preview: msg.preview || [], quote: msg.quote || null,
   };
   const input = $('#composerInput');
   closeEmojiPop(); // the box is being replaced wholesale; any suggestions are stale
@@ -1197,7 +1202,8 @@ async function sendMessage() {
     scheduleRefreshActive();
     maybeMarkActiveRead(); // replying to an unread thread clears its badge now, not on the next resync
   } catch (err) {
-    toast('Failed to send: ' + err.message, true);
+    const quoteFailed = quoteSendFailure(err.message);
+    toast(quoteFailed || 'Failed to send: ' + err.message, true);
     optimistic.querySelector('.tick')?.replaceWith(
       Object.assign(document.createElement('span'), { className: 'tick error', textContent: '⚠' }),
     );
@@ -1207,8 +1213,10 @@ async function sendMessage() {
       renderPending();
     }
     // ...and the reply target, so a retry is still a reply. Only if nothing has
-    // replaced it in the meantime (the send is awaited; the user may have moved on).
-    if (replyTo && !state.replyTo) { state.replyTo = replyTo; renderReplyBanner(); }
+    // replaced it in the meantime (the send is awaited; the user may have moved
+    // on) — and never when the quote itself is what failed, or the retry would
+    // hit the same wall and the message could never go out at all.
+    if (replyTo && !state.replyTo && !quoteFailed) { state.replyTo = replyTo; renderReplyBanner(); }
     if (raw) input.value = input.value || raw;
     updateSendEnabled();
   } finally {
@@ -1602,11 +1610,12 @@ async function sendGif(g) {
     scheduleRefreshActive();
     maybeMarkActiveRead();
   } catch (err) {
-    toast('Failed to send GIF: ' + err.message, true);
+    const quoteFailed = quoteSendFailure(err.message);
+    toast(quoteFailed || 'Failed to send GIF: ' + err.message, true);
     optimistic.querySelector('.tick')?.replaceWith(
       Object.assign(document.createElement('span'), { className: 'tick error', textContent: '⚠' }),
     );
-    if (replyTo && !state.replyTo) { state.replyTo = replyTo; renderReplyBanner(); }
+    if (replyTo && !state.replyTo && !quoteFailed) { state.replyTo = replyTo; renderReplyBanner(); }
     if (text) input.value = input.value || text; // give the caption back
     updateSendEnabled();
   } finally {
