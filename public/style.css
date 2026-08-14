@@ -552,6 +552,10 @@ a.link-preview:hover { background: rgba(0, 0, 0, .32); }
 }
 .msg-menu-item:hover { background: var(--bg-hover); }
 .msg-menu-item.danger { color: var(--danger); }
+/* An inert entry that exists to explain why the action isn't on offer
+   ("Already summarized"), so it stays readable but never looks clickable. */
+.msg-menu-item:disabled { color: var(--text-dim); cursor: default; }
+.msg-menu-item:disabled:hover { background: transparent; }
 
 .edited-label { font-style: italic; opacity: .85; }
 

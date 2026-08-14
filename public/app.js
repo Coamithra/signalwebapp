@@ -525,9 +525,14 @@ function messageRow(msg, prev, isGroup) {
 // Which actions apply to a given message. Edit only makes sense for your own
 // text messages; "Delete for everyone" only for your own (Signal's unsend);
 // "Delete for me" (local) is always available. Tombstones/incoming get just the
-// local delete. The eligibility rules live in ui-logic.js (testable); this only
-// binds the action names to labels and handlers.
+// local delete. "Summarize in chat" appears on any message the server tagged with
+// a YouTube link, whoever sent it. The eligibility rules live in ui-logic.js
+// (testable); this only binds the action names to labels and handlers.
 const MENU_ACTIONS = {
+  summarize: (msg) => ({ label: 'Summarize in chat', onClick: () => startTldr(msg.youtube.url, 'summarize') }),
+  // Inert on purpose: see menuActionsFor. Carries no onClick, so openMessageMenu
+  // renders it as a disabled button.
+  summarized: () => ({ label: 'Already summarized', disabled: true }),
   edit: (msg) => ({ label: 'Edit', onClick: () => startEdit(msg) }),
   deleteForEveryone: (msg) => ({ label: 'Delete for everyone', danger: true, onClick: () => confirmDelete(msg, true) }),
   deleteForMe: (msg) => ({ label: 'Delete for me', danger: true, onClick: () => confirmDelete(msg, false) }),
@@ -578,7 +583,11 @@ function openMessageMenu(msg, anchorBtn) {
   for (const it of items) {
     menu.appendChild(el('button', {
       class: 'msg-menu-item' + (it.danger ? ' danger' : ''), text: it.label,
-      onclick: () => { closeMessageMenu(); it.onClick(); },
+      // A disabled entry is there to explain why the action isn't offered, so it
+      // gets neither the attribute's click-swallowing nor a handler to swallow.
+      ...(it.disabled
+        ? { disabled: '' }
+        : { onclick: () => { closeMessageMenu(); it.onClick(); } }),
     }));
   }
   document.body.appendChild(menu);
@@ -1978,17 +1987,21 @@ async function refreshThreadMenuIfOpen(id) {
   } catch { /* leave the menu as it is */ }
 }
 
-// Manual retry: ask the server to re-run this link's summary. Optimistically store
-// the first real stage ('fetching', what the server emits first) so the label
-// doesn't visibly run backwards; the rest stream back over SSE.
-async function retryTldr(url) {
+// Ask the server to run one link's summary now, and follow it in the status
+// bubble. `kind` picks the endpoint: 'retry' re-runs a link whose summary failed
+// (ungated server-side — it's the recovery path), 'summarize' is the message
+// menu's explicit action, which the server refuses once that video has a summary
+// in this chat. Optimistically store the first real stage ('fetching', what the
+// server emits first) so the label doesn't visibly run backwards; the rest stream
+// back over SSE, identically for both.
+async function startTldr(url, kind) {
   const id = state.activeId;
   if (!id || !url) return;
   const key = String(id);
   setTldrFor(key, { stage: 'fetching', reason: null, url });
   renderActiveTldr();
   try {
-    const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/retry`, {
+    const r = await api(`/api/conversations/${encodeURIComponent(id)}/tldr/${kind}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }),
     });
     if (!r.ok) throw new Error(r.error || 'retry failed');
@@ -1996,11 +2009,22 @@ async function retryTldr(url) {
     // Only show the failure if we're still tracking this same link for that chat.
     const cur = tldrByConv.get(key);
     if (cur && cur.url === url) {
-      setTldrFor(key, { stage: 'failed', reason: retryErrorReason(err.message), url });
+      // A refusal is not a failure: nothing ran, and the 'failed' bubble's Retry
+      // goes to the ungated /tldr/retry, which would send the duplicate the
+      // refusal just prevented. 'refused' is the dismiss-only notice instead.
+      const stage = REFUSALS.has(err.message) ? 'refused' : 'failed';
+      setTldrFor(key, { stage, reason: retryErrorReason(err.message), url });
       renderActiveTldr();
     }
   }
 }
+
+// The server's two "I declined to start" tokens, as opposed to "a run failed".
+const REFUSALS = new Set(['already-summarized', 'in-progress']);
+
+// The bubble's Retry button, which only ever re-runs a link the pipeline already
+// had in hand.
+const retryTldr = (url) => startTldr(url, 'retry');
 
 // ---------- status + toast ----------
 function setStatus(status) {

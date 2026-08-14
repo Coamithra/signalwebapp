@@ -84,6 +84,31 @@ test('menuActionsFor: edit needs your own live text message', () => {
   assert.deepEqual(menuActionsFor({ ...base, deletedForEveryone: true }), ['deleteForMe']);
 });
 
+test('menuActionsFor: summarize rides on the server-attached youtube field', () => {
+  const yt = { url: 'https://youtu.be/dQw4w9WgXcQ', videoId: 'dQw4w9WgXcQ', summarized: false };
+  // Leads the list, and applies to a message you did NOT send — the whole point.
+  assert.deepEqual(
+    menuActionsFor({ direction: 'incoming', text: 'watch this https://youtu.be/dQw4w9WgXcQ', youtube: yt }),
+    ['summarize', 'deleteForMe'],
+  );
+  assert.deepEqual(
+    menuActionsFor({ direction: 'outgoing', text: 'mine https://youtu.be/dQw4w9WgXcQ', youtube: yt }),
+    ['summarize', 'edit', 'deleteForEveryone', 'deleteForMe'],
+  );
+  // Already done in this chat: the entry stays, disabled, rather than vanishing.
+  assert.deepEqual(
+    menuActionsFor({ direction: 'incoming', text: 'x', youtube: { ...yt, summarized: true } }),
+    ['summarized', 'deleteForMe'],
+  );
+  // No link -> the server attached nothing -> no entry at all.
+  assert.deepEqual(menuActionsFor({ direction: 'incoming', text: 'https://example.com' }), ['deleteForMe']);
+  // A tombstone has no body left to summarize.
+  assert.deepEqual(
+    menuActionsFor({ direction: 'outgoing', text: 'x', youtube: yt, deletedForEveryone: true }),
+    ['deleteForMe'],
+  );
+});
+
 // ---------- attachments ----------
 
 test('kindForType / iconForKind', () => {
@@ -397,12 +422,30 @@ test('evictOldestTldr: an over-cap map holding only the active chat is left alon
 test('retryErrorReason', () => {
   assert.equal(retryErrorReason('not-configured'), 'auto-TLDR is not configured');
   assert.equal(retryErrorReason('bad-url'), 'not a recognized YouTube link');
+  assert.equal(retryErrorReason('already-summarized'), 'that video already has a TLDR in this chat');
+  assert.equal(retryErrorReason('in-progress'), 'that video is already being summarized');
   assert.equal(retryErrorReason('Claude usage limit reached'), 'Claude usage limit reached');
   assert.equal(retryErrorReason(''), 'retry failed');
   assert.equal(retryErrorReason(undefined), 'retry failed');
 });
 
 // ---------- auto-TLDR status bubble model ----------
+
+// A refusal must never render as 'failed': that stage always offers Retry, and
+// Retry goes to the ungated /tldr/retry — one click past the gate that just
+// refused, and the duplicate TLDR is sent.
+test('tldrBubble: a refusal is a dismiss-only notice, never retryable', () => {
+  for (const token of ['already-summarized', 'in-progress']) {
+    const b = tldrBubble('refused', retryErrorReason(token));
+    assert.equal(b.retry, false, token);
+    assert.equal(b.dismiss, true, token);
+    assert.equal(b.tone, 'info', token);
+    assert.match(b.label, /Not summarized: /, token);
+    assert.doesNotMatch(b.label, /failed/i, token);
+  }
+  // No reason (a token the server has not sent before) still reads sensibly.
+  assert.equal(tldrBubble('refused').label, 'Not summarized: already done');
+});
 
 test('tldrBubble: working stages are work-toned, with no buttons', () => {
   for (const stage of ['fetching', 'summarizing', 'researching']) {
@@ -541,7 +584,9 @@ test('every action menuActionsFor can emit has a handler in app.js', async () =>
     for (const text of ['hi', '', '   ', undefined]) {
       for (const deletedForEveryone of [true, false]) {
         for (const isViewOnce of [true, false]) {
-          for (const a of menuActionsFor({ direction, text, deletedForEveryone, isViewOnce })) emitted.add(a);
+          for (const youtube of [undefined, { summarized: false }, { summarized: true }]) {
+            for (const a of menuActionsFor({ direction, text, deletedForEveryone, isViewOnce, youtube })) emitted.add(a);
+          }
         }
       }
     }

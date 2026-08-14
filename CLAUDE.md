@@ -53,7 +53,7 @@ evaluate must target the isolated context's id.
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrl`/`parseVideoId`) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
-| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, and the realtime watcher. Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
+| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, the realtime watcher, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
 | [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`. |
@@ -443,6 +443,39 @@ evaluate must target the isolated context's id.
   when you reopen a chat mid-run; it's cleared on a page reload / server restart
   (no persisted log). A sidebar / cross-conversation indicator is still out of
   scope.
+- **"Summarize in chat" — the manual TLDR, from a message's `⋯` menu.** The watcher only ever
+  fires on **your own outgoing** links, in an **enabled** chat, **newer than the per-chat floor**,
+  which leaves the two cases people actually want unreachable: a video *someone else* posted, and
+  one of your own with auto-TLDR off. `summarizeNow(convId, url)` in [src/tldr.js](src/tldr.js)
+  is that entry point (`POST /api/conversations/:id/tldr/summarize {url}`) and ignores all three
+  gates by design. It is a **separate route from `tldr/retry`** — retry is the recovery path after
+  a failure and must stay ungated, while this one is refused for a video that already has a
+  summary here. Both share `summarizeAndSend`, so the status bubble, its stage events and its
+  Retry button work identically for either.
+  ⚠️ **YouTube-link detection stays server-side.** The browser has no `parseVideoId` and must not
+  grow one: `annotateYouTube` tags each message on its way out of
+  `GET /api/conversations/:id/messages` (the same route `?older=1` uses, so scrolled-back history
+  is tagged too) with `youtube: { url, videoId, summarized }`, and `menuActionsFor` in
+  [public/ui-logic.js](public/ui-logic.js) does nothing more than read that field. Two parsers
+  that disagree about what counts as a YouTube link is exactly how you get a menu entry the
+  server then rejects as `bad-url`. A message with no link is left **untouched** — `msg.youtube`
+  is absent, not null.
+  **Already-summarized bookkeeping** is a set of `${convId}:${videoId}` — per conversation,
+  because the same video in two chats is two legitimate summaries — recorded **only on a
+  successful send** (a run that died at the transcript, at Claude or at the send leaves nothing to
+  read and must stay re-runnable) and **persisted next to `enabled` in `.tldr-settings.json`,
+  FIFO-bounded at `SUMMARIZED_CAP`**: a "won't let me do it twice" that quietly resets on a server
+  restart is not the promise. An `inFlight` set of the same keys covers the gap that
+  record-on-success alone leaves, and **all three entry points consult it** — `summarizeNow`,
+  `retry`, and the watcher loop, whose own `processed` set is keyed by *message* and so cannot
+  see that a manual run for that *video* is already going. The watcher is deliberately **not**
+  gated on `summarized`: that would silently stop a re-posted link from getting its usual
+  automatic TLDR, which is a change to the old feature rather than part of this one. A refusal
+  (`already-summarized` / `in-progress`) renders as the dismiss-only **`refused`** bubble, never
+  `failed` — `failed` always offers Retry, and Retry posts to the ungated `tldr/retry`, so one
+  more click would send the duplicate the refusal just prevented. The menu entry goes **disabled**
+  (`summarized` -> *Already summarized*) rather than vanishing; an option that disappears reads as
+  a bug.
 - **Is the CLI usable? — ask `claude auth status`, never `claude --version`.** `--version`
   exits 0 for a CLI that is installed but logged **out**, so a boot probe built on it once
   reported "configured" while every summary died at `claude-auth`; for a long time the rule
