@@ -202,9 +202,13 @@ evaluate must target the isolated context's id.
   Autoplay is **muted by definition** (browsers block it otherwise), so a playing clip carries a
   corner sound toggle - offered on every clip, because whether a video has an audio track cannot
   be answered before it plays and withholding the control on one that *does* is the worse miss -
-  and one click on the clip itself releases it: paused, with its native `controls` back. If a
-  resumed `play()` is rejected because the user unmuted it, `playClip` re-mutes and retries once;
-  sound is never the reason a clip stops looping.
+  and one click on the clip itself releases it: paused, unmuted, with its native `controls` back
+  (dropping `controls` also drops the element out of the tab order, so a promoted clip carries its
+  own `tabindex` and Enter/Space to the same escape hatch). If a resumed `play()` is refused
+  because the user unmuted it, `playClip` re-mutes and retries once - sound is never the reason a
+  clip stops looping - but **only on `NotAllowedError`**: a `play()` rejection is far more often
+  the `AbortError` from the observer pausing a clip that was still spinning up, and re-muting on
+  that would silently undo the unmute on every scroll past.
 - **Send a GIF:** the composer's `/gif` command (and the **GIF** button) open a
   Giphy-backed picker. The key stays server-side: `GET /api/gif/search?q=` proxies
   Giphy search/trending (needs `GIPHY_API_KEY`; if unset, the picker shows a

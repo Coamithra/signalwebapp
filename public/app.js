@@ -240,7 +240,12 @@ function attachmentEl(msg, att, i) {
     const vbox = mediaBox(att);
     if (vbox) { v.style.width = `${vbox.w}px`; v.style.height = `${vbox.h}px`; }
     if (att.hasThumbnail) v.setAttribute('poster', `${src}?thumb=1`);
-    v.addEventListener('error', () => v.replaceWith(attachmentChip(att, "Couldn't load")));
+    v.addEventListener('error', () => {
+      // replaceWith swaps the <video> alone; the clip's sound button lives on
+      // the wrap and would be left pinned to the corner of the error chip.
+      if (v.classList.contains('att-clip')) releaseClip(v);
+      v.replaceWith(attachmentChip(att, "Couldn't load"));
+    });
     // Duration isn't known until metadata arrives, so a short clip can only
     // become an autoplaying one after the fact — not while the row is built.
     v.addEventListener('loadedmetadata', () => maybeAutoplayClip(v, att), { once: true });
@@ -311,16 +316,36 @@ function maybeAutoplayClip(v, att) {
     wrap.appendChild(clipSoundBtn(v));
   }
   // Autoplay has no controls, so one click hands the clip back to the user:
-  // paused, with the real controls, scrubbable like any other video.
-  v.addEventListener('click', () => releaseClip(v), { once: true });
+  // paused, with the real controls, scrubbable like any other video. Dropping
+  // `controls` also drops the element out of the tab order, so the promoted clip
+  // carries its own tabindex + Enter/Space — a keyboard user has to be able to
+  // reach the same escape hatch the mouse has.
+  const onKey = (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault(); // Space would scroll the thread out from under them
+    release();
+  };
+  const release = () => {
+    // Both listeners go, or a later click on the restored native controls would
+    // pause whatever the user had just started playing.
+    v.removeEventListener('click', release);
+    v.removeEventListener('keydown', onKey);
+    releaseClip(v);
+  };
+  v.tabIndex = 0;
+  v.addEventListener('click', release);
+  v.addEventListener('keydown', onKey);
   clipObserver().observe(v);
 }
 
 function playClip(v) {
-  v.play().catch(() => {
+  v.play().catch((err) => {
     // Chrome's autoplay policy can refuse an *unmuted* clip once it resumes.
     // Sound is never worth a clip that stopped looping: drop back to silent.
-    if (v.muted) return;
+    // Only that refusal, though — a rejection is far more often the AbortError
+    // from the observer pausing a clip that was still spinning up, and re-muting
+    // on that would silently undo the unmute on every scroll past.
+    if (v.muted || err?.name !== 'NotAllowedError') return;
     v.muted = true;
     syncClipSound(v);
     v.play().catch(() => {});
@@ -331,8 +356,10 @@ function releaseClip(v) {
   clipObserver().unobserve(v);
   v.pause();
   v.loop = false;
+  v.muted = false; // an ordinary video in this thread has sound; a 14s one shouldn't differ
   v.classList.remove('att-clip');
-  v.setAttribute('controls', ''); // native controls carry their own volume from here
+  v.removeAttribute('tabindex'); // <video controls> is focusable on its own again
+  v.setAttribute('controls', '');
   const wrap = v.parentElement;
   if (wrap) {
     wrap.classList.remove('att-clip-wrap');
