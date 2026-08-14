@@ -233,11 +233,17 @@ export const INSTALL_SCRIPT = `(function () {
   // coupled to the conversation being open/selected in Signal's own window, the
   // same way processAttachments is (see CLAUDE.md).
   //
-  // ⚠️ Signal's own makeQuote additionally copies the original attachment's
-  // thumbnail into the quote. That needs the attachment-copy helpers current
-  // Signal no longer exposes, so a reply to a photo carries the attachment's
-  // type and name but no thumbnail — recipients render the type label instead.
-  function buildQuote(conversationId, messageId) {
+  // Signal's own makeQuote additionally copies the original attachment's
+  // thumbnail into the quote, via conversation.getQuoteAttachment(attachments,
+  // preview, sticker) — an instance method on the model (probed on 8.23; the
+  // old window.Signal.Migrations namespace stays gone, this replaced it for our
+  // purposes). It returns Signal's own quote-attachment shape, thumbnail
+  // included (path + localKey + in-memory data), which enqueueMessageForSend
+  // stores verbatim like the rest of the quote — so recipients get a real
+  // preview instead of the attachment's type label. Best-effort: if the method
+  // vanishes in a future Signal or throws, fall back to the thumbnail-less
+  // shape this used to build rather than refusing the reply.
+  async function buildQuote(conversationId, messageId) {
     var m = window.reduxStore.getState().conversations.messagesLookup[messageId];
     if (!m) return { error: 'quote-message-not-loaded' };
     if (m.conversationId && m.conversationId !== conversationId) return { error: 'quote-wrong-conversation' };
@@ -252,10 +258,18 @@ export const INSTALL_SCRIPT = `(function () {
     var atts = [];
     var a = Array.isArray(m.attachments) ? m.attachments[0] : null;
     if (a) {
-      atts.push({
-        contentType: a.contentType || 'application/octet-stream',
-        fileName: a.fileName || null,
-      });
+      try {
+        var conv = window.ConversationController.get(conversationId);
+        if (conv && typeof conv.getQuoteAttachment === 'function') {
+          atts = await conv.getQuoteAttachment(m.attachments, m.preview, m.sticker);
+        }
+      } catch (e) { atts = []; }
+      if (!Array.isArray(atts) || !atts.length) {
+        atts = [{
+          contentType: a.contentType || 'application/octet-stream',
+          fileName: a.fileName || null,
+        }];
+      }
     }
     return {
       quote: {
@@ -717,7 +731,7 @@ export const INSTALL_SCRIPT = `(function () {
           // Unlike a link preview, a failed quote is NOT a nicety to swallow:
           // the user asked to reply to something specific, and a reply that
           // silently loses its quote reads as a non-sequitur in the chat.
-          var q = buildQuote(id, opts.quoteMessageId);
+          var q = await buildQuote(id, opts.quoteMessageId);
           if (q.error) return { ok: false, error: q.error };
           quote = q.quote;
         }
@@ -765,7 +779,7 @@ export const INSTALL_SCRIPT = `(function () {
       try {
         var quote;
         if (opts.quoteMessageId) {
-          var q = buildQuote(id, opts.quoteMessageId);
+          var q = await buildQuote(id, opts.quoteMessageId);
           if (q.error) return { ok: false, error: q.error };
           quote = q.quote;
         }

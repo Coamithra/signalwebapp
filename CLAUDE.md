@@ -291,10 +291,14 @@ evaluate must target the isolated context's id.
   `composer.conversations[cid]` with no `quotedMessage` at all when driven headlessly — it
   needs the conversation selected in Signal's own window. The routes take a
   `quoteMessageId` (`/send`, `/send-gif`); only the *id* crosses the wire, because Signal
-  already has the message. ⚠️ **An outgoing reply carries no thumbnail**: Signal's own
-  `makeQuote` copies the original attachment's thumbnail, which needs the attachment-copy
-  helpers current Signal no longer exposes — recipients see the attachment's type label
-  instead. Everything else (text, author, ranges) is identical to a native reply.
+  already has the message. **Outgoing replies carry a real thumbnail** since the re-probe on
+  8.23: the old `window.Signal.Migrations` attachment-copy namespace stays gone, but the
+  conversation **model** exposes `getQuoteAttachment(attachments, preview, sticker)` — the same
+  helper Signal's own `makeQuote` uses — which returns the quote-attachment shape thumbnail
+  included (path + localKey + in-memory data). `buildQuote` awaits it, falling back to the old
+  thumbnail-less `{contentType, fileName}` shape if it ever vanishes or throws, so a reply is
+  never refused over its preview. Everything else (text, author, ranges) is identical to a
+  native reply.
   **Clicking a quote box jumps to the original** (Signal Desktop behaviour): `quoteTargetIndex`
   in [public/ui-logic.js](public/ui-logic.js) finds it in the loaded window by matching
   `quote.id` against `msg.timestamp` (both are the original's `sent_at`); `jumpToQuoted` in

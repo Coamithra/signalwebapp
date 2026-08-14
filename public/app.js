@@ -579,7 +579,10 @@ function flashMessageRow(mid) {
   row.classList.remove('flash');
   void row.offsetWidth; // restart the animation when the same row is hit twice
   row.classList.add('flash');
-  row.addEventListener('animationend', () => row.classList.remove('flash'), { once: true });
+  // A timer, not animationend: Chrome defers animation events while the tab is
+  // hidden/occluded (probed), and a class that never comes off would replay the
+  // pulse on the next repaint of that row. Slightly past the animation's 1.4s.
+  setTimeout(() => row.classList.remove('flash'), 1600);
 }
 
 function messageRow(msg, prev, isGroup) {
