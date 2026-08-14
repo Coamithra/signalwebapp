@@ -23,21 +23,24 @@ export class SignalBridge extends EventEmitter {
     });
     this.cdp.on('disconnected', () => {
       this._injected = false;
-      this.status = 'disconnected';
-      this.emit('status', this.status);
+      this._setStatus('disconnected');
     });
     this.cdp.on('reconnecting', () => {
-      this.status = 'connecting';
-      this.emit('status', this.status);
+      this._setStatus('connecting');
     });
+  }
+
+  // Emits only on transition, so SSE never carries a status that didn't move.
+  _setStatus(status) {
+    if (this.status === status) return;
+    this.status = status;
+    this.emit('status', status);
   }
 
   async start() {
     this.cdp.start();
     await this.cdp.whenReady();
-    await this._ensureInjected();
-    this.status = 'ready';
-    this.emit('status', this.status);
+    await this._ensureInjected(); // raises status to 'ready'
     this._startDrainLoop();
   }
 
@@ -53,6 +56,12 @@ export class SignalBridge extends EventEmitter {
       throw new Error('Signal app not fully loaded yet');
     }
     this._injected = true;
+    // The way back up: the event handlers above only ever lower the status, so
+    // a successful injection is what declares the bridge working — HERE, not in
+    // the drain loop, because an RPC call racing the next drain tick injects
+    // first and the tick would then skip its raise, leaving /api/status on
+    // 'connecting' forever (with every call succeeding) after a reconnect.
+    this._setStatus('ready');
   }
 
   _startDrainLoop() {
@@ -67,7 +76,7 @@ export class SignalBridge extends EventEmitter {
   async _drain() {
     if (!this.cdp.isConnected) return;
     if (!this._injected) {
-      await this._ensureInjected();
+      await this._ensureInjected(); // raises status back to 'ready'
       return;
     }
     const res = await this.cdp.evaluate(DRAIN_SCRIPT);
