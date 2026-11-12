@@ -370,6 +370,52 @@ export const INSTALL_SCRIPT = `(function () {
     return out;
   }
 
+  // Write attachment bytes to Signal's attachments dir in its v2 at-rest format
+  // and return the on-disk attachment fields enqueueMessageForSend expects.
+  //
+  // Signal 8.35 stopped accepting in-memory attachments: saveMessage asserts
+  // "Attempting to save a message with binary attachment data", and the schema
+  // step that used to move data to disk (v3, migrateDataToFileSystem) is now a
+  // no-op. Signal's own composer writes each file to disk before sending, but
+  // its writer is module-internal, unreachable from window. So this mirrors
+  // Signal's encryptAttachmentV2 for local files: 64 random key bytes (AES key
+  // then MAC key), plaintext zero-padded to Signal's size bucket, AES-256-CBC,
+  // IV prepended, HMAC-SHA256 over IV+ciphertext appended; the file goes at
+  // <2 hex>/<64 hex> under attachments.noindex. Signal decrypts it with
+  // localKey + size (padding trimmed), the same as one it wrote itself.
+  // The preload is not sandboxed, so process.getBuiltinModule reaches node:fs.
+  // If this ever breaks after a Signal update, re-probe the format
+  // (encryptAttachmentV2 / writeNewAttachmentData in the app.asar bundle).
+  async function writeAttachmentToDisk(data) {
+    if (typeof process === 'undefined' || typeof process.getBuiltinModule !== 'function') {
+      throw new Error('attachment-write-unavailable');
+    }
+    var nodeCrypto = process.getBuiltinModule('node:crypto');
+    var fsp = process.getBuiltinModule('node:fs/promises');
+    var path = process.getBuiltinModule('node:path');
+    var size = data.byteLength;
+    var bucket = Math.max(541, Math.floor(Math.pow(1.05, Math.ceil(Math.log(size) / Math.log(1.05)))));
+    var padded = new Uint8Array(Math.max(bucket, size));
+    padded.set(data);
+    var keys = nodeCrypto.randomBytes(64);
+    var iv = nodeCrypto.randomBytes(16);
+    var cipher = nodeCrypto.createCipheriv('aes-256-cbc', keys.subarray(0, 32), iv);
+    var ciphertext = Buffer.concat([cipher.update(padded), cipher.final()]);
+    var mac = nodeCrypto.createHmac('sha256', keys.subarray(32, 64)).update(iv).update(ciphertext).digest();
+    var name = nodeCrypto.randomBytes(32).toString('hex');
+    var rel = path.join(name.slice(0, 2), name);
+    var abs = path.join(window.SignalContext.getPath('userData'), 'attachments.noindex', rel);
+    await fsp.mkdir(path.dirname(abs), { recursive: true });
+    await fsp.writeFile(abs, Buffer.concat([iv, ciphertext, mac]));
+    return {
+      version: 2,
+      path: rel,
+      localKey: keys.toString('base64'),
+      plaintextHash: nodeCrypto.createHash('sha256').update(data).digest('hex'),
+      size: size,
+    };
+  }
+
   // Aggregate per-recipient send state into a single status for outgoing msgs.
   function computeOutgoingStatus(m) {
     if (Array.isArray(m.errors) && m.errors.length) return 'error';
@@ -802,11 +848,11 @@ export const INSTALL_SCRIPT = `(function () {
     // Send a message with one or more attachments (optionally with a text body).
     // files: [{ fileName, contentType, base64, width?, height? }].
     //
-    // We pass *in-memory* attachment objects ({ data, contentType, size,
-    // fileName }) straight to enqueueMessageForSend — the SAME primitive
-    // sendText uses. Signal's own send path finalizes each one: it writes and
-    // encrypts the bytes to disk (v2 + per-file localKey), generates a
-    // thumbnail, uploads to the CDN, and delivers. This deliberately avoids the
+    // Each file is written to disk first (writeAttachmentToDisk: v2 encrypted,
+    // per-file localKey — Signal 8.35+ refuses in-memory data), then the
+    // on-disk attachment objects go to enqueueMessageForSend — the SAME
+    // primitive sendText uses. Signal's own send path does the rest: thumbnail,
+    // CDN upload, delivery. This deliberately avoids the
     // redux composer (processAttachments/sendMultiMediaMessage): that path is
     // coupled to the conversation being open/mounted in Signal's own window, so
     // driving it headlessly would be fragile and disruptive. (Confirmed by
@@ -827,12 +873,16 @@ export const INSTALL_SCRIPT = `(function () {
         for (var i = 0; i < files.length; i++) {
           var f = files[i] || {};
           if (typeof f.base64 !== 'string' || !f.base64) return { ok: false, error: 'empty-file' };
-          var data = await base64ToBytes(f.base64);
+          var onDisk = await writeAttachmentToDisk(await base64ToBytes(f.base64));
           var att = {
             contentType: f.contentType || 'application/octet-stream',
-            data: data,
-            size: data.byteLength,
+            version: onDisk.version,
+            path: onDisk.path,
+            localKey: onDisk.localKey,
+            plaintextHash: onDisk.plaintextHash,
+            size: onDisk.size,
             fileName: f.fileName || 'attachment',
+            clientUuid: crypto.randomUUID(),
             pending: false,
           };
           // Dimensions help images render at the right aspect ratio; optional.
