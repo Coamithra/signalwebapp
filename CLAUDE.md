@@ -90,10 +90,22 @@ evaluate must target the isolated context's id.
   throws `undefined.map` if you pass only `{ body }`. `bodyRanges` carries the formatting
   (see **Text formatting** below); `[]` for unformatted text.
 - **Send media** — `window.__sb.sendMedia(id, body, files)` where
-  `files = [{ fileName, contentType, base64, width?, height? }]`. It hands Signal
-  *in-memory* attachment objects (`{ data: Uint8Array, contentType, size, fileName }`)
-  through the **same `enqueueMessageForSend`** as text — Signal's own send path then
-  writes+encrypts them to disk (v2/`localKey`), thumbnails, uploads to CDN, and delivers.
+  `files = [{ fileName, contentType, base64, width?, height? }]`. It writes each file to
+  Signal's attachments dir itself (`writeAttachmentToDisk`), then hands Signal *on-disk*
+  attachment objects (`{ version: 2, path, localKey, plaintextHash, size, contentType,
+  fileName }`) through the **same `enqueueMessageForSend`** as text — Signal's own send
+  path then thumbnails, re-encodes images at standard quality, uploads to CDN, and delivers.
+  ⚠️ **Signal 8.35 stopped accepting in-memory `data`**: `saveMessage` asserts
+  "Attempting to save a message with binary attachment data", and the schema step that used
+  to move `data` to disk is a no-op now. Signal's composer writes files before sending, but
+  its writer is module-internal (unreachable from `window`), so `writeAttachmentToDisk`
+  mirrors Signal's `encryptAttachmentV2` for local files: 64 random key bytes (AES then MAC
+  key), plaintext zero-padded to Signal's size bucket, AES-256-CBC, IV prepended,
+  HMAC-SHA256 over IV+ciphertext appended, at `attachments.noindex/<2 hex>/<64 hex>`. It
+  reaches `node:fs`/`node:crypto` through `process.getBuiltinModule` (the preload is not
+  sandboxed). If media sends break after a Signal update, re-probe that format in the
+  app.asar bundle (`encryptAttachmentV2`, `writeNewAttachmentData`); a non-image file is
+  the clean round-trip test, since Signal re-encodes images and their bytes change.
   Deliberately *not* the redux composer (`processAttachments`/`sendMultiMediaMessage`):
   that path only populates draft state for a conversation that is open/mounted in
   Signal's own window, so it can't be driven headlessly without `showConversation`.
