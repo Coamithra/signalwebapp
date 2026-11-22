@@ -480,26 +480,22 @@ export function retryErrorReason(msg) {
 // What the thread menu says under the auto-TLDR toggle.
 //
 // Returns either `{ note }` (all well) or a `{ before, code, after }` hint, the
-// one `<code>` span being the binary name. The server only ever reports the two
-// tokens it derived from its own error tags, so an unusable CLI it has not yet
-// diagnosed -- the boot state, before any run has happened -- falls back to
-// naming both requirements rather than guessing which one is missing.
+// one `<code>` span being the setting's name. The server only ever reports the
+// two tokens it derived from its own error tags ('no-key' / 'auth'); app.js
+// adds 'unreachable' when the menu could not ask at all, which must not read as
+// a missing key on a perfectly configured install. Anything else falls back to
+// the missing-key hint, the one thing a fresh install lacks.
 export function tldrHint(data) {
   if (data && data.configured) {
     return { note: 'YouTube links you post here get a short auto-summary.' };
   }
-  const reason = data && data.reason;
-  if (reason === 'auth') {
-    // The one failure the user can fix from here: `login` tells app.js to put a
-    // Log in button under the hint. Not offered for 'not-found' — no browser
-    // flow installs a missing binary, and a button that cannot work is worse
-    // than the sentence explaining what to do.
-    return { before: 'The ', code: 'claude', after: ' CLI on the server is not logged in.', login: true };
+  if (data && data.reason === 'unreachable') {
+    return { note: 'Could not load the auto-TLDR status.' };
   }
-  if (reason === 'not-found') {
-    return { before: 'The ', code: 'claude', after: ' CLI was not found on the server’s PATH.' };
+  if (data && data.reason === 'auth') {
+    return { before: 'The Claude API rejected ', code: 'ANTHROPIC_API_KEY', after: '.' };
   }
-  return { before: 'Needs the ', code: 'claude', after: ' CLI on the server’s PATH, logged in.' };
+  return { before: 'Needs ', code: 'ANTHROPIC_API_KEY', after: ' set on the server (e.g. in .env).' };
 }
 
 // What the status bubble shows for a pipeline stage: the label, a tone, and
@@ -512,29 +508,20 @@ export function tldrHint(data) {
 // but its "For context" block was lost to a failure (a clean done clears the
 // bubble before anything is rendered). It gets dismiss but never Retry: the
 // summary is already in the chat, and a retry would send a whole duplicate.
-// The last four stages are LOCAL ones -- the in-app `claude auth login` never
-// touches the server-side pipeline, so no SSE event ever carries them; app.js
-// sets them on the same per-conversation status it uses for the real stages, so
-// the login lives in the bubble that reported the problem.
-//
-// `kind` is the server's fixed classification of a failure ('auth' /
-// 'not-found'), and only 'auth' earns the Log in button: a missing binary is
-// not something a browser flow can install, so offering one would be a button
-// that cannot work.
 //
 // `extra` carries the stage's own payload: `links`/`skipped` for the picker, and
 // `progress` ({index,total}) for a link the user picked out of a multi-link
 // message. The progress suffix is appended to every label rather than handled
 // per stage -- with one bubble per conversation, "(2 of 3)" is the only thing
 // distinguishing the second link's failure from the first one's.
-export function tldrBubble(stage, reason, kind, extra = {}) {
-  const b = bubbleFor(stage, reason, kind, extra);
+export function tldrBubble(stage, reason, extra = {}) {
+  const b = bubbleFor(stage, reason, extra);
   const p = extra && extra.progress;
   if (p && p.total > 1) b.label = `${b.label} (${p.index} of ${p.total})`;
   return b;
 }
 
-function bubbleFor(stage, reason, kind, extra) {
+function bubbleFor(stage, reason, extra) {
   if (stage === 'choose') {
     // The only stage that asks a question rather than reporting. No Retry (there
     // is no single link in flight yet) and no spinner: nothing is running, and
@@ -547,7 +534,7 @@ function bubbleFor(stage, reason, kind, extra) {
   if (stage === 'done') {
     return {
       label: `Sent without its "For context" block: ${reason || 'research failed'}`,
-      tone: 'info', retry: false, dismiss: true, login: kind === 'auth',
+      tone: 'info', retry: false, dismiss: true,
     };
   }
   if (stage === 'failed') {
@@ -559,7 +546,7 @@ function bubbleFor(stage, reason, kind, extra) {
     const label = extra && extra.origin === 'manual' ? "Couldn't summarize" : 'Auto-TLDR failed';
     return {
       label: `${label}${reason ? `: ${reason}` : ''}`,
-      tone: 'warn', retry: true, dismiss: true, login: kind === 'auth',
+      tone: 'warn', retry: true, dismiss: true,
     };
   }
   if (stage === 'refused') {
@@ -570,36 +557,6 @@ function bubbleFor(stage, reason, kind, extra) {
     return {
       label: `Not summarized: ${reason || 'already done'}`,
       tone: 'info', retry: false, dismiss: true,
-    };
-  }
-  if (stage === 'login') {
-    // ⚠️ The browser normally finishes this by itself — the sign-in page calls
-    // back, the CLI exits logged in, and the user is never shown a code. So the
-    // label waits rather than instructing, and the code field is offered as the
-    // fallback for the flow that does prompt ("paste code here *if prompted*").
-    // Demanding a code up front produced a bubble asking for something that does
-    // not exist in the common path.
-    return {
-      label: 'Waiting for you to finish signing in…',
-      tone: 'work', retry: false, dismiss: false, codeInput: true, cancelLogin: true,
-    };
-  }
-  if (stage === 'logging-in') {
-    return { label: 'Signing in…', tone: 'work', retry: false, dismiss: false };
-  }
-  if (stage === 'login-failed') {
-    return {
-      label: `Sign-in failed${reason ? `: ${reason}` : ''}`,
-      tone: 'warn', retry: false, dismiss: true, login: true,
-    };
-  }
-  if (stage === 'logged-in') {
-    // Asks for Retry so the link that triggered all this can be re-run in one
-    // click. Reached from the thread menu instead there is no link in flight,
-    // and the renderer drops a Retry it has no url for (see renderTldrStatus).
-    return {
-      label: 'Signed in. Auto-TLDR is live again.',
-      tone: 'info', retry: true, dismiss: true,
     };
   }
   const label =

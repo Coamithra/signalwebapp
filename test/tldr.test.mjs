@@ -1,17 +1,17 @@
 // Tests for the pure half of the auto-TLDR pipeline (src/tldr.js).
 //
 // Zero-dep: node's built-in runner (`npm test`). Everything here is pure string
-// work — no CDP, no network, no `claude` spawn. The rest of tldr.js is
-// orchestration over the bridge and the CLI, and is exercised by hand.
+// work — no CDP, no network, no API call. The rest of tldr.js is orchestration
+// over the bridge and the Claude API, and is exercised by hand.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildPrompt, SYSTEM_PROMPT, defangUrls, clampSummary, splitQuoteLine, parseReply,
+  buildPrompt, SYSTEM_PROMPT, defangUrls, clampSummary, parseReply,
   formatTldr, friendlyReason, friendlyContextReason, MAX_TRANSCRIPT_CHARS,
   buildContextPrompt, CONTEXT_SYSTEM_PROMPT, parseContext, MAX_CONTEXT_CHARS,
-  availabilityError, shouldAttempt, AVAILABILITY_RECHECK_MS, AVAILABILITY_TEXT,
-  clampTitle, annotateYouTube,
+  availabilityError, isTransientClaudeError, AVAILABILITY_TEXT,
+  summaryRequest, contextRequest, clampTitle, annotateYouTube,
 } from '../src/tldr.js';
 import { findYouTubeUrl } from '../src/youtube.js';
 
@@ -107,11 +107,11 @@ test('an omitted or empty quote is fine; an omitted summary is not', () => {
   assert.equal(parseReply('{"summary": "   "}'), null);
 });
 
-// Anything unparseable returns null so the caller falls back to the plain-text
-// path — the summary still gets sent, just without a guaranteed quote field.
-const notJson = ['', '   ', 'Just a plain prose summary.', '{not json at all}', '{"summary": 42}', '[1,2,3]'];
+// Anything unparseable returns null, which the caller treats as a failed call
+// to retry -- never as text to send (half a JSON object is not a summary).
+const notJson = ['', '   ', 'Just a plain prose summary.', '{not json at all}', '{"summary": 42}', '[1,2,3]', '{"summary": "cut off mid-'];
 for (const [i, text] of notJson.entries()) {
-  test(`an unusable reply falls through to the text path (#${i + 1})`, () => {
+  test(`an unusable reply is rejected (#${i + 1})`, () => {
     assert.equal(parseReply(text), null);
   });
 }
@@ -186,7 +186,7 @@ test('a cut never leaves half an emoji', () => {
   assert.doesNotMatch(out, /[\uD800-\uDBFF]/);
 });
 
-// --- pulling the quote onto its own line ----------------------------------
+// --- composing the message ------------------------------------------------
 
 const SUMMARY = 'The show is bad. The pacing is worse.';
 const QUOTE = '"What was the point of any event that happened to Zuko?"';
@@ -195,45 +195,10 @@ const PREFIX = '\u{1F916} TLDR: ';
 const CONTEXT_LABEL_LEN = 'For context: '.length;
 const italic = (ranges) => ranges.find((b) => b.style === 2);
 
-test('the final quoted line is split off the summary', () => {
-  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n${QUOTE}`), { summary: SUMMARY, quote: QUOTE });
-  // a single newline, or trailing whitespace, is the same shape
-  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n${QUOTE}\n\n`), { summary: SUMMARY, quote: QUOTE });
-  // curly marks are what the model actually tends to emit
-  const curly = '“Zuko had no arc.”';
-  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n${curly}`), { summary: SUMMARY, quote: curly });
-});
-
-test('markdown emphasis around the quote is stripped, not sent literally', () => {
-  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n*${QUOTE}*`), { summary: SUMMARY, quote: QUOTE });
-  assert.deepEqual(splitQuoteLine(`${SUMMARY}\n\n__${QUOTE}__`), { summary: SUMMARY, quote: QUOTE });
-});
-
-// Anything that isn't unambiguously a quote line stays part of the summary: a
-// mis-split would italicise half a sentence, which is worse than no italics.
-const notQuoteLines = [
-  `${SUMMARY} It is "really, really bad".`,             // quote inlined, no line of its own
-  `${SUMMARY}\n\n"Zuko had no arc." - the narrator`,    // attribution tacked on
-  `${SUMMARY}\n\nAnd one more thought.`,                // an unquoted trailing line
-  `${SUMMARY}\n\nHe says "Zuko had no arc" here.`,      // quote mid-line
-];
-
-for (const [i, text] of notQuoteLines.entries()) {
-  test(`a line that isn't purely a quote stays in the summary (#${i + 1})`, () => {
-    assert.deepEqual(splitQuoteLine(text), { summary: text.trim(), quote: '' });
-    assert.deepEqual(formatTldr(text).bodyRanges, []);
-  });
-}
-
-test('a reply that is nothing but a quote is treated as the summary', () => {
-  assert.deepEqual(splitQuoteLine(QUOTE), { summary: QUOTE, quote: '' });
-  assert.deepEqual(splitQuoteLine(`\n\n${QUOTE}`), { summary: QUOTE, quote: '' });
-});
-
-// --- composing the message ------------------------------------------------
-
+// The schema's string is the quote's wrapper, so it arrives BARE and formatTldr
+// adds the quotation marks.
 test('the italic range covers exactly the quote line', () => {
-  const { body, bodyRanges } = formatTldr(`${SUMMARY}\n\n${QUOTE}`);
+  const { body, bodyRanges } = formatTldr({ summary: SUMMARY, quote: BARE });
   assert.equal(body, `${PREFIX}${SUMMARY}\n\n${QUOTE}`);
   assert.equal(bodyRanges.length, 1);
   const r = italic(bodyRanges);
@@ -242,24 +207,17 @@ test('the italic range covers exactly the quote line', () => {
   assert.equal(r.start + r.length, body.length);
 });
 
-test('no quote line means no ranges at all', () => {
-  const { body, bodyRanges } = formatTldr(SUMMARY);
-  assert.equal(body, `${PREFIX}${SUMMARY}`);
-  assert.deepEqual(bodyRanges, []);
-});
-
-// The JSON path hands the quote over BARE — the schema's string was its wrapper —
-// so formatTldr has to add the quotation marks the plain-text path came with.
-test('a parsed object composes the same message as the text path', () => {
-  const fromObject = formatTldr({ summary: SUMMARY, quote: BARE });
-  const fromText = formatTldr(`${SUMMARY}\n\n${QUOTE}`);
-  assert.deepEqual(fromObject, fromText);
-  assert.equal(fromObject.body, `${PREFIX}${SUMMARY}\n\n${QUOTE}`);
-});
-
 test('a quote the model wrapped anyway is not double-wrapped', () => {
   assert.equal(formatTldr({ summary: SUMMARY, quote: QUOTE }).body.endsWith(`\n\n${QUOTE}`), true);
   assert.doesNotMatch(formatTldr({ summary: SUMMARY, quote: QUOTE }).body, /""/);
+  // curly marks are what the model tends to reach for, and they count as a wrapper too
+  assert.ok(formatTldr({ summary: SUMMARY, quote: '“Zuko had no arc.”' }).body.endsWith('\n\n“Zuko had no arc.”'));
+});
+
+test('markdown emphasis around the quote is stripped, not sent literally', () => {
+  for (const quote of [`*${QUOTE}*`, `__${QUOTE}__`, `*${BARE}*`]) {
+    assert.ok(formatTldr({ summary: SUMMARY, quote }).body.endsWith(`\n\n${QUOTE}`), quote);
+  }
 });
 
 test('an empty or whitespace quote field yields no quote line and no ranges', () => {
@@ -294,15 +252,14 @@ test('a quote spanning caption lines is flattened onto one line', () => {
 });
 
 test('a link in the quote is still defanged before the range is measured', () => {
-  const quoted = '"go to https://youtu.be/dQw4w9WgXcQ now, seriously"';
-  const { body, bodyRanges } = formatTldr(`${SUMMARY}\n\n${quoted}`);
+  const { body, bodyRanges } = formatTldr({ summary: SUMMARY, quote: 'go to https://youtu.be/dQw4w9WgXcQ now, seriously' });
   assert.doesNotMatch(body, /https?:\/\//i);
   assert.equal(findYouTubeUrl(body), null);
   const r = italic(bodyRanges);
   assert.equal(body.slice(r.start, r.start + r.length), '"go to youtu.be/dQw4w9WgXcQ now, seriously"');
 });
 
-test('the object path defangs both fields', () => {
+test('both fields are defanged', () => {
   const { body } = formatTldr({
     summary: 'Watch https://youtu.be/dQw4w9WgXcQ for context.',
     quote: 'mirrored at https://youtu.be/dQw4w9WgXcQ ok',
@@ -313,7 +270,7 @@ test('the object path defangs both fields', () => {
 
 test('clamping the summary never eats the quote line', () => {
   const long = 'word '.repeat(600); // well past MAX_TLDR_CHARS
-  const { body, bodyRanges } = formatTldr(`${long}\n\n${QUOTE}`);
+  const { body, bodyRanges } = formatTldr({ summary: long, quote: BARE });
   assert.ok(body.endsWith(QUOTE), 'quote survives the clamp');
   assert.match(body, /…\n\n"/);
   const r = italic(bodyRanges);
@@ -321,8 +278,7 @@ test('clamping the summary never eats the quote line', () => {
 });
 
 test('a runaway quote is clamped with the closing mark inside', () => {
-  const huge = `"${'long '.repeat(200)}end"`;
-  const { body, bodyRanges } = formatTldr(`${SUMMARY}\n\n${huge}`);
+  const { body, bodyRanges } = formatTldr({ summary: SUMMARY, quote: `${'long '.repeat(200)}end` });
   const r = italic(bodyRanges);
   const line = body.slice(r.start, r.start + r.length);
   assert.ok(line.length <= 300, `quote line is ${line.length} chars`);
@@ -470,17 +426,23 @@ test('a runaway context block is clamped', () => {
 
 // --- failure reasons shown in the UI --------------------------------------
 
-// friendlyReason feeds a bubble in the browser, so it must never pass raw
-// stdout/stderr through — that can carry transcript text or a timedtext URL.
+// friendlyReason feeds a bubble in the browser, so it must never pass an API
+// error body or a fetch error through — that can carry request text or a
+// timedtext URL.
 test('failure reasons are fixed phrases, never the raw error text', () => {
   const cases = [
-    ['claude-not-found', 'Claude Code CLI not found'],
-    ['claude-auth', 'Claude Code CLI is not logged in'],
+    ['claude-no-key', 'no ANTHROPIC_API_KEY is set on the server'],
+    ['claude-auth', 'the Claude API rejected ANTHROPIC_API_KEY'],
     ['claude-timeout', 'timed out'],
-    ['claude-limit', 'Claude usage limit reached'],
+    ['claude-limit', 'Claude API rate limit reached'],
+    ['claude-credits', 'Claude API credits have run out'],
+    ['claude-overloaded', 'the Claude API is overloaded'],
     ['claude-refusal', 'declined to summarize this one'],
     ['claude-no-text:end_turn', 'no summary produced'],
-    ['claude-exit 1', 'summary failed'],
+    ['claude-http 404 not_found_error', 'unknown TLDR_MODEL'],
+    ['claude-network', 'could not reach the Claude API'],
+    ['claude-truncated', 'the reply was cut off'],
+    ['claude-http 400 invalid_request_error', 'summary failed'],
     ['claude-bad-output', 'summary failed'],
   ];
   for (const [msg, expected] of cases) {
@@ -499,38 +461,52 @@ test('an unexpected error never leaks its message into the UI', () => {
 test('context failure reasons are fixed phrases, never the raw error text', () => {
   const cases = [
     ['claude-timeout', 'research timed out'],
-    ['claude-limit', 'Claude usage limit reached'],
-    ['claude-not-found', 'Claude Code CLI not found'],
-    ['claude-auth', 'Claude Code CLI is not logged in'],
-    ['claude-exit error_max_turns', 'research failed'],
+    ['claude-limit', 'Claude API rate limit reached'],
+    ['claude-credits', 'Claude API credits have run out'],
+    ['claude-no-key', 'no ANTHROPIC_API_KEY is set on the server'],
+    ['claude-auth', 'the Claude API rejected ANTHROPIC_API_KEY'],
+    ['claude-network', 'could not reach the Claude API'],
+    ['claude-http 404 not_found_error', 'unknown TLDR_MODEL'],
+    ['claude-paused', 'research failed'],
+    ['claude-truncated', 'research failed'],
     ['claude-bad-output', 'research failed'],
     ['claude-refusal', 'research failed'],
   ];
   for (const [msg, expected] of cases) {
     assert.equal(friendlyContextReason(new Error(msg)), expected, msg);
   }
-  const leaky = new Error('spawn failed at C:\\Users\\someone\\claude with transcript text');
+  const leaky = new Error('fetch failed for https://example.org with transcript text');
   assert.equal(friendlyContextReason(leaky), 'research failed');
   assert.equal(friendlyContextReason(undefined), 'research failed');
 });
 
-// --- CLI availability ------------------------------------------------------
-//
-// `claude --version` exits 0 for a logged-out CLI, so a boot probe alone once
-// reported "configured" while every summary died at claude-auth. Availability is
-// now driven by real runs, and these two helpers are the whole decision.
+// --- retry and availability decisions --------------------------------------
 
-test('only a broken install or a logged-out CLI flips availability', () => {
-  assert.equal(availabilityError(new Error('claude-not-found')), 'not-found');
+test('only the failures a short backoff can clear are retried', () => {
+  for (const msg of ['claude-timeout', 'claude-bad-output', 'claude-overloaded', 'claude-network', 'claude-limit']) {
+    assert.equal(isTransientClaudeError(new Error(msg)), true, msg);
+  }
+  // Deterministic: attempt three fails exactly like attempt one.
+  for (const msg of [
+    'claude-no-key', 'claude-auth', 'claude-credits', 'claude-refusal', 'claude-truncated',
+    'claude-http 404 not_found_error', 'claude-no-text:end_turn',
+  ]) {
+    assert.equal(isTransientClaudeError(new Error(msg)), false, msg);
+  }
+  assert.equal(isTransientClaudeError(undefined), false);
+});
+
+test('only a missing or rejected key counts as "not configured"', () => {
+  assert.equal(availabilityError(new Error('claude-no-key')), 'no-key');
   assert.equal(availabilityError(new Error('claude-auth')), 'auth');
 });
 
-test('a run-specific failure says nothing about the install', () => {
+test('a call-specific failure says nothing about the key', () => {
   // Flipping on any of these would hide the toggle behind a "not configured"
   // hint over one slow or unlucky video.
   for (const msg of [
-    'claude-timeout', 'claude-limit', 'claude-refusal', 'claude-bad-output',
-    'claude-no-text:empty', 'claude-exit 1', 'claude-exit error_max_turns',
+    'claude-timeout', 'claude-limit', 'claude-credits', 'claude-refusal', 'claude-bad-output',
+    'claude-no-text:empty', 'claude-http 404 not_found_error', 'claude-overloaded',
   ]) {
     assert.equal(availabilityError(new Error(msg)), null, msg);
   }
@@ -538,37 +514,57 @@ test('a run-specific failure says nothing about the install', () => {
   assert.equal(availabilityError(new Error('')), null);
 });
 
-test('an unusable CLI is gated off, but only until the recheck window passes', () => {
-  const at = 1_000_000;
-  assert.equal(shouldAttempt({ available: true, unavailableAt: 0, now: at }), true);
-  // Latched: nothing runs while the window is open...
-  assert.equal(shouldAttempt({ available: false, unavailableAt: at, now: at }), false);
-  assert.equal(shouldAttempt({
-    available: false, unavailableAt: at, now: at + AVAILABILITY_RECHECK_MS - 1,
-  }), false);
-  // ...then exactly one attempt is allowed through, and that run re-probes for
-  // real -- which is how a CLI logged into after boot recovers with no restart.
-  assert.equal(shouldAttempt({
-    available: false, unavailableAt: at, now: at + AVAILABILITY_RECHECK_MS,
-  }), true);
-  assert.equal(shouldAttempt({
-    available: false, unavailableAt: at, now: at + AVAILABILITY_RECHECK_MS * 10,
-  }), true);
-  // An available CLI is never gated, whatever the stale timestamp says.
-  assert.equal(shouldAttempt({ available: true, unavailableAt: at, now: at }), true);
+// The watcher reports a missing key with these exact words, so "we never tried"
+// and "we tried and it failed" don't read as two unrelated problems.
+test('AVAILABILITY_TEXT is the same wording a real call\'s failure produces', () => {
+  assert.equal(AVAILABILITY_TEXT['no-key'], friendlyReason(new Error('claude-no-key')));
+  assert.equal(AVAILABILITY_TEXT.auth, friendlyReason(new Error('claude-auth')));
+  for (const tag of ['claude-no-key', 'claude-auth']) {
+    assert.ok(AVAILABILITY_TEXT[availabilityError(new Error(tag))], tag);
+  }
 });
 
-// The watcher reports a known-unusable CLI with these exact words, so "we never
-// tried" and "we tried and it failed" don't read as two unrelated problems.
-test('AVAILABILITY_TEXT is the same wording a real run\'s failure produces', () => {
-  assert.equal(AVAILABILITY_TEXT.auth, friendlyReason(new Error('claude-auth')));
-  assert.equal(AVAILABILITY_TEXT['not-found'], friendlyReason(new Error('claude-not-found')));
-  // Both availability tokens are covered: the watcher indexes this by the token
-  // availabilityError() returns, so a missing key would read as a generic error.
-  for (const tag of ['claude-auth', 'claude-not-found']) {
-    const kind = availabilityError(new Error(tag));
-    assert.ok(AVAILABILITY_TEXT[kind], tag);
-  }
+// --- the two request bodies -------------------------------------------------
+//
+// The privilege split between the passes lives in these two objects, so pin it.
+
+const REQ = { model: 'claude-opus-5-5', effort: 'medium' };
+
+test('the summary call has no tools and an enforced output schema', () => {
+  const prompt = buildPrompt({ transcript: 'captions here', title: 'T' });
+  const body = summaryRequest({ ...REQ, prompt });
+  assert.equal('tools' in body, false, 'the call holding the transcript must have no tools');
+  assert.equal(body.system, SYSTEM_PROMPT);
+  assert.deepEqual(body.messages, [{ role: 'user', content: prompt.user }]);
+  assert.equal(body.output_config.effort, 'medium');
+  const schema = body.output_config.format.schema;
+  assert.equal(body.output_config.format.type, 'json_schema');
+  assert.deepEqual(schema.required, ['summary', 'quote']);
+  assert.equal(schema.additionalProperties, false);
+  // Opus 5.5 rejects sampling params and disabled thinking; neither may creep in.
+  for (const k of ['temperature', 'top_p', 'top_k', 'thinking']) assert.equal(k in body, false, k);
+});
+
+test('the context call gets the hosted web tools and nothing else', () => {
+  const prompt = buildContextPrompt({ author: 'A', title: 'T', summary: 'S.' });
+  const body = contextRequest({ ...REQ, prompt });
+  assert.deepEqual(body.tools.map((t) => t.name).sort(), ['web_fetch', 'web_search']);
+  // Every tool is capped, which caps the research pass's bill as well.
+  for (const t of body.tools) assert.ok(t.max_uses > 0, t.name);
+  assert.equal(body.system, CONTEXT_SYSTEM_PROMPT);
+  assert.equal(body.messages.length, 1);
+  assert.doesNotMatch(body.messages[0].content, /<transcript>/);
+});
+
+test('no field of the context prompt can carry a fetchable URL', () => {
+  // Web fetch opens URLs already in the conversation, so a scheme must not
+  // survive in ANY field -- not just the summary.
+  const { user } = buildContextPrompt({
+    author: 'Chan https://evil.example/a',
+    title: 'Title http://evil.example/b',
+    summary: 'See https://evil.example/c.',
+  });
+  assert.doesNotMatch(user, /https?:\/\//i);
 });
 
 // ---------- the multi-link picker ----------

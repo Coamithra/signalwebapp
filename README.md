@@ -116,8 +116,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
   on, a YouTube link *you* post in that chat gets a short auto-summary, generated from the
   video's transcript by Claude, followed by a verbatim quote and a **"For context"** line on who
   the channel is and how the video's claims hold up (web-researched; `TLDR_CONTEXT=0` turns just
-  that part off). **No API key** — it shells out to the `claude` CLI, so it runs
-  on your Claude subscription (see Configuration). The
+  that part off). It calls the Claude API with your `ANTHROPIC_API_KEY` (see Configuration). The
   transcript is fetched directly (zero-dep); if YouTube bot-gates that, it falls back to
   [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) **when it's installed** — optional, set
   `TLDR_YTDLP=0` to never spawn it.
@@ -131,10 +130,10 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `SIGNAL_CDP_HOST`  | auto (probe)  | Pin the CDP host. Unset: probe `127.0.0.1` then `::1` and accept whichever exposes Signal. Set to one host (e.g. `127.0.0.1`) as an escape hatch. |
 | `GIPHY_API_KEY`    | (unset)       | Enables the `/gif` picker. Free key from [developers.giphy.com](https://developers.giphy.com); until it's set, the picker shows a hint. |
 | `GIPHY_RATING`     | `g`           | Max content rating for GIF results (`g`, `pg`, `pg-13`, `r`). |
-| `TLDR_CLAUDE_BIN`  | `claude`      | The Claude Code CLI that writes the summaries. **Auto-TLDR needs no API key** — it spawns this binary, so summaries bill your Claude subscription. Requires `claude` on the server's `PATH` and logged in; until it resolves, the per-chat toggle shows a hint. If it's installed but the login has expired, you can sign in **from the app** — the thread menu and the failure bubble both offer a **Log in**, which opens the sign-in page and takes the code it gives you back. |
-| `TLDR_MODEL`       | `claude-opus-5` | Model used for the summary. `claude-sonnet-5` / `claude-haiku-4-5` are cheaper against your usage limits. |
+| `ANTHROPIC_API_KEY` | (unset)      | Enables auto-TLDR: the summaries come from the Claude API and are billed to this key (from [platform.claude.com](https://platform.claude.com)). It stays on the server; until it's set, the per-chat toggle shows a hint. Each call's token counts are logged, so the cost shows in the server log. |
+| `TLDR_MODEL`       | `claude-opus-5-5` | Model used for both calls. `claude-sonnet-5-5` is cheaper. Not a Haiku model: the research call's web search/fetch tools need Sonnet 4.6+ or Opus 4.6+. |
 | `TLDR_EFFORT`      | `medium`      | Reasoning effort (`low`…`max`). `low` is slightly faster and still good; above `medium` buys little on a summarization task. |
-| `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude run per link, this one with web search, and the summary waits on it: typically ~10-80s, capped at 5 minutes. Set to `0` to keep summaries only. |
+| `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude API call per link, this one with web search and the bigger share of the cost, and the summary waits on it: typically ~10-80s, capped at 5 minutes. Set to `0` to keep summaries only. |
 | `TLDR_YTDLP`       | `1` (on)      | If [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is on `PATH`, it's used as a transcript fallback when YouTube blocks the direct fetch. Set to `0` to never spawn it (direct fetch only). |
 
 ## Architecture
@@ -146,7 +145,8 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | [`src/bridge.js`](src/bridge.js) | Composes CDP + injected API into clean async methods; drains the in-page event queue and emits realtime events. |
 | [`src/server.js`](src/server.js) | HTTP server: REST API, SSE stream, static UI. Binds to localhost only. |
 | [`src/youtube.js`](src/youtube.js) | Detects YouTube links in a message and fetches a video's transcript (zero-dep). Re-probe here if YouTube changes and auto-TLDR stops working. |
-| [`src/tldr.js`](src/tldr.js) | Auto-TLDR: per-chat settings, the `claude` CLI call, and the watcher that turns a posted YouTube link into a summary. Reuses the bridge's `getMessages`/`sendText`. |
+| [`src/tldr.js`](src/tldr.js) | Auto-TLDR: per-chat settings, the two Claude calls, and the watcher that turns a posted YouTube link into a summary. Reuses the bridge's `getMessages`/`sendText`. |
+| [`src/claude-api.js`](src/claude-api.js) | The Claude Messages API over Node's built-in `fetch` (zero-dep): request headers, `pause_turn` resume, and error mapping. |
 | [`public/`](public/) | The UI — `index.html`, `style.css`, `app.js`. |
 
 ### Why this approach

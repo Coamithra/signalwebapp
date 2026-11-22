@@ -567,7 +567,7 @@ test('tldrBubble: failed warns and offers Retry + dismiss', () => {
 test('tldrBubble: a manual run\'s failure is not labelled "Auto-TLDR"', () => {
   // A run the user started by hand (message menu / Retry) was not automatic,
   // and they are looking at the thing they just clicked — neutral wording.
-  const b = tldrBubble('failed', 'no transcript available', undefined, { origin: 'manual' });
+  const b = tldrBubble('failed', 'no transcript available', { origin: 'manual' });
   assert.match(b.label, /^Couldn't summarize: no transcript available/);
   assert.doesNotMatch(b.label, /Auto-TLDR/);
   // Everything else about the stage is unchanged: it still warns and retries.
@@ -576,11 +576,11 @@ test('tldrBubble: a manual run\'s failure is not labelled "Auto-TLDR"', () => {
   assert.equal(b.dismiss, true);
   // The watcher's own failures keep the old label; so does an event with no
   // recorded origin (a reload lost it — wrongly claiming "manual" is worse).
-  assert.match(tldrBubble('failed', 'x', undefined, {}).label, /^Auto-TLDR failed/);
+  assert.match(tldrBubble('failed', 'x', {}).label, /^Auto-TLDR failed/);
   assert.match(tldrBubble('failed', 'x').label, /^Auto-TLDR failed/);
   // The batch progress suffix still lands on the manual label.
   assert.match(
-    tldrBubble('failed', 'x', undefined, { origin: 'manual', progress: { index: 2, total: 3 } }).label,
+    tldrBubble('failed', 'x', { origin: 'manual', progress: { index: 2, total: 3 } }).label,
     /\(2 of 3\)$/,
   );
 });
@@ -595,24 +595,9 @@ test('tldrBubble: done-with-reason is the quiet sent-without-context notice', ()
   assert.ok(b.label.includes('For context'));
 });
 
-test('tldrBubble: only an auth failure offers the in-app login', () => {
-  // The decision keys off the server's fixed token, never the display text --
-  // `reason` exists to be reworded and must not carry meaning.
-  assert.equal(tldrBubble('failed', 'Claude Code CLI is not logged in', 'auth').login, true);
-  // A missing binary is not something a browser flow can install.
-  assert.equal(tldrBubble('failed', 'Claude Code CLI not found', 'not-found').login, false);
-  assert.equal(tldrBubble('failed', 'timed out').login, false);
-  // Matching on the wording alone would have lit this up.
-  assert.equal(tldrBubble('failed', 'Claude Code CLI is not logged in').login, false);
-  // The sent-without-context notice can offer it too: the block failed on auth,
-  // and logging in fixes the next one.
-  assert.equal(tldrBubble('done', 'Claude usage limit reached').login, false);
-  assert.equal(tldrBubble('done', 'Claude Code CLI is not logged in', 'auth').login, true);
-});
-
 test('tldrBubble: the picker asks rather than reports', () => {
   const links = [{ url: 'https://youtu.be/a', title: 'One' }, { url: 'https://youtu.be/b', title: '' }];
-  const b = tldrBubble('choose', undefined, undefined, { links, skipped: 0 });
+  const b = tldrBubble('choose', undefined, { links, skipped: 0 });
   assert.equal(b.picker, true);
   assert.equal(b.tone, 'info');   // nothing is running yet, so no spinner
   assert.equal(b.retry, false);   // and no single link to re-run
@@ -631,53 +616,18 @@ test('pickerLabel: links past the cap are said out loud, not swallowed', () => {
 });
 
 test('tldrBubble: a chosen batch counts itself through the one bubble', () => {
-  const at = (i, total) => tldrBubble('summarizing', undefined, undefined, { progress: { index: i, total } });
+  const at = (i, total) => tldrBubble('summarizing', undefined, { progress: { index: i, total } });
   assert.match(at(2, 3).label, /\(2 of 3\)$/);
   // A batch of one is just an ordinary run — no counter.
   assert.doesNotMatch(at(1, 1).label, /of 1/);
   // Failures count too: with one bubble per chat it is the only thing telling
   // the second link's failure apart from the first's.
   assert.match(
-    tldrBubble('failed', 'no transcript available', undefined, { progress: { index: 3, total: 3 } }).label,
+    tldrBubble('failed', 'no transcript available', { progress: { index: 3, total: 3 } }).label,
     /no transcript available \(3 of 3\)$/,
   );
   // Everything else keeps working with no extras at all.
   assert.doesNotMatch(tldrBubble('summarizing').label, /of/);
-});
-
-test('tldrBubble: the login stages carry their own controls', () => {
-  const waiting = tldrBubble('login');
-  // The code field is the FALLBACK, not the instruction: the browser normally
-  // finishes the login itself and never shows a code, so this stage waits
-  // (spinner) rather than telling the user to paste something.
-  assert.equal(waiting.tone, 'work');
-  assert.match(waiting.label, /waiting/i);
-  assert.doesNotMatch(waiting.label, /paste/i);
-  assert.equal(waiting.codeInput, true);
-  assert.equal(waiting.cancelLogin, true);
-  assert.equal(waiting.dismiss, false); // Cancel is the way out, not a bare ×
-
-  assert.equal(tldrBubble('logging-in').tone, 'work'); // spinner while it runs
-
-  const failed = tldrBubble('login-failed', 'the code was not accepted');
-  assert.equal(failed.tone, 'warn');
-  assert.equal(failed.login, true); // straight back into another attempt
-  assert.equal(failed.dismiss, true);
-  assert.ok(failed.label.includes('the code was not accepted'));
-  assert.ok(!tldrBubble('login-failed').label.includes('undefined'));
-
-  const ok = tldrBubble('logged-in');
-  assert.equal(ok.tone, 'info');
-  assert.equal(ok.retry, true); // re-runs the link that failed; app.js drops it if there is none
-  assert.equal(ok.dismiss, true);
-  assert.equal(ok.login, undefined);
-});
-
-test('tldrHint: the login button is offered for auth only', () => {
-  assert.equal(tldrHint({ configured: false, reason: 'auth' }).login, true);
-  assert.equal(tldrHint({ configured: false, reason: 'not-found' }).login, undefined);
-  assert.equal(tldrHint({ configured: false }).login, undefined);
-  assert.equal(tldrHint({ configured: true }).login, undefined);
 });
 
 // ---------- import guard ----------
@@ -1037,11 +987,10 @@ test('previewDomain reduces a url to the domain line on the card', () => {
 
 // ---------- auto-TLDR thread-menu hint ----------
 //
-// The hint used to promise "on the server's PATH, logged in" unconditionally,
-// which was unverified: --version cannot prove login. It now names whichever of
-// the two the server actually observed failing.
+// The server reports one of two fixed tokens ('no-key' / 'auth'); the hint
+// names the setting either way, so the user knows what to change.
 
-test('tldrHint: a working CLI gets the note, not a hint', () => {
+test('tldrHint: a configured key gets the note, not a hint', () => {
   const h = tldrHint({ enabled: true, configured: true });
   assert.equal(h.note, 'YouTube links you post here get a short auto-summary.');
   assert.equal(h.before, undefined);
@@ -1049,22 +998,24 @@ test('tldrHint: a working CLI gets the note, not a hint', () => {
   assert.ok(tldrHint({ configured: true, reason: 'auth' }).note);
 });
 
-test('tldrHint: names the specific failure when the server diagnosed one', () => {
-  const auth = tldrHint({ configured: false, reason: 'auth' });
-  assert.equal(auth.code, 'claude');
-  assert.match(auth.after, /not logged in/);
-  assert.equal(auth.note, undefined);
-  const missing = tldrHint({ configured: false, reason: 'not-found' });
-  assert.equal(missing.code, 'claude');
-  assert.match(missing.after, /not found/);
+test('tldrHint: a rejected key says so', () => {
+  const h = tldrHint({ configured: false, reason: 'auth' });
+  assert.equal(h.code, 'ANTHROPIC_API_KEY');
+  assert.match(h.before, /rejected/);
+  assert.equal(h.note, undefined);
 });
 
-test('tldrHint: undiagnosed falls back to naming both requirements', () => {
-  // The boot state (probe failed before any run) and the fetch-failed fallback
-  // in app.js both land here, so neither may guess at a specific cause.
-  for (const data of [{ configured: false }, { configured: false, reason: null }, {}, undefined]) {
+test('tldrHint: a menu that could not reach the server does not blame the key', () => {
+  const h = tldrHint({ enabled: false, configured: false, reason: 'unreachable' });
+  assert.ok(h.note);
+  assert.doesNotMatch(h.note, /ANTHROPIC_API_KEY/);
+});
+
+test('tldrHint: anything else asks for the key', () => {
+  // A fresh install, and the fetch-failed fallback in app.js, both land here.
+  for (const data of [{ configured: false, reason: 'no-key' }, { configured: false }, {}, undefined]) {
     const h = tldrHint(data);
-    assert.equal(h.code, 'claude');
-    assert.match(h.after, /PATH, logged in/);
+    assert.equal(h.code, 'ANTHROPIC_API_KEY');
+    assert.match(h.after, /set on the server/);
   }
 });
