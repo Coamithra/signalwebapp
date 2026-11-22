@@ -28,7 +28,7 @@ Card -> worktree -> PR runbook: follow `~/.claude/CONTRIBUTING.md` (the global g
 - **Board:** Signal Web App, id `6a353dfe`, **local backend** - every board command needs `--backend local`. Lists: To Do / Doing / Done. Atomic pickup (truly atomic on the local backend): `trello --backend local --board 6a353dfe grab --from "To Do" --to "Doing"`.
 - **Default branch:** `main`. **GitHub:** solo public repo (unprotected `main` -> PR + self-merge, no approval needed).
 - **Worktrees:** `.trees/<branch>` (branch-named, gitignored). **Zero-dep app** - no `.env`, no `node_modules`, no build step - so a fresh worktree is ready to run immediately (no bootstrap).
-- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free logic: [public/format.js](public/format.js) (the formatting parser, the shortcode lookups, and — through a fake `document` — `renderFormatted`'s linkification), [public/ui-logic.js](public/ui-logic.js), and the pure helpers of [src/tldr.js](src/tldr.js) + [src/claude-cli.js](src/claude-cli.js). Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
+- **Verification gate:** `npm test` (node's built-in runner, zero-dep) covers the DOM-free logic: [public/format.js](public/format.js) (the formatting parser, the shortcode lookups, and — through a fake `document` — `renderFormatted`'s linkification), [public/ui-logic.js](public/ui-logic.js), the pure helpers of [src/tldr.js](src/tldr.js) (including the shape of both Claude request bodies), and [src/claude-api.js](src/claude-api.js) against a fake `fetch`. Everything else is hands-on: `npm start` with Signal running (`npm run launch-signal`); hit `GET /api/status` -> expect `{"status":"ready", ...}`; exercise the change in a browser (Claude_Preview / claude-in-chrome) and confirm no console errors. **Do all send/receive testing against "Note to Self"** so you never message a real contact.
 
 ## The one thing you must know about the CDP layer
 
@@ -68,8 +68,8 @@ evaluate must target the isolated context's id.
 | [src/bridge.js](src/bridge.js) | Composes CDP + page API into clean async methods; runs the 200ms drain loop that turns `__sbQueue` into `'event'` emissions. |
 | [src/server.js](src/server.js) | `http` server: REST routes, SSE stream (`/api/events`), static files. **Binds `127.0.0.1` only.** |
 | [src/youtube.js](src/youtube.js) | YouTube link detection (`findYouTubeUrls` — plural and deduped by video id, with `findYouTubeUrl` a thin wrapper over it — plus `parseVideoId`), `fetchMeta` (title/channel from oEmbed, also what labels the multi-link picker), `fetchThumbnail` (the guaranteed 480×360 `hqdefault.jpg`, the send path's fallback card image when Signal's grab comes back imageless) + transcript fetch: a zero-dep HTTP path (watch page → `captionTracks` → timedtext `json3`), with a `yt-dlp` fallback (if installed; `TLDR_YTDLP=0` disables it) for when YouTube bot-gates the direct fetch. Its `--sub-langs` request is narrow-then-wide (`subLangsFor`): a trailing `.*` there fans out to every auto-translated track and earns a `429`, so the wide pattern is the fallback, never the first attempt. The one place to re-probe if YouTube changes and auto-TLDR stops working. |
-| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the `claude` CLI spawn, the realtime watcher, the multi-link picker, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
-| [src/claude-cli.js](src/claude-cli.js) | The `claude` CLI as an *installation* rather than as a model: the shared scratch `runDir()`, `authStatus()` (the login probe `--version` could never be), and `createClaudeLogin()` — a browser-driven `claude auth login` so an expired CLI session can be fixed from the app. `tldr.js` owns the prompts; this owns "is it installed and logged in, and can we fix that". |
+| [src/tldr.js](src/tldr.js) | Auto-TLDR feature: per-chat settings (`.tldr-settings.json`), the two Claude calls (summary + "For context" research) and their prompts, the realtime watcher, the multi-link picker, and the manual **"Summarize in chat"** entry point (`summarizeNow` + the `annotateYouTube` message tagging behind it). Pure orchestration over the bridge's existing `getMessages`/`sendText` — no `page-api.js`/`bridge.js` change. |
+| [src/claude-api.js](src/claude-api.js) | The Claude Messages API over built-in `fetch` (zero-dep, no SDK): `createMessage` (headers, refusal fallback, `pause_turn` resume under one deadline) and `errorTag`, which turns every HTTP failure into a fixed `claude-*` tag. `tldr.js` owns the prompts and request bodies; this owns the wire. |
 | [public/](public/) | UI: `index.html`, `style.css`, `app.js`. |
 | [public/format.js](public/format.js) | Message-text formatting, both directions: the composer's markdown-ish syntax + `:shortcode:` emoji → `{ text, bodyRanges }` (`parseFormatting`), Signal's style ranges → DOM (`renderFormatted`), and back to source for the edit box (`toMarkdown`). Also the two lookups behind the composer's shortcode autocomplete: `shortcodeQueryBefore` + `matchShortcodes`, and `linkSpans`, the link detection `renderFormatted` walks alongside the style ranges to make URLs clickable. |
 | [public/ui-logic.js](public/ui-logic.js) | The **DOM-free half of the frontend**: decision logic lifted out of `app.js` so `npm test` can reach it (avatar colour/initials, conversation preview text, the message-menu eligibility rules, the reaction rules (`canReactTo`/`myReaction`/`groupReactions`/`reactionChoices`), attachment kind/icon, the emoji pick-frequency parse + decay/cap maths, `/gif` parsing, the auto-TLDR map eviction, retry error text, the jumbomoji size ladder, the short-clip autoplay threshold, what a quoted reply’s box says). **Nothing here may touch a browser global** — no `document`/`window`/`localStorage`/`fetch`; anything needing one takes it as an argument (storage is passed in as the raw stored string). Put new pure logic here rather than in `app.js`. |
@@ -454,137 +454,21 @@ evaluate must target the isolated context's id.
   runs only on ticks where the lookup reference actually changed, and compares references.
   Everything else about a message already arrives via the slice above; don't widen this
   branch into a general message differ without measuring.
-- **Auto-TLDR YouTube links** — opt-in per chat (thread header → ⋮ menu →
-  `GET`/`POST /api/conversations/:id/tldr`; the set of enabled ids persists in the
-  gitignored `.tldr-settings.json`). [src/tldr.js](src/tldr.js) subscribes to the bridge's
-  own `'event'` stream (same `{type:'messages',conversationId}` events the SSE layer uses)
-  and, for an **enabled** conversation, loads the newest messages and looks for a *new,
-  outgoing* message containing a YouTube link. Only the user's own links trigger it
-  (`msg.direction === 'outgoing'`), and only messages newer than a per-chat timestamp floor
-  (server boot / enable time) so history is never re-summarized; a bounded `processed` set
-  dedupes, keyed `${convId}:${msgId}:${videoId}` -- **per link, not per message**, since one
-  message can carry several videos.
-  **A message with SEVERAL links asks rather than guessing.** One link auto-summarizes as
-  always; two or more emit the `choose` stage instead and summarize *nothing* until the user
-  ticks boxes in the status bubble and presses Summarize. That is the cap: each summary is two
-  whole `claude` runs on the user's subscription, and there is no honest way to guess which of
-  five pasted links they meant. Candidates are labelled with their real titles via `fetchMeta`
-  (oEmbed -- public, ungated, and **not** the transcript path, so listing eight videos costs
-  eight small HTTP calls and no model runs); at most `MAX_PICK_LINKS` (8) are listed and the
-  rest are named as skipped in the question itself, never dropped in silence. The question is
-  held in memory per conversation (newest wins, TTL'd) and served on
-  `GET /api/conversations/:id/tldr` as `pending`, so a page **reload** re-hydrates it --
-  without that the SSE event carrying it would be gone and every link in the message with it.
-  Answering (`POST /api/conversations/:id/tldr/choose {urls}`) consumes it; an empty list is
-  the valid "none of these", which is also what dismissing the bubble sends. The picker is
-  deliberately **not** availability-gated (unlike the single-link path): like `retry()` it is
-  an explicit user action, so a logged-out CLI reports itself truthfully in the bubble a second
-  later instead of the links being thrown away with nothing left to re-run after logging in.
-  Picked links run **sequentially**, and every stage event of the batch carries
-  `progress: {index,total}` -- what lets one bubble per conversation say "(2 of 3)" instead of
-  three runs silently overwriting each other. ⚠️ The consequence worth knowing: a multi-link
-  message posted with no browser tab open summarizes **nothing** until someone opens the app
-  and answers. That is inherent to asking rather than guessing.
-  Once a link is actually going ahead -- the lone link of a single-link message, or one the
-  user picked -- the pipeline is the same for both: it fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a
-  `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks **Claude** for a summary
-  of at most four sentences (~100 words) plus **one verbatim quote from the video** -- 5 to 20
-  words, copied word-for-word, and omitted entirely rather than invented when nothing is worth
-  quoting,
-  and sends `🤖 TLDR: …` back via the bridge's existing `sendText`. **There is no LLM API key.** The
-  summary comes from spawning the **Claude Code CLI** (`claude -p`, see `claudeOnce`), so it
-  bills the user's Claude *subscription* rather than a metered API key -- the same
-  subprocess shape as the `yt-dlp` fallback, and the reason this is a spawn and not a
-  `fetch`. Knobs: `TLDR_CLAUDE_BIN` (default `claude`), `TLDR_MODEL` (default
-  `claude-opus-5`), `TLDR_EFFORT` (default `medium`). Five things about that invocation hold the feature up and
-  should not be dropped casually:
-  (1) the transcript goes in on **stdin**, never argv -- 600k chars would blow past the
-  Windows command-line limit;
-  (2) `cwd` is an empty dir of ours (`runDir`), because `claude` discovers *project* CLAUDE.md
-  and settings from its cwd upward and must not inherit *this* repo's. Never point it at
-  `os.tmpdir()` itself, which is a plausible discovery root full of other processes' files;
-  (3) `--tools ""` `--strict-mcp-config` `--disable-slash-commands` `--setting-sources ""` are
-  cost **and safety** -- measured **48.5k -> 648** cache-creation tokens and ~2s per summary
-  (`--setting-sources ""` is most of that: otherwise the user's global `~/.claude/CLAUDE.md` is
-  prepended to every summary), and a run with no tools, no MCP servers and no user hooks has
-  nothing an untrusted transcript can talk it into doing. Note `--exclude-dynamic-system-prompt-sections`
-  is **ignored** whenever `--system-prompt` is passed, so it is not in the list;
-  (4) `--no-session-persistence`, or `claude -p` writes a full session transcript under
-  `~/.claude/projects/` keyed on cwd -- i.e. up to `MAX_TRANSCRIPT_CHARS` of third-party caption
-  text per video, persisted to the user's home directory forever;
-  (5) failure is reported **in-band**: the JSON envelope can carry `is_error` with exit 0, so
-  the callback checks the envelope even when `err` is null. `isTransientClaudeError` is an
-  allow-list (`timeout`/`bad-output`) for the same reason -- retrying a logged-out CLI or a bad
-  `TLDR_MODEL` just burns three spawns to fail identically. Summaries are also serialized
-  process-wide (`enqueue`), since each one is a whole Node runtime rather than a `fetch`.
-  The transcript and title are untrusted third-party text, so the **instructions live in the
-  system prompt and the transcript in the user turn** (`buildPrompt` returns `{system, user}`)
-  -- that turn split is the real privilege boundary, with the `<transcript>` fence kept on top
-  of it and a literal tag in the captions stripped first. `SYSTEM_PROMPT` asks for a JSON
-  object `{summary, quote}`, so `parseReply` gets the quote as its own field instead of
-  reverse-engineering it out of the reply's last line; `splitQuoteLine` is now only the
-  fallback for a reply that misses the schema. The TLDR can't trigger itself because
-  `defangUrls` **strips the URL scheme** from the summary before sending (`https://youtu.be/x`
-  -> `youtu.be/x`), and `findYouTubeUrl` requires a literal `http(s)://` - the TLDR is an
-  outgoing message, so without that a quoted link would loop. `formatTldr` composes what
-  actually goes out, taking **either** the parsed `{summary, quote}` object **or** the raw
-  reply text; a string goes through `splitQuoteLine`, which peels off the trailing quoted line
-  only when that line is *nothing but* a quoted span -- an attribution or an inline quote stays
-  in the paragraph, since a mis-split would italicise half a sentence. `quoteLine` then
-  normalises either shape into one wrapped, single-line span: the JSON field arrives **bare**
-  (its string was the wrapper) while the text path arrives already wrapped, and a literal `""`
-  means "no quote" rather than an empty pair of marks in the chat. The summary and
-  the quote are clamped separately (`MAX_TLDR_CHARS` / `MAX_QUOTE_CHARS`, so the clamp cannot
-  eat the quote we just went to the trouble of pulling out; `clampSummary` closes an
-  unbalanced quotation mark when it truncates, so a cut never presents half a quote as
-  speech), and the quote line carries a **real Signal ITALIC `bodyRange`** (style 2, offsets
-  measured on the composed string -- the prefix emoji is a surrogate pair) rather than literal
-  `_underscores_`. That is the only reason this feature passes `bodyRanges` to `sendText` at
-  all. **Failures are logged and swallowed — never posted into the
-  chat.**
-- **The "For context" block (`TLDR_CONTEXT`, default on)** - a third section under the quote:
-  who the channel/author is, and how the video's claims hold up. It is a **SECOND, SEPARATE
-  `claude` run** (`researchContext`), and that separation is the whole design, not an
-  accident of implementation:
-  - Researching a channel needs `WebSearch`/`WebFetch`. The **summary** pass holds up to
-    `MAX_TRANSCRIPT_CHARS` of attacker-influenceable caption text, and giving web tools to
-    *that* run is exactly the injection surface `--tools ""` exists to close. **Never merge
-    the two passes.**
-  - So the context pass never sees the transcript. Its entire input is the channel name, the
-    title and the summary pass's own output (~430 chars measured, vs up to 600k) -- still
-    transcript-derived, but a fraction of the surface -- and its tools are limited to search
-    and fetch. Its fence is `<video>`; `stripFenceTags` strips **both** fence names from every
-    untrusted field so a caption cannot forge the *other* pass's delimiter and ride through on
-    the summary handed between them.
-  - ⚠️ **`--tools` and `--allowedTools` are both required.** `--tools` decides which tools
-    exist, `--allowedTools` which may run unprompted. In `-p` mode nobody can approve a
-    permission prompt, so a tool that exists but isn't allowed makes the model ask and then
-    give up -- which looks identical to "researched it and found nothing". That cost a
-    debugging round: 5 turns, 0 searches, both fields empty.
-  - The prompt (`CONTEXT_SYSTEM_PROMPT`) ports the Core Principles of the user's `research`
-    skill rather than loading it: a search blurb is not a source, never fill a gap with a
-    guess, don't supplement from memory, delete anything unsupported, prefer `""` over a
-    hedge. Loading the real skill would need `--setting-sources user`, which re-prepends the
-    global CLAUDE.md to every run and re-enables user hooks on transcript-derived input, and
-    would couple a shipped feature to personal files outside the repo. These guardrails matter
-    more here than anywhere else in the app: the block asserts things about **real people** and
-    auto-sends with nobody reviewing it.
-  - Both fields are optional and an empty pair means **no block at all** (`parseContext`
-    returns null) -- a music video with nothing to fact-check is a normal outcome. The pass is
-    never retried and every failure is swallowed: the summary goes out without the block
-    rather than not at all.
-  - ⚠️ **Title and channel do NOT come from the watch page in practice.** `videoDetails` has
-    both, but that page is the bot-gated one -- on a gated network *every* transcript comes
-    from the yt-dlp fallback, which writes subtitles and nothing else, so both were null for
-    every video (the summary pass had been running title-less long before the context block
-    existed). `fetchMeta` in [src/youtube.js](src/youtube.js) tops up whatever is missing from
-    YouTube's **oEmbed** endpoint -- public, unauthenticated, ungated -- on every path. Only if
-    oEmbed itself fails does the block degrade to researching the summary alone.
-  - The label carries a **BOLD** `bodyRange` (style 1) covering exactly `For context:` and not
-    its trailing space, alongside the quote's ITALIC range.
-  This is entirely server-side (works with no browser tab open) and touches no
-  Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a
-  *YouTube* change will, and the fix is localized to `src/youtube.js`.
+- **Auto-TLDR YouTube links** — opt-in per chat (thread header → ⋮ menu → `GET`/`POST /api/conversations/:id/tldr`; the set of enabled ids persists in the gitignored `.tldr-settings.json`). [src/tldr.js](src/tldr.js) subscribes to the bridge's own `'event'` stream (same `{type:'messages',conversationId}` events the SSE layer uses) and, for an **enabled** conversation, loads the newest messages and looks for a *new, outgoing* message containing a YouTube link. Only the user's own links trigger it (`msg.direction === 'outgoing'`), and only messages newer than a per-chat timestamp floor (server boot / enable time) so history is never re-summarized; a bounded `processed` set dedupes, keyed `${convId}:${msgId}:${videoId}` -- **per link, not per message**, since one message can carry several videos.
+  **A message with SEVERAL links asks rather than guessing.** One link auto-summarizes as always; two or more emit the `choose` stage instead and summarize *nothing* until the user ticks boxes in the status bubble and presses Summarize. That is the cap: each summary is two billed Claude API calls, and there is no honest way to guess which of five pasted links they meant. Candidates are labelled with their real titles via `fetchMeta` (oEmbed -- public, ungated, and **not** the transcript path, so listing eight videos costs eight small HTTP calls and no model calls); at most `MAX_PICK_LINKS` (8) are listed and the rest are named as skipped in the question itself, never dropped in silence. The question is held in memory per conversation (newest wins, TTL'd) and served on `GET /api/conversations/:id/tldr` as `pending`, so a page **reload** re-hydrates it -- without that the SSE event carrying it would be gone and every link in the message with it. Answering (`POST /api/conversations/:id/tldr/choose {urls}`) consumes it; an empty list is the valid "none of these", which is also what dismissing the bubble sends. The picker is deliberately **not** availability-gated (unlike the single-link path): like `retry()` it is an explicit user action, so a missing key reports itself truthfully in the bubble a second later instead of the links being thrown away. Picked links run **sequentially**, and every stage event of the batch carries `progress: {index,total}` -- what lets one bubble per conversation say "(2 of 3)" instead of three runs silently overwriting each other. ⚠️ The consequence worth knowing: a multi-link message posted with no browser tab open summarizes **nothing** until someone opens the app and answers. That is inherent to asking rather than guessing.
+  Once a link is actually going ahead -- the lone link of a single-link message, or one the user picked -- the pipeline is the same for both: it fetches the transcript ([src/youtube.js](src/youtube.js) -- direct HTTP, then a `yt-dlp` fallback if installed; `TLDR_YTDLP=0` disables it), asks **Claude** for a summary of at most four sentences (~100 words) plus **one verbatim quote from the video** -- 5 to 20 words, copied word-for-word, and omitted entirely rather than invented when nothing is worth quoting -- and sends `🤖 TLDR: …` back via the bridge's existing `sendText`.
+  **The model calls go to the Claude Messages API**, billed to `ANTHROPIC_API_KEY` (read from the environment or the repo-root `.env`, server-side only, like `GIPHY_API_KEY`). [src/claude-api.js](src/claude-api.js) is the whole transport: **raw `fetch`, not `@anthropic-ai/sdk`**, because the app is zero-dependency and one endpoint does not justify the first runtime package. It sends `anthropic-version: 2026-10-21` (so **never** add `temperature`/`top_p`/`top_k` -- that version rejects them), opts into the server-side refusal fallback (`fallbacks: "default"` + beta `server-side-fallback-2026-07-01`, since the TLDR auto-sends with nobody watching), resumes a `pause_turn` up to 5 times under **one** deadline, and turns every failure into a fixed `claude-*` tag (`errorTag`) -- the API's error `message` is never surfaced, with the single exception that "credit balance" is how a 400 tells an empty balance apart from a bad request. Knobs: `TLDR_MODEL` (default `claude-opus-5-5`, which cannot disable thinking -- `effort` is the only dial), `TLDR_EFFORT` (default `medium`). Each call logs its token counts (and searches/fetches) so the bill is visible in the server log.
+  The summary request (`summaryRequest`) has **no `tools` at all** -- the call holding up to `MAX_TRANSCRIPT_CHARS` of third-party caption text has nothing it can be talked into doing -- and an enforced **output schema** (`output_config.format`, `{summary, quote}`, `additionalProperties: false`), so `parseReply` always gets the quote as its own field. A reply that still doesn't parse is a truncated one: it is thrown as `claude-bad-output` and **retried, never sent** (half a JSON object is not a summary). `isTransientClaudeError` is an allow-list (`timeout`/`bad-output`/`overloaded`/`network`/`limit`): retrying a missing or rejected key, an empty balance, a refusal or a bad `TLDR_MODEL` just burns three calls to fail identically. The transcript and title are untrusted third-party text, so the **instructions live in the system prompt and the transcript in the user turn** (`buildPrompt` returns `{system, user}`) -- that turn split is the real privilege boundary, with the `<transcript>` fence kept on top of it and a literal tag in the captions stripped first. The TLDR can't trigger itself because `defangUrls` **strips the URL scheme** from the summary before sending (`https://youtu.be/x` -> `youtu.be/x`), and `findYouTubeUrl` requires a literal `http(s)://` - the TLDR is an outgoing message, so without that a quoted link would loop. `formatTldr` composes what actually goes out from the parsed object; `quoteLine` normalises the quote into one wrapped, single-line span (the schema's string arrives **bare**, but the model sometimes wraps it or adds emphasis anyway), and a literal `""` means "no quote" rather than an empty pair of marks in the chat. The summary and the quote are clamped separately (`MAX_TLDR_CHARS` / `MAX_QUOTE_CHARS`, so the clamp cannot eat the quote we just went to the trouble of pulling out; `clampSummary` closes an unbalanced quotation mark when it truncates, so a cut never presents half a quote as speech), and the quote line carries a **real Signal ITALIC `bodyRange`** (style 2, offsets measured on the composed string -- the prefix emoji is a surrogate pair) rather than literal `_underscores_`. That is the only reason this feature passes `bodyRanges` to `sendText` at all. **Failures are logged and swallowed — never posted into the chat.**
+- **The "For context" block (`TLDR_CONTEXT`, default on)** - a third section under the quote: who the channel/author is, and how the video's claims hold up. It is a **SECOND, SEPARATE API call** (`researchContext`), and that separation is the whole design, not an accident of implementation:
+  - Researching a channel needs web access. The **summary** pass holds up to `MAX_TRANSCRIPT_CHARS` of attacker-influenceable caption text, and giving web tools to *that* call is exactly the injection surface its tool-less request exists to close. **Never merge the two passes.**
+  - So the context pass never sees the transcript. Its entire input is the channel name, the title and the summary pass's own output (~430 chars measured, vs up to 600k) -- still transcript-derived, but a fraction of the surface. Its fence is `<video>`; `stripFenceTags` strips **both** fence names from every untrusted field so a caption cannot forge the *other* pass's delimiter and ride through on the summary handed between them.
+  - Its tools (`CONTEXT_TOOLS`) are Anthropic's **hosted** `web_search_20260209` / `web_fetch_20260209`, which run on Anthropic's servers, so nothing executes on this machine. Each has a `max_uses` cap (8 searches, 6 fetches, fetched pages capped at 20k tokens), which bounds the bill as well as the length: searches are billed per search and every fetched page is input tokens on the next turn. ⚠️ **Web fetch opens any URL already in the conversation**, so `buildContextPrompt` runs **every** field (channel, title, summary) through `defangUrls` -- a scheme surviving anywhere would leave "never fetch a URL from here" in the prompt as the only guard.
+  - **No output schema on this call**, unlike the summary: answers built on web search come back with citations, and the API documents structured outputs as incompatible with citations. The prompt asks for the JSON object and `parseContext` digs it out of the (possibly citation-split) text blocks, which `replyText` joins.
+  - The prompt (`CONTEXT_SYSTEM_PROMPT`) ports the Core Principles of the user's `research` skill rather than loading it, so a shipped feature does not depend on personal files outside the repo: a search blurb is not a source, never fill a gap with a guess, don't supplement from memory, delete anything unsupported, prefer `""` over a hedge. These guardrails matter more here than anywhere else in the app: the block asserts things about **real people** and auto-sends with nobody reviewing it.
+  - Both fields are optional and an empty pair means **no block at all** (`researchContext` returns null) -- a music video with nothing to fact-check is a normal outcome. A reply with no JSON object at all is a *failed* call (`claude-bad-output`), not a quiet "nothing found", so it reaches the done-notice. The pass is never retried and every failure is swallowed: the summary goes out without the block rather than not at all.
+  - ⚠️ **Title and channel do NOT come from the watch page in practice.** `videoDetails` has both, but that page is the bot-gated one -- on a gated network *every* transcript comes from the yt-dlp fallback, which writes subtitles and nothing else, so both were null for every video (the summary pass had been running title-less long before the context block existed). `fetchMeta` in [src/youtube.js](src/youtube.js) tops up whatever is missing from YouTube's **oEmbed** endpoint -- public, unauthenticated, ungated -- on every path. Only if oEmbed itself fails does the block degrade to researching the summary alone.
+  - The label carries a **BOLD** `bodyRange` (style 1) covering exactly `For context:` and not its trailing space, alongside the quote's ITALIC range.
+  This is entirely server-side (works with no browser tab open) and touches no Signal internals beyond `getMessages`/`sendText`, so a Signal update won't break it; a *YouTube* change will, and the fix is localized to `src/youtube.js`.
 - **Live UI feedback for auto-TLDR** - the pipeline emits per-stage events
   (`choose` for the multi-link question, then `fetching` -> `summarizing` -> `researching` ->
   `retrying` -> `done`/`failed`, keyed by conversationId) through an `onStage` callback passed
@@ -601,7 +485,7 @@ evaluate must target the isolated context's id.
   notice for it - no Retry, since the summary is already in the chat and a retry
   would send a duplicate. What each stage renders (label/icon/buttons) is the pure
   `tldrBubble` in [public/ui-logic.js](public/ui-logic.js); app.js only paints it.
-  Its 4th argument is the stage's own payload -- `links`/`skipped` for the `choose`
+  Its 3rd argument is the stage's own payload -- `links`/`skipped` for the `choose`
   picker (whose question line is the pure `pickerLabel`), `progress` for one link
   of a picked batch, which it appends to *every* label as "(2 of 3)" rather than
   per stage: with one bubble per chat that suffix is the only thing telling the
@@ -618,8 +502,8 @@ evaluate must target the isolated context's id.
   the automatic retries are spent (the point on a bad day). `reason`
   is sanitized server-side (`friendlyReason` / `friendlyContextReason` in
   [src/tldr.js](src/tldr.js)): both return only fixed phrases derived from our own `claude-*`
-  error tags, so raw stdout/stderr -- which can
-  carry transcript text or a timedtext URL -- never reaches the browser. The bubble shows the open
+  error tags, so an API error body or a fetch error -- which can
+  carry request text or a timedtext URL -- never reaches the browser. The bubble shows the open
   conversation's status, but app.js keeps status **per conversation** in an
   in-memory `Map` (`tldrByConv`) so it survives switching chats and re-hydrates
   when you reopen a chat mid-run; it's cleared on a page reload / server restart
@@ -658,81 +542,7 @@ evaluate must target the isolated context's id.
   more click would send the duplicate the refusal just prevented. The menu entry goes **disabled**
   (`summarized` -> *Already summarized*) rather than vanishing; an option that disappears reads as
   a bug.
-- **Is the CLI usable? — ask `claude auth status`, never `claude --version`.** `--version`
-  exits 0 for a CLI that is installed but logged **out**, so a boot probe built on it once
-  reported "configured" while every summary died at `claude-auth`; for a long time the rule
-  was therefore "the probe may only *lower* availability". `claude auth status --json` is the
-  probe that rule was missing — it prints `{"loggedIn": false, "authMethod": "none",
-  "apiProvider": "firstParty"}` and reports `false` for a credentials file whose token has
-  expired with **no refresh token** (verified against exactly that state), rather than merely
-  "there is a token on disk". So `probe()` in [src/tldr.js](src/tldr.js) may now **raise as
-  well as lower**, and the UI can name the real problem from boot instead of waiting for the
-  first link to fail. ⚠️ Two things it must keep doing: the CLI exits **1** when logged out,
-  so the exit code is not a usable signal on its own (parse stdout, consult the code only when
-  there is nothing to parse — `parseAuthStatus` in [src/claude-cli.js](src/claude-cli.js)),
-  and output it *cannot* parse must answer `null`, never `false` — an unreadable answer means
-  a CLI whose output shape changed and should degrade to finding out on the first real run,
-  not latch the feature off.
-  The other writer is still **real runs**: `noteRunOutcome` lowers `available` when a run
-  fails with one of the two errors that mean the *install* is broken (`availabilityError` ->
-  `'not-found'` / `'auth'`) and raises it when any run succeeds. Everything else — a timeout,
-  a usage limit, a refusal, an empty reply, a bad `TLDR_MODEL` — says something about that one
-  request and must **not** move the flag, or a single slow video would hide the toggle behind
-  a "not configured" hint.
-  Recovery needs no restart: `shouldAttempt` gates the watcher, so an unusable CLI is idle for
-  `AVAILABILITY_RECHECK_MS` (10 min) and then gets **one** attempt through — the run *is* the
-  re-probe, which is why there is no timer and no extra probe spawn. ⚠️ That gate sits **inside
-  `handleConversation`, after a YouTube link has been found**, not on the event handler: a
-  skipped link still emits a `failed` stage carrying `AVAILABILITY_TEXT[reason]`, so the bubble
-  (and its **Log in** button) appears. Moving it back up to the event handler is what made an
-  honest boot probe *worse* than the old optimistic one — the link was skipped in total
-  silence, which is indistinguishable from the feature being switched off, and the one control
-  that fixes it lives in the bubble that never appeared. The cost is one `getMessages` per
-  event for an enabled chat while the CLI is broken. `retry()` is not gated at
-  all (it's the explicit user action, and so the natural "I just logged in" path; a still-broken
-  CLI reports itself truthfully in the bubble within seconds), and a successful in-app login
-  calls `tldr.recheck()` so the feature comes back **immediately** rather than sitting out the
-  rest of the window. The reason rides out to the UI on
-  `GET/POST /api/conversations/:id/tldr` as `{enabled, configured, reason?}`, where `reason` is
-  one of those same two fixed tokens — never CLI output, the same sanitization discipline as
-  `friendlyReason` — and `tldrHint` in [public/ui-logic.js](public/ui-logic.js) turns it into
-  the menu hint, falling back to naming both requirements when the server has not diagnosed
-  which one is missing.
-- **Logging the CLI back in, from the app.** A logged-out CLI used to be a dead end in the UI:
-  the bubble named the problem and offered a Retry that could not work until the user found a
-  terminal. [src/claude-cli.js](src/claude-cli.js) drives `claude auth login` instead, which
-  **works with no TTY** — it prints an OAuth URL on stdout and then blocks reading the code
-  from stdin. Three routes over one pending child: `POST /api/tldr/login` -> `{ok, url}`
-  (idempotent — a second call returns the same pending url rather than spawning a rival
-  child), `POST /api/tldr/login/code {code}`, `POST /api/tldr/login/cancel`. The failure
-  bubble and the thread menu both grow a **Log in** button, and the bubble then shows the
-  sign-in link plus a code field (stages `login` / `logging-in` / `login-failed` /
-  `logged-in`, decided in `tldrBubble` like every other stage — they are **local**, no SSE
-  event ever carries them).
-  ⚠️ **The browser normally finishes the login by itself.** The CLI's prompt reads "Paste code
-  here *if prompted*", and that qualifier is the whole story: the sign-in page calls back, the
-  child **exits** logged in, and the user is never shown a code. So the child's exit is the
-  signal to watch (`settle()` then asks `auth status` — once, not per poll), the browser polls
-  `GET /api/tldr/login/status` -> `{waiting, loggedIn}`, and `submitCode` is the **fallback**
-  for the flow that really does prompt. Building this around the code field as the primary
-  path shipped a bubble demanding a code that does not exist. Do not "simplify" it back.
-  ⚠️ **The pasted code is a credential in transit.** It crosses the loopback-only server
-  straight into the child's stdin and is never logged, echoed in a response, or stored;
-  `validCode` shape-checks it first, rejecting whitespace because a newline is the one
-  character that would turn one stdin write into two answers. Every log line in that module is
-  a fixed string for the same reason.
-  ⚠️ **`parseAuthUrl`'s https + host allow-list is load-bearing**, not tidiness: that URL is
-  rendered as a link the user is being told to click, so anything reaching it would be a
-  phishing link the app vouched for. A `claude` on PATH that isn't the CLI we think it is
-  cannot turn this into a `javascript:` payload or a lookalike host.
-  The **link is a real anchor**, never `window.open()` — and the app must not open a tab of its
-  own: `claude auth login` opens one as it starts, so doing both gave two sign-in windows for
-  one login, only one of which belonged to the exchange the CLI was waiting on. The anchor
-  exists because the CLI's tab opens in the *server machine's* default browser, which need not
-  be the browser the app is open in.
-  Whether the button appears is decided by the stage event's `kind` — the same fixed
-  `'auth'`/`'not-found'` token — and **never** by matching the human-readable `reason` text,
-  which exists to be reworded.
+- **Is auto-TLDR configured? — the key, and nothing else.** `configured` is false in exactly two cases, each a fixed token (`availabilityError`): `'no-key'` (no `ANTHROPIC_API_KEY` at boot -- the key is read once, so this is a fact until restart) and `'auth'` (a real call came back 401/403). Everything else -- a timeout, a rate limit, an empty credit balance, a refusal, a bad `TLDR_MODEL` -- says something about that one call and must **not** move it, or a single slow video would hide the toggle behind a "not configured" hint. A missing key is checked **inside `handleConversation`, after a YouTube link has been found**, not on the event handler: the skipped link still emits a `failed` stage carrying `AVAILABILITY_TEXT['no-key']`, because skipping in silence is indistinguishable from the feature being switched off. A rejected key is **not** a gate: later calls still go through and fail fast (a 401 is free), so a key fixed in the Console recovers on the next link, and `noteRunOutcome` clears `'auth'` on the next success. `retry()`, `summarizeNow()` and the picker are never gated. The reason rides out to the UI on `GET/POST /api/conversations/:id/tldr` as `{enabled, configured, reason?}` -- never API output, the same sanitization discipline as `friendlyReason` -- and `tldrHint` in [public/ui-logic.js](public/ui-logic.js) turns it into the menu hint naming `ANTHROPIC_API_KEY`.
 
 ## Conventions
 
@@ -782,7 +592,7 @@ npm start               # server on http://127.0.0.1:7700
   [src/page-api.js](src/page-api.js). Re-probe with a small CDP `Runtime.evaluate` in the
   isolated context.
 - `npm test` only reaches pure, DOM-free logic ([public/format.js](public/format.js),
-  [public/ui-logic.js](public/ui-logic.js), the helpers in [src/tldr.js](src/tldr.js) and [src/claude-cli.js](src/claude-cli.js)). Nothing that touches
+  [public/ui-logic.js](public/ui-logic.js), the helpers in [src/tldr.js](src/tldr.js) and [src/claude-api.js](src/claude-api.js)). Nothing that touches
   CDP, the server, or a real DOM is covered (notably the emoji popup's state machine, which
   still lives in `app.js`; `renderFormatted` is tested against a hand-rolled fake `document`,
   not a browser), so **also** run the app and exercise the change (the

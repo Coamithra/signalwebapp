@@ -11,7 +11,6 @@ import { fileURLToPath } from 'node:url';
 import { SignalBridge } from './bridge.js';
 import { createTldr } from './tldr.js';
 import { findYouTubeUrl, fetchThumbnail } from './youtube.js';
-import { createClaudeLogin } from './claude-cli.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -58,26 +57,26 @@ bridge.on('status', (s) => broadcast('status', { status: s }));
 // Watches the realtime event stream; when the user posts a YouTube link in a
 // chat they've enabled, it fetches the transcript and posts a Claude-generated
 // TLDR back into that chat (see src/tldr.js). Per-chat on/off persists in a
-// gitignored JSON file at the repo root. Without a usable `claude` binary it
-// stays idle but the toggle still works. TLDR_YTDLP=0 disables the (optional)
-// yt-dlp transcript fallback, leaving only the zero-dep HTTP fetch.
+// gitignored JSON file at the repo root. Without ANTHROPIC_API_KEY it stays idle
+// but the toggle still works. TLDR_YTDLP=0 disables the (optional) yt-dlp
+// transcript fallback, leaving only the zero-dep HTTP fetch.
 //
-// There is no API key: the summary is produced by spawning the Claude Code CLI,
-// which bills the user's Claude subscription rather than a metered API key.
-// TLDR_CLAUDE_BIN points at that binary if it isn't plain `claude` on PATH.
-const TLDR_CLAUDE_BIN = process.env.TLDR_CLAUDE_BIN || 'claude';
-const TLDR_MODEL = process.env.TLDR_MODEL || 'claude-opus-5';
+// The summaries come from the Claude Messages API (src/claude-api.js), billed to
+// ANTHROPIC_API_KEY. Like GIPHY_API_KEY it stays server-side: the browser only
+// ever learns whether one is set.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const TLDR_MODEL = process.env.TLDR_MODEL || 'claude-opus-5-5';
 const TLDR_EFFORT = process.env.TLDR_EFFORT || 'medium';
 const TLDR_YTDLP = !/^(0|false|no)$/i.test(process.env.TLDR_YTDLP || '');
-// The "For context" block: a second, web-researching Claude run per link. The
-// summary send waits on it (~10-80s typical, 5-min ceiling) and it costs real
-// subscription usage, so it's worth being able to turn off on its own without
-// turning off auto-TLDR entirely.
+// The "For context" block: a second, web-researching Claude call per link. The
+// summary send waits on it (~10-80s typical, 5-min ceiling) and it is the
+// expensive half (web searches plus the pages it reads), so it's worth being
+// able to turn off on its own without turning off auto-TLDR entirely.
 const TLDR_CONTEXT = !/^(0|false|no)$/i.test(process.env.TLDR_CONTEXT || '');
 const tldr = createTldr({
   bridge,
   settingsPath: path.join(__dirname, '..', '.tldr-settings.json'),
-  bin: TLDR_CLAUDE_BIN,
+  apiKey: ANTHROPIC_API_KEY,
   model: TLDR_MODEL,
   effort: TLDR_EFFORT,
   ytDlp: TLDR_YTDLP,
@@ -91,16 +90,6 @@ const tldr = createTldr({
   onStage: (e) => broadcast('signal', { type: 'tldr', ...e }),
 });
 tldr.start();
-
-// Browser-driven `claude auth login`, so an expired CLI session can be fixed
-// from the app instead of from a terminal the user may not have open. See
-// src/claude-cli.js for the flow; the routes are near the other /tldr ones.
-const claudeLogin = createClaudeLogin({
-  bin: TLDR_CLAUDE_BIN,
-  // Fires server-side the moment a login is observed to have worked, so the
-  // feature is live again even if nobody has a tab open watching for it.
-  onLogin: () => tldr.recheck(),
-});
 
 // ---- helpers ----
 const CONTENT_TYPES = {
@@ -672,9 +661,9 @@ const server = http.createServer(async (req, res) => {
         catch { return sendJson(res, 400, { error: 'invalid-body' }); }
         tldr.setEnabled(id, !!body.enabled);
       }
-      // `reason` is one of two fixed tokens ('not-found' / 'auth') chosen from
-      // our own error tags, never CLI output, so the hint can say which of the
-      // two things is actually wrong.
+      // `reason` is one of two fixed tokens ('no-key' / 'auth') chosen from our
+      // own error tags, never API output, so the hint can say which of the two
+      // things is actually wrong.
       const reason = tldr.unavailableReason();
       // `pending` is an unanswered multi-link picker (see MAX_PICK_LINKS in
       // src/tldr.js). It rides on this route because the stage events that
@@ -730,50 +719,6 @@ const server = http.createServer(async (req, res) => {
       catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
       const result = tldr.summarizeNow(id, String(body.url || ''));
       return sendJson(res, result.ok ? 200 : 400, result);
-    }
-
-    // ---- in-app `claude auth login` -----------------------------------------
-    // Three routes driving one pending child process (src/claude-cli.js): start
-    // it and get the sign-in URL, hand back the code the user pastes, or bail
-    // out. Not per-conversation — the CLI's login is machine-wide — but the UI
-    // that offers it is the per-chat TLDR bubble.
-    //
-    // ⚠️ The pasted code is a credential in transit. It is written straight to
-    // the child's stdin and is never logged, echoed in a response, or stored.
-    // These routes are as loopback-only as the rest of the server (see the
-    // 127.0.0.1 bind); do not add a path that reflects the code back.
-
-    // POST /api/tldr/login   -> { ok, url } — spawn the login, return where to
-    // send the user. Idempotent: a second call returns the same pending URL.
-    if (pathname === '/api/tldr/login' && req.method === 'POST') {
-      const result = await claudeLogin.begin();
-      return sendJson(res, result.ok ? 200 : 502, result);
-    }
-
-    // GET /api/tldr/login/status   -> { waiting, loggedIn }
-    // Polled by the browser while a login is in flight. `waiting` is true until
-    // the child exits; `loggedIn` is null until then and carries the verdict
-    // afterwards. THIS is the normal completion path — the sign-in page calls
-    // back and the CLI exits logged in, with no code ever shown to the user.
-    if (pathname === '/api/tldr/login/status' && req.method === 'GET') {
-      return sendJson(res, 200, claudeLogin.status());
-    }
-
-    // POST /api/tldr/login/code { code }   -> { ok } — the FALLBACK path, for
-    // the flow that really does prompt for a code ("paste code here *if
-    // prompted*"). Availability is re-probed by the onLogin hook, not here.
-    if (pathname === '/api/tldr/login/code' && req.method === 'POST') {
-      let body;
-      try { body = await readBody(req, 4 * 1024); }
-      catch { return sendJson(res, 400, { ok: false, error: 'invalid-body' }); }
-      const result = await claudeLogin.submitCode(body.code);
-      return sendJson(res, result.ok ? 200 : 400, result);
-    }
-
-    // POST /api/tldr/login/cancel   -> { ok } — drop a login the user backed out
-    // of, so the next attempt starts from a clean child.
-    if (pathname === '/api/tldr/login/cancel' && req.method === 'POST') {
-      return sendJson(res, 200, claudeLogin.cancel());
     }
 
     // GET /api/gif/search?q=&limit=   (empty q -> trending)

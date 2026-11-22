@@ -734,10 +734,6 @@ button.reaction-pill:hover { background: var(--bg-hover); border-color: var(--te
   display: flex; align-items: center; justify-content: center;
 }
 .tldr-dismiss:hover { background: var(--bg-hover); color: var(--text); }
-/* The in-app `claude auth login` form. The bubble is inline-flex on one line for
-   every other stage; this one carries a link, a text field and two buttons, so
-   it is allowed to wrap rather than squeezing the code field to nothing. */
-.tldr-bubble:has(.tldr-code) { flex-wrap: wrap; max-width: 92%; }
 /* The multi-link picker. Every other stage is one line of status; this one asks
    a question with a list under it and its buttons under that, so the bubble is
    allowed to wrap and the list claims a whole row of its own. */
@@ -753,11 +749,4 @@ button.reaction-pill:hover { background: var(--bg-hover); border-color: var(--te
 /* One line per video: a title is untrusted third-party text and can be long, and
    the point of the list is scanning it, not reading every word. */
 .tldr-pick-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tldr-link { color: var(--accent); text-decoration: underline; }
-.tldr-code {
-  flex: 1 1 190px; min-width: 0; border-radius: 8px; padding: 4px 9px;
-  border: 1px solid var(--border); background: var(--bg); color: var(--text);
-  font-size: 12.5px; font-family: inherit;
-}
-.tldr-code:focus { outline: none; border-color: var(--accent); }
 .dlg-btn.danger:hover { filter: brightness(1.08); }
