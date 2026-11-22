@@ -18,7 +18,8 @@ function fakeFetch(...responses) {
     calls.push({ url, init, body: JSON.parse(init.body) });
     const r = responses.shift();
     if (r instanceof Error) throw r;
-    return { ok: r.status < 300, status: r.status, json: async () => r.json };
+    const headers = new Map(Object.entries(r.headers || {}));
+    return { ok: r.status < 300, status: r.status, headers, json: async () => r.json };
   };
   fn.calls = calls;
   return fn;
@@ -69,11 +70,28 @@ test('a research pass that never stops pausing is cut off', async () => {
   assert.equal(f.calls.length, 5);
 });
 
-test('a refusal, an empty reply and a malformed body are distinct tags', async () => {
+test('a refusal, a truncation, an empty reply and a malformed body are distinct tags', async () => {
   const run = (...r) => createMessage({ apiKey: 'k', body: BODY, timeoutMs: 1000, fetchImpl: fakeFetch(...r) });
   await assert.rejects(run(message([text('no')], 'refusal')), /claude-refusal/);
-  await assert.rejects(run(message([], 'max_tokens')), /claude-no-text:max_tokens/);
+  // Cut off by max_tokens -- with or without partial text -- is one tag, so a
+  // half-written JSON object is never mistaken for a schema miss and retried.
+  await assert.rejects(run(message([], 'max_tokens')), /claude-truncated/);
+  await assert.rejects(run(message([text('{"summary": "half')], 'max_tokens')), /claude-truncated/);
+  await assert.rejects(run(message([], 'end_turn')), /claude-no-text:end_turn/);
   await assert.rejects(run({ status: 200, json: { nope: true } }), /claude-bad-output/);
+});
+
+test('a 429 carries its retry-after, in milliseconds', async () => {
+  const limited = { status: 429, headers: { 'retry-after': '7' }, json: { type: 'error', error: { type: 'rate_limit_error' } } };
+  await assert.rejects(
+    createMessage({ apiKey: 'k', body: BODY, timeoutMs: 1000, fetchImpl: fakeFetch(limited) }),
+    (e) => e.message === 'claude-limit' && e.retryAfterMs === 7000,
+  );
+  const bare = { status: 429, json: { type: 'error', error: { type: 'rate_limit_error' } } };
+  await assert.rejects(
+    createMessage({ apiKey: 'k', body: BODY, timeoutMs: 1000, fetchImpl: fakeFetch(bare) }),
+    (e) => e.message === 'claude-limit' && e.retryAfterMs === undefined,
+  );
 });
 
 test('a network failure and a timeout are told apart', async () => {

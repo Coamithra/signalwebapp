@@ -2046,7 +2046,7 @@ async function openThreadMenu() {
   const id = state.activeId;
   let data;
   try { data = await api(`/api/conversations/${encodeURIComponent(id)}/tldr`); }
-  catch { data = { enabled: false, configured: false }; }
+  catch { data = { enabled: false, configured: false, reason: 'unreachable' }; }
   if (state.activeId !== id || !threadMenuOpen) return; // switched/closed while loading
   buildThreadMenu(id, data);
 }

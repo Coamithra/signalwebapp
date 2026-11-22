@@ -439,9 +439,11 @@ test('failure reasons are fixed phrases, never the raw error text', () => {
     ['claude-overloaded', 'the Claude API is overloaded'],
     ['claude-refusal', 'declined to summarize this one'],
     ['claude-no-text:end_turn', 'no summary produced'],
-    ['claude-http 404 not_found_error', 'summary failed'],
+    ['claude-http 404 not_found_error', 'unknown TLDR_MODEL'],
+    ['claude-network', 'could not reach the Claude API'],
+    ['claude-truncated', 'the reply was cut off'],
+    ['claude-http 400 invalid_request_error', 'summary failed'],
     ['claude-bad-output', 'summary failed'],
-    ['claude-network', 'summary failed'],
   ];
   for (const [msg, expected] of cases) {
     assert.equal(friendlyReason(new Error(msg)), expected, msg);
@@ -463,7 +465,10 @@ test('context failure reasons are fixed phrases, never the raw error text', () =
     ['claude-credits', 'Claude API credits have run out'],
     ['claude-no-key', 'no ANTHROPIC_API_KEY is set on the server'],
     ['claude-auth', 'the Claude API rejected ANTHROPIC_API_KEY'],
+    ['claude-network', 'could not reach the Claude API'],
+    ['claude-http 404 not_found_error', 'unknown TLDR_MODEL'],
     ['claude-paused', 'research failed'],
+    ['claude-truncated', 'research failed'],
     ['claude-bad-output', 'research failed'],
     ['claude-refusal', 'research failed'],
   ];
@@ -483,7 +488,7 @@ test('only the failures a short backoff can clear are retried', () => {
   }
   // Deterministic: attempt three fails exactly like attempt one.
   for (const msg of [
-    'claude-no-key', 'claude-auth', 'claude-credits', 'claude-refusal',
+    'claude-no-key', 'claude-auth', 'claude-credits', 'claude-refusal', 'claude-truncated',
     'claude-http 404 not_found_error', 'claude-no-text:end_turn',
   ]) {
     assert.equal(isTransientClaudeError(new Error(msg)), false, msg);

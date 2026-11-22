@@ -66,8 +66,11 @@ const CLAUDE_TIMEOUT_MS = 120_000;
 const SUMMARY_MAX_TOKENS = 16_000;
 // Retry a transient failure (our timeout, a dropped connection, an overloaded
 // or rate-limited API, a reply that missed the schema) with exponential
-// backoff: waits 2s, 4s between 3 total attempts.
+// backoff: waits 2s, 4s between 3 total attempts -- or longer when a 429 says
+// so, up to RETRY_AFTER_CAP_MS, past which the call is given up on rather than
+// holding a summary back for minutes.
 const CLAUDE_MAX_ATTEMPTS = 3;
+const RETRY_AFTER_CAP_MS = 30_000;
 const CLAUDE_BACKOFF_MS = 2000;
 
 function log(...args) { console.log('  [tldr]', ...args); }
@@ -186,6 +189,9 @@ export function friendlyReason(e) {
   if (/^claude-limit/.test(msg)) return 'Claude API rate limit reached';
   if (/^claude-credits/.test(msg)) return 'Claude API credits have run out';
   if (/^claude-overloaded/.test(msg)) return 'the Claude API is overloaded';
+  if (/^claude-network/.test(msg)) return 'could not reach the Claude API';
+  if (/^claude-http 404/.test(msg)) return 'unknown TLDR_MODEL';
+  if (/^claude-truncated/.test(msg)) return 'the reply was cut off';
   if (/^claude-refusal/.test(msg)) return 'declined to summarize this one';
   if (/^claude-no-text/.test(msg)) return 'no summary produced';
   return 'summary failed';
@@ -204,6 +210,8 @@ export function friendlyContextReason(e) {
   if (/^claude-credits/.test(msg)) return 'Claude API credits have run out';
   if (/^claude-no-key/.test(msg)) return AVAILABILITY_TEXT['no-key'];
   if (/^claude-auth/.test(msg)) return AVAILABILITY_TEXT.auth;
+  if (/^claude-network/.test(msg)) return 'could not reach the Claude API';
+  if (/^claude-http 404/.test(msg)) return 'unknown TLDR_MODEL';
   return 'research failed';
 }
 
@@ -520,10 +528,12 @@ function logUsage(label, message) {
 // exists to close. So this pass never sees the transcript. Its whole input is
 // the channel name, the title, and the summary the first pass already produced:
 // a few hundred characters, still transcript-derived but a fraction of the
-// surface, all defanged so no URL survives into it. Its tools are Anthropic's
-// hosted web search and fetch, run on Anthropic's servers -- nothing here
-// executes on this machine -- and web fetch only opens URLs already in the
-// conversation, which after defanging means search results.
+// surface, all defanged. Its tools are Anthropic's hosted web search and
+// fetch, run on Anthropic's servers -- nothing here executes on this machine.
+// Web fetch only opens URLs already in the conversation; defanging strips every
+// http(s):// scheme from the input, which narrows that to search results in
+// practice but is NOT a proven guarantee -- a bare `host/path` survives it, and
+// the API does not document whether it would count one as a URL.
 //
 // The guardrails in the prompt are the Core Principles of the user's `research`
 // skill (~/.claude/skills/research/SKILL.md), ported rather than loaded, so a
@@ -602,7 +612,9 @@ export const CONTEXT_SYSTEM_PROMPT = [
 // The context pass's user turn. Every field is defanged as well as de-fenced:
 // web fetch can open any URL already in the conversation, so a scheme surviving
 // in a title or a summary would leave "never fetch a URL from here" as the only
-// thing between a planted link and an outbound fetch. Make it structural.
+// thing between a planted link and an outbound fetch. Defanging removes the
+// scheme, not the host and path, so this narrows the surface rather than
+// closing it -- the prompt's instruction is still the second layer.
 export function buildContextPrompt({ author, title, summary }) {
   const clean = (s) => defangUrls(stripFenceTags(s));
   const lines = ['<video>'];
@@ -682,13 +694,15 @@ async function summarize({ apiKey, model, effort, transcript, title, onRetry }) 
       const { text, message } = await createMessage({ apiKey, body, timeoutMs: CLAUDE_TIMEOUT_MS });
       logUsage('summary', message);
       const parsed = parseReply(text);
-      // The schema makes this a truncated reply (max_tokens), which is worth one
-      // more go -- and never worth sending: half a JSON object is not a summary.
+      // A finished reply that still missed the schema (a fallback model, say):
+      // worth one more go, and never worth sending as text. A reply cut off by
+      // max_tokens never gets here -- createMessage throws claude-truncated.
       if (!parsed) throw new Error('claude-bad-output');
       return parsed;
     } catch (e) {
       if (attempt >= CLAUDE_MAX_ATTEMPTS || !isTransientClaudeError(e)) throw e;
-      const wait = CLAUDE_BACKOFF_MS * 2 ** (attempt - 1); // 2s, 4s
+      if (e.retryAfterMs > RETRY_AFTER_CAP_MS) throw e;
+      const wait = Math.max(CLAUDE_BACKOFF_MS * 2 ** (attempt - 1), e.retryAfterMs || 0); // 2s, 4s
       log(`claude transient (${e.message}) — retry ${attempt + 1}/${CLAUDE_MAX_ATTEMPTS} in ${wait}ms`);
       if (onRetry) onRetry(e);
       await new Promise((r) => setTimeout(r, wait));

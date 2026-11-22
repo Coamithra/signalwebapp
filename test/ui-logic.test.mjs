@@ -1005,6 +1005,12 @@ test('tldrHint: a rejected key says so', () => {
   assert.equal(h.note, undefined);
 });
 
+test('tldrHint: a menu that could not reach the server does not blame the key', () => {
+  const h = tldrHint({ enabled: false, configured: false, reason: 'unreachable' });
+  assert.ok(h.note);
+  assert.doesNotMatch(h.note, /ANTHROPIC_API_KEY/);
+});
+
 test('tldrHint: anything else asks for the key', () => {
   // A fresh install, and the fetch-failed fallback in app.js, both land here.
   for (const data of [{ configured: false, reason: 'no-key' }, { configured: false }, {}, undefined]) {

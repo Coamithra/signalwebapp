@@ -481,12 +481,16 @@ export function retryErrorReason(msg) {
 //
 // Returns either `{ note }` (all well) or a `{ before, code, after }` hint, the
 // one `<code>` span being the setting's name. The server only ever reports the
-// two tokens it derived from its own error tags ('no-key' / 'auth'), and
-// anything else -- including a menu that could not reach the server at all --
-// falls back to the missing-key hint, the one thing a fresh install lacks.
+// two tokens it derived from its own error tags ('no-key' / 'auth'); app.js
+// adds 'unreachable' when the menu could not ask at all, which must not read as
+// a missing key on a perfectly configured install. Anything else falls back to
+// the missing-key hint, the one thing a fresh install lacks.
 export function tldrHint(data) {
   if (data && data.configured) {
     return { note: 'YouTube links you post here get a short auto-summary.' };
+  }
+  if (data && data.reason === 'unreachable') {
+    return { note: 'Could not load the auto-TLDR status.' };
   }
   if (data && data.reason === 'auth') {
     return { before: 'The Claude API rejected ', code: 'ANTHROPIC_API_KEY', after: '.' };

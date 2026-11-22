@@ -131,7 +131,7 @@ server is ready, the status dot goes amber→green and the chat list fills in au
 | `GIPHY_API_KEY`    | (unset)       | Enables the `/gif` picker. Free key from [developers.giphy.com](https://developers.giphy.com); until it's set, the picker shows a hint. |
 | `GIPHY_RATING`     | `g`           | Max content rating for GIF results (`g`, `pg`, `pg-13`, `r`). |
 | `ANTHROPIC_API_KEY` | (unset)      | Enables auto-TLDR: the summaries come from the Claude API and are billed to this key (from [platform.claude.com](https://platform.claude.com)). It stays on the server; until it's set, the per-chat toggle shows a hint. Each call's token counts are logged, so the cost shows in the server log. |
-| `TLDR_MODEL`       | `claude-opus-5-5` | Model used for both calls. `claude-sonnet-5-5` / `claude-haiku-5-5` are cheaper. |
+| `TLDR_MODEL`       | `claude-opus-5-5` | Model used for both calls. `claude-sonnet-5-5` is cheaper. Not a Haiku model: the research call's web search/fetch tools need Sonnet 4.6+ or Opus 4.6+. |
 | `TLDR_EFFORT`      | `medium`      | Reasoning effort (`low`…`max`). `low` is slightly faster and still good; above `medium` buys little on a summarization task. |
 | `TLDR_CONTEXT`     | `1` (on)      | The **"For context"** block appended to each summary — who the channel is, and how the video's claims hold up. It's a second Claude API call per link, this one with web search and the bigger share of the cost, and the summary waits on it: typically ~10-80s, capped at 5 minutes. Set to `0` to keep summaries only. |
 | `TLDR_YTDLP`       | `1` (on)      | If [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) is on `PATH`, it's used as a transcript fallback when YouTube blocks the direct fetch. Set to `0` to never spawn it (direct fetch only). |

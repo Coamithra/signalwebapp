@@ -83,9 +83,21 @@ export async function createMessage({ apiKey, body, timeoutMs, fetchImpl = globa
       if (signal.aborted) throw new Error('claude-timeout');
       /* not JSON: handled below */
     }
-    if (!res.ok) throw new Error(errorTag(res.status, data));
+    if (!res.ok) {
+      const err = new Error(errorTag(res.status, data));
+      // A 429 says how long to back off; the caller decides whether that fits
+      // its own budget. Seconds on the wire, milliseconds on the error.
+      const after = Number(res.headers && res.headers.get && res.headers.get('retry-after'));
+      if (Number.isFinite(after) && after > 0) err.retryAfterMs = after * 1000;
+      throw err;
+    }
     if (!data || !Array.isArray(data.content)) throw new Error('claude-bad-output');
     if (data.stop_reason === 'refusal') throw new Error('claude-refusal');
+    // Out of output budget (thinking counts against it). Whatever text came out
+    // is cut off mid-reply, and re-sending the identical request -- up to a
+    // 600k-char transcript -- would most likely be cut off again, so this is
+    // its own tag and callers do not retry it.
+    if (data.stop_reason === 'max_tokens') throw new Error('claude-truncated');
     if (data.stop_reason === 'pause_turn') {
       if (turn + 1 >= MAX_CONTINUATIONS) throw new Error('claude-paused');
       // Resume: the same request with the paused assistant turn appended. No
